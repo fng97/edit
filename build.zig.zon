@@ -14,6 +14,10 @@
             .url = "git+https://github.com/fng97/clang-tools#9bb34f85bc4ec0680a253a46cdc06645c12742e5",
             .hash = "clang_tools-20.1.0-sP0RDzMPAAAbyDobHcJNeecPLVmePZPcBc7APbxdjK5g",
         },
+        .tidy = .{
+            .url = "git+https://github.com/fng97/tidy.zig#b1ed3a3d23f7bfdb4e318eeed7e707c31def46e3",
+            .hash = "tidy-0.0.1-LZGHAXQuAAC_vBPc4rAGAngwvf4cpStmOWgEJgvMdhso",
+        },
     },
     .minimum_zig_version = "0.15.2",
     .paths = .{""},
