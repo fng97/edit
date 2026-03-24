@@ -1,5 +1,5 @@
 .{
-    .name = .cpp_template,
+    .name = .edit,
     .version = "0.0.1",
     .dependencies = .{
         .googletest = .{
@@ -16,11 +16,6 @@
         },
     },
     .minimum_zig_version = "0.15.2",
-    .paths = .{
-        "LICENSE",
-        "build.zig",
-        "build.zig.zon",
-        "src",
-    },
-    .fingerprint = 0x73dbe1b1173d6866,
+    .paths = .{""},
+    .fingerprint = 0x8135de1afd6a8cb4,
 }
