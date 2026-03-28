@@ -5,20 +5,37 @@
 #include <termios.h>
 #include <unistd.h>
 
+#define CTRL_KEY(k) ((k) & 0x1f)
+
 struct termios termios_original;
 
-void die(const char* s) {
+void clear_screen() {
+    // Clear the screen with an *escape sequence*. These start with the escape character,
+    // '\x1b,' followed by a '['. '2J' clears the entire screen. We are using VT100 escape
+    // sequences. See https://vt100.net/docs/vt100-ug/chapter3.html. For J (Erase In Display),
+    // see https://vt100.net/docs/vt100-ug/chapter3.html#ED.
+    write(STDOUT_FILENO, "\x1b[2J", 4);  // 4 because we are writing 4 bytes
+    // Place the cursor at the start of the screen. For H (Cursor Position), see
+    // http://vt100.net/docs/vt100-ug/chapter3.html#CUP. The default arguments 1, 1 (rows and
+    // columns are indexed from 1).
+    write(STDOUT_FILENO, "\x1b[H", 3);
+}
+
+// Prints the error corresponding with the current value of the global `errno`, prefixed with the
+// string passed in ("{s}: {errno_message}").
+void panic(const char* s) {
+    clear_screen();
     perror(s);
     exit(1);
 }
 
 void disable_raw_mode() {
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original) == -1) die("tcsetattr");
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &termios_original) == -1) panic("tcsetattr");
 }
 
 int main() {
     // Enable raw mode. See https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html.
-    if (tcgetattr(STDIN_FILENO, &termios_original) == -1) die("tcgetattr");
+    if (tcgetattr(STDIN_FILENO, &termios_original) == -1) panic("tcgetattr");
     atexit(disable_raw_mode);  // restore original settings on exit
     struct termios raw = termios_original;
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
@@ -27,18 +44,29 @@ int main() {
     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_cc[VMIN] = 0;
     raw.c_cc[VTIME] = 1;
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)) die("tcsetattr");
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)) panic("tcsetattr");
 
     while (1) {
-        // read(STDIN_FILENO, &c, 1) == 1 && c != 'q'
-        char c = '\0';
-        if (read(STDIN_FILENO, &c, 1) == -1) die("read");
-        if (iscntrl(c)) {
-            printf("%d\r\n", c);
-        } else {
-            printf("%d ('%c')\r\n", c, c);
+        // Refresh screen.
+        clear_screen();
+        // Draw tildes at the start of lines that come after the end of our file.
+        for (int y = 0; y < 24; y++) write(STDOUT_FILENO, "~\r\n", 3);
+        write(STDOUT_FILENO, "\x1b[H", 3);  // reposition cursor at start
+
+        // Try read until we get a character.
+        int nread = 0;
+        char c;
+        while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+            if (nread == -1) panic("read");
         }
-        if (c == 'q') break;
+
+        // Handle character.
+        switch (c) {
+            case CTRL_KEY('q'):
+                clear_screen();
+                exit(0);
+                break;
+        }
     }
 
     return 0;
