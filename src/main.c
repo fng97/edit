@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -40,6 +41,22 @@ void disable_raw_mode() {
     if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &state.termios_original) == -1) panic("tcsetattr");
 }
 
+struct AppendBuffer {
+    char* buf;
+    int len;
+};
+
+void ab_append(struct AppendBuffer* ab, const char* s, int len) {
+    // FIXME: Don't risk reallocating each time. Just use one huge buffer.
+    char* new = realloc(ab->buf, ab->len + len);  // make sure we have room for new string
+    if (new == NULL) panic("realloc");
+    memcpy(&new[ab->len], s, len);  // append new string to end of old one
+    ab->buf = new;
+    ab->len += len;
+}
+
+void ab_free(struct AppendBuffer* ab) { free(ab->buf); }
+
 int main() {
     // Enable raw mode. See https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html.
     if (tcgetattr(STDIN_FILENO, &state.termios_original) == -1) panic("tcgetattr");
@@ -62,15 +79,20 @@ int main() {
 
     while (1) {
         // Refresh screen.
-        clear_screen();
+        struct AppendBuffer ab = {.buf = NULL, .len = 0};
+        ab_append(&ab, "\x1b[2J", 4);
+        ab_append(&ab, "\x1b[H", 3);
         // Draw tildes at the start of lines that come after the end of our file.
         for (int y = 0; y < state.rows; y++) {
-            write(STDOUT_FILENO, "~", 1);
+            ab_append(&ab, "~", 1);
             // Make sure not to write a newline after the final row. The terminal would scroll to
             // make room, removing a line we printed.
-            if (y < state.rows - 1) write(STDOUT_FILENO, "\r\n", 2);
+            if (y < state.rows - 1) ab_append(&ab, "\r\n", 2);
         }
-        write(STDOUT_FILENO, "\x1b[H", 3);  // reposition cursor at start
+        ab_append(&ab, "\x1b[H", 3);  // reposition cursor at start
+        // Write the buffer to the screen.
+        write(STDOUT_FILENO, ab.buf, ab.len);
+        ab_free(&ab);
 
         // Try read until we get a character.
         int nread = 0;
