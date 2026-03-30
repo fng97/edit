@@ -78,10 +78,11 @@ int main() {
     state.rows = ws.ws_row;
 
     while (1) {
-        // Refresh screen.
+        // Update screen: write everything to a buffer then write it to stdout in one go.
         struct AppendBuffer ab = {.buf = NULL, .len = 0};
-        ab_append(&ab, "\x1b[2J", 4);
-        ab_append(&ab, "\x1b[H", 3);
+        ab_append(&ab, "\x1b[?25l", 6);  // hide the cursor
+        ab_append(&ab, "\x1b[2J", 4);    // clear screen
+        ab_append(&ab, "\x1b[H", 3);     // place cursor at start
         // Draw tildes at the start of lines that come after the end of our file.
         for (int y = 0; y < state.rows; y++) {
             ab_append(&ab, "~", 1);
@@ -89,8 +90,9 @@ int main() {
             // make room, removing a line we printed.
             if (y < state.rows - 1) ab_append(&ab, "\r\n", 2);
         }
-        ab_append(&ab, "\x1b[H", 3);  // reposition cursor at start
-        // Write the buffer to the screen.
+        ab_append(&ab, "\x1b[H", 3);     // reposition cursor at start
+        ab_append(&ab, "\x1b[?25h", 6);  // unhide the cursor
+        // Write the buffer to update the screen.
         write(STDOUT_FILENO, ab.buf, ab.len);
         ab_free(&ab);
 
