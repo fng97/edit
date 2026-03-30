@@ -11,6 +11,7 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 struct State {
+    int cx, cy;
     int cols;
     int rows;
     struct termios termios_original;
@@ -77,6 +78,9 @@ int main() {
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) panic("ioctl");
     state.cols = ws.ws_col;
     state.rows = ws.ws_row;
+    // Init cursor coordinates to start of screen (top left).
+    state.cx = 0;
+    state.cy = 0;
 
     while (1) {
         // Update screen: write everything to a buffer then write it to stdout in one go.
@@ -105,7 +109,10 @@ int main() {
             // make room, removing a line we printed.
             if (y < state.rows - 1) ab_append(&ab, "\r\n", 2);
         }
-        ab_append(&ab, "\x1b[H", 3);     // reposition cursor at start
+        // Position cursor.
+        char buf[32];
+        snprintf(buf, sizeof(buf), "\x1b[%d;%dH", state.cy + 1, state.cx + 1);
+        ab_append(&ab, buf, strlen(buf));
         ab_append(&ab, "\x1b[?25h", 6);  // unhide the cursor
         // Write the buffer to update the screen.
         write(STDOUT_FILENO, ab.buf, ab.len);
@@ -123,6 +130,19 @@ int main() {
             case CTRL_KEY('q'):
                 clear_screen();
                 exit(0);
+                break;
+
+            case 'h':
+                state.cx--;
+                break;
+            case 'j':
+                state.cy++;
+                break;
+            case 'k':
+                state.cy--;
+                break;
+            case 'l':
+                state.cx++;
                 break;
         }
     }
