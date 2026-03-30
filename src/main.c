@@ -7,6 +7,9 @@
 #include <termios.h>
 #include <unistd.h>
 
+#define EDIT_VERSION "0.0.1"
+#define CTRL_KEY(k) ((k) & 0x1f)
+
 struct State {
     int cols;
     int rows;
@@ -14,8 +17,6 @@ struct State {
 };
 
 struct State state;
-
-#define CTRL_KEY(k) ((k) & 0x1f)
 
 void clear_screen() {
     // Clear the screen with an *escape sequence*. These start with the escape character,
@@ -84,7 +85,20 @@ int main() {
         ab_append(&ab, "\x1b[H", 3);     // place cursor at start
         // Draw tildes at the start of lines that come after the end of our file.
         for (int y = 0; y < state.rows; y++) {
-            ab_append(&ab, "~", 1);
+            if (y == state.rows / 3) {  // a third of the way down
+                char welcome[80];
+                int len = snprintf(welcome, sizeof(welcome), "Edit v%s", EDIT_VERSION);
+                if (len > state.cols) len = state.cols;
+                int padding = (state.cols - len) / 2;
+                if (padding) {
+                    ab_append(&ab, "~", 1);
+                    padding--;
+                }
+                while (padding--) ab_append(&ab, " ", 1);
+                ab_append(&ab, welcome, len);
+            } else {
+                ab_append(&ab, "~", 1);
+            }
             // Clear the rest of the line (rather than clearing the whole screen in one go above).
             ab_append(&ab, "\x1b[K", 3);
             // Make sure not to write a newline after the final row. The terminal would scroll to
