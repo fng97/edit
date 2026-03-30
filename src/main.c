@@ -125,24 +125,34 @@ int main() {
             if (nread == -1) panic("read");
         }
 
+        // Handle escape sequences.
+        if (c == '\x1b') {
+            char seq[3];
+            // Try read the escape sequence.
+            if ((read(STDIN_FILENO, &seq[0], 1) == 1) && (read(STDIN_FILENO, &seq[1], 1) == 1) &&
+                (seq[0] == '[')) {
+                switch (seq[1]) {
+                    case 'A':
+                        state.cy--;
+                        continue;
+                    case 'B':
+                        state.cy++;
+                        continue;
+                    case 'C':
+                        state.cx++;
+                        continue;
+                    case 'D':
+                        state.cx--;
+                        continue;
+                }
+            }
+        }
+
         // Handle character.
         switch (c) {
             case CTRL_KEY('q'):
                 clear_screen();
                 exit(0);
-                break;
-
-            case 'h':
-                state.cx--;
-                break;
-            case 'j':
-                state.cy++;
-                break;
-            case 'k':
-                state.cy--;
-                break;
-            case 'l':
-                state.cx++;
                 break;
         }
     }
