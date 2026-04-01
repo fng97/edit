@@ -134,21 +134,34 @@ int main() {
             // Try read the escape sequence.
             if ((read(STDIN_FILENO, &seq[0], 1) == 1) && (read(STDIN_FILENO, &seq[1], 1) == 1) &&
                 (seq[0] == '[')) {
-                assert(state.cy <= state.rows - 1);
-                assert(state.cx <= state.cols - 1);
-                switch (seq[1]) {
-                    case 'A':  // up arrow key
-                        if (state.cy != 0) state.cy--;
-                        continue;
-                    case 'B':  // down arrow key
-                        if (state.cy != state.rows - 1) state.cy++;
-                        continue;
-                    case 'C':  // right arrow key
-                        if (state.cx != state.cols - 1) state.cx++;
-                        continue;
-                    case 'D':  // left arrow key
-                        if (state.cx != 0) state.cx--;
-                        continue;
+                if (seq[1] >= '0' && seq[1] <= '9') {
+                    if (read(STDIN_FILENO, &seq[2], 1) == 1 && seq[2] == '~') {
+                        switch (seq[1]) {
+                            case '5':  // page up key
+                                state.cy = 0;
+                                continue;
+                            case '6':  // page down key
+                                state.cy = state.rows - 1;
+                                continue;
+                        }
+                    }
+                } else {
+                    assert(state.cy <= state.rows - 1);
+                    assert(state.cx <= state.cols - 1);
+                    switch (seq[1]) {
+                        case 'A':  // up arrow key
+                            if (state.cy != 0) state.cy--;
+                            continue;
+                        case 'B':  // down arrow key
+                            if (state.cy != state.rows - 1) state.cy++;
+                            continue;
+                        case 'C':  // right arrow key
+                            if (state.cx != state.cols - 1) state.cx++;
+                            continue;
+                        case 'D':  // left arrow key
+                            if (state.cx != 0) state.cx--;
+                            continue;
+                    }
                 }
             }
         }
