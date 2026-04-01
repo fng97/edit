@@ -1,5 +1,6 @@
 #include <ctype.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,9 +12,10 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 struct State {
-    int cx, cy;
-    int cols;
-    int rows;
+    uint16_t cx;
+    uint16_t cy;
+    uint16_t cols;
+    uint16_t rows;
     struct termios termios_original;
 };
 
@@ -45,10 +47,10 @@ void disable_raw_mode() {
 
 struct AppendBuffer {
     char* buf;
-    int len;
+    uint32_t len;
 };
 
-void ab_append(struct AppendBuffer* ab, const char* s, int len) {
+void ab_append(struct AppendBuffer* ab, const char* s, uint32_t len) {
     // FIXME: Don't risk reallocating each time. Just use one huge buffer.
     char* new = realloc(ab->buf, ab->len + len);  // make sure we have room for new string
     if (new == NULL) panic("realloc");
@@ -88,12 +90,12 @@ int main() {
         ab_append(&ab, "\x1b[?25l", 6);  // hide the cursor
         ab_append(&ab, "\x1b[H", 3);     // place cursor at start
         // Draw tildes at the start of lines that come after the end of our file.
-        for (int y = 0; y < state.rows; y++) {
+        for (uint16_t y = 0; y < state.rows; y++) {
             if (y == state.rows / 3) {  // a third of the way down
                 char welcome[80];
-                int len = snprintf(welcome, sizeof(welcome), "Edit v%s", EDIT_VERSION);
+                uint8_t len = snprintf(welcome, sizeof(welcome), "Edit v%s", EDIT_VERSION);
                 if (len > state.cols) len = state.cols;
-                int padding = (state.cols - len) / 2;
+                uint16_t padding = (state.cols - len) / 2;
                 if (padding) {
                     ab_append(&ab, "~", 1);
                     padding--;
@@ -119,7 +121,7 @@ int main() {
         ab_free(&ab);
 
         // Try read until we get a character.
-        int nread = 0;
+        int32_t nread = 0;
         char c;
         while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
             if (nread == -1) panic("read");
