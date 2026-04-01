@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <stdint.h>
@@ -133,18 +134,20 @@ int main() {
             // Try read the escape sequence.
             if ((read(STDIN_FILENO, &seq[0], 1) == 1) && (read(STDIN_FILENO, &seq[1], 1) == 1) &&
                 (seq[0] == '[')) {
+                assert(state.cy <= state.rows - 1);
+                assert(state.cx <= state.cols - 1);
                 switch (seq[1]) {
-                    case 'A':
-                        state.cy--;
+                    case 'A':  // up arrow key
+                        if (state.cy != 0) state.cy--;
                         continue;
-                    case 'B':
-                        state.cy++;
+                    case 'B':  // down arrow key
+                        if (state.cy != state.rows - 1) state.cy++;
                         continue;
-                    case 'C':
-                        state.cx++;
+                    case 'C':  // right arrow key
+                        if (state.cx != state.cols - 1) state.cx++;
                         continue;
-                    case 'D':
-                        state.cx--;
+                    case 'D':  // left arrow key
+                        if (state.cx != 0) state.cx--;
                         continue;
                 }
             }
