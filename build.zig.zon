@@ -3,11 +3,11 @@
     .version = "0.0.1",
     .dependencies = .{
         .tidy = .{
-            .url = "git+https://github.com/fng97/tidy.zig#b1ed3a3d23f7bfdb4e318eeed7e707c31def46e3",
-            .hash = "tidy-0.0.1-LZGHAXQuAAC_vBPc4rAGAngwvf4cpStmOWgEJgvMdhso",
+            .url = "git+https://github.com/fng97/tidy.zig#8796fb6e7a52c551217b9d067035d8983fd7663e",
+            .hash = "tidy-0.0.1-LZGHAS4wAABW0X8WCwFX4s3PCHNlijOSONQnpAB7BpSI",
         },
     },
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .paths = .{""},
     .fingerprint = 0x8135de1afd6a8cb4,
 }
