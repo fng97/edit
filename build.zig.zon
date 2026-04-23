@@ -1,6 +1,6 @@
 .{
     .name = .edit,
-    .version = "0.0.1",
+    .version = "0.0.0",
     .dependencies = .{
         .tidy = .{
             .url = "git+https://github.com/fng97/tidy.zig#8796fb6e7a52c551217b9d067035d8983fd7663e",
