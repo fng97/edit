@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     });
 
     run_step.dependOn(blk: {
-        const exe = b.addExecutable(.{ .name = "zig_template", .root_module = mod });
+        const exe = b.addExecutable(.{ .name = "edit", .root_module = mod });
         b.installArtifact(exe);
         const run = b.addRunArtifact(exe);
         run.step.dependOn(b.getInstallStep()); // run from prefix
