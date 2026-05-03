@@ -1,12 +1,16 @@
 const std = @import("std");
+const assert = std.debug.assert;
 
 pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+
     const stdin = std.Io.File.stdin();
-    var stdin_buffer: [16]u8 = undefined;
+    var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
     // TODO: Later, we'll want to buffer the whole screen and flush in one go. Will need to work out
     // the maximum buffer size based on resolution and rendering.
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    const writer: *std.Io.Writer = &stdout_writer.interface;
 
     // Put terminal in raw mode. Restore original termios on exit.
     const termios_original = try std.posix.tcgetattr(stdin.handle);
@@ -25,10 +29,36 @@ pub fn main(init: std.process.Init) !void {
     termios_raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
     termios_raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
-    // TODO: Also do this from the panic handler.
+    // TODO: Combine this with KKP deinit (in the right order) and also do this from the panic
+    // handler.
     defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original) catch {}; // restore on exit
 
-    // TODO: Initialise Kitty Keyboard Protocol and defer deinit.
+    // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes) then
+    // immediately query KKP flags to confirm the protocol is supported. Also request Primary Device
+    // Attributes (DA1) as a fallback so we don't hang on the read if the KKP query isn't
+    // recognised.
+    try writer.writeAll("\x1b[>1u"); // CSI > 1 u <- enable KKP mode 1
+    try writer.writeAll("\x1b[?u"); // CSI ? u <- query KKP flags
+    try writer.writeAll("\x1b[c"); // CSI c <- query device attributes
+    try writer.flush(); // send KKP init and queries to stdout
+    const read_size = try std.posix.read(stdin.handle, &stdin_buffer);
+    // Assert KKP mode 1 enabled: CSI ? 1 u.
+    if (!std.mem.startsWith(u8, stdin_buffer[0..read_size], "\x1b[?1u"))
+        return error.KittyKeyboardProtocolNotSupported;
+    // Make sure DA1 was consumed. Read again if not yet received.
+    var da1 = stdin_buffer[5..read_size]; // KKP response was 5 bytes
+    if (da1.len == 0) {
+        const da1_size = try std.posix.read(stdin.handle, &stdin_buffer);
+        da1 = stdin_buffer[0..da1_size];
+    }
+    // DA1 starts with CSI ? and ends with c.
+    if (!std.mem.startsWith(u8, da1, "\x1b[?") or !std.mem.endsWith(u8, da1, "c"))
+        return error.InvalidDa1Response;
+    // Pop KKP flags on exit (restore terminal state).
+    defer {
+        writer.writeAll("\x1b[<u") catch std.debug.print("Failed to pop KKP flags", .{});
+        writer.flush() catch std.debug.print("Failed to pop KKP flags");
+    }
 
     event_loop: while (true) {
         const size = try std.posix.read(stdin.handle, &stdin_buffer);
