@@ -29,8 +29,9 @@ pub fn main(init: std.process.Init) !void {
     var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
     // TODO: Later, we'll want to buffer the whole screen and flush in one go. Will need to work out
     // the maximum buffer size based on resolution and rendering.
+    const stdout = std.Io.File.stdout();
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout_writer = stdout.writer(io, &stdout_buffer);
     const writer: *std.Io.Writer = &stdout_writer.interface;
 
     // Put terminal in raw mode. Restore original termios on exit.
@@ -80,7 +81,16 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.startsWith(u8, da1, "\x1b[?") or !std.mem.endsWith(u8, da1, "c"))
         return error.InvalidDa1Response;
 
+    // Get window size.
+    var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    assert(std.posix.errno(err) == .SUCCESS);
+
+    // Render welcome screen.
     try writer.writeAll("\x1b[2J"); // clear the screen
+    try writer.writeAll("\x1b[H"); // place cursor at top left
+    for (0..winsize.row - 1) |_| try writer.writeAll("~\r\n"); // start empty rows with ~
+    try writer.writeAll("~"); // don't add newline on final row (otherwise scrolls to make room)
     try writer.writeAll("\x1b[H"); // place cursor at top left
     try writer.flush();
 
@@ -88,7 +98,5 @@ pub fn main(init: std.process.Init) !void {
         const size = try std.posix.read(stdin.handle, &stdin_buffer);
         const bytes = stdin_buffer[0..size];
         for (bytes) |byte| if (byte == 'q') break :event_loop;
-        _ = try stdout_writer.interface.write(bytes);
-        try stdout_writer.interface.flush();
     }
 }
