@@ -1,6 +1,14 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+var termios_original: ?std.posix.termios = null;
+pub fn panic_after_termios_restore(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    if (termios_original) |t| std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {};
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+pub const panic = std.debug.FullPanic(panic_after_termios_restore);
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
@@ -13,8 +21,8 @@ pub fn main(init: std.process.Init) !void {
     const writer: *std.Io.Writer = &stdout_writer.interface;
 
     // Put terminal in raw mode. Restore original termios on exit.
-    const termios_original = try std.posix.tcgetattr(stdin.handle);
-    var termios_raw = termios_original;
+    termios_original = try std.posix.tcgetattr(stdin.handle);
+    var termios_raw = termios_original.?;
     termios_raw.iflag.BRKINT = false;
     termios_raw.iflag.ICRNL = false;
     termios_raw.iflag.INPCK = false;
@@ -29,9 +37,7 @@ pub fn main(init: std.process.Init) !void {
     termios_raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
     termios_raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
-    // TODO: Combine this with KKP deinit (in the right order) and also do this from the panic
-    // handler.
-    defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original) catch {}; // restore on exit
+    defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original.?) catch {}; // restore on exit
 
     // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes) then
     // immediately query KKP flags to confirm the protocol is supported. Also request Primary Device
