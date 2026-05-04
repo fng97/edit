@@ -1,3 +1,16 @@
+//                                 ASCII TABLE
+//                                 ===========
+//
+//      0    1    2    3    4    5    6    7    8    9    A    B    C    D    E    F
+// 0x0  NUL  SOH  STX  ETX  EOT  ENQ  ACK  BEL  BS   HT   LF   VT   FF   CR   SO   SI
+// 0x1  DLE  DC1  DC2  DC3  DC4  NAK  SYN  ETB  CAN  EM   SUB  ESC  FS   GS   RS   US
+// 0x2  SP   !    "    #    $    %    &    '    (    )    *    +    ,    -    .    /
+// 0x3  0    1    2    3    4    5    6    7    8    9    :    ;    <    =    >    ?
+// 0x4  @    A    B    C    D    E    F    G    H    I    J    K    L    M    N    O
+// 0x5  P    Q    R    S    T    U    V    W    X    Y    Z    [    \    ]    ^    _
+// 0x6  `    a    b    c    d    e    f    g    h    i    j    k    l    m    n    o
+// 0x7  p    q    r    s    t    u    v    w    x    y    z    {    |    }    ~    DEL
+
 const std = @import("std");
 const assert = std.debug.assert;
 
