@@ -12,16 +12,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-var termios_original: ?std.posix.termios = null;
-pub fn panic_after_termios_restore(msg: []const u8, first_trace_addr: ?usize) noreturn {
-    @branchHint(.cold);
-    if (termios_original) |t| { // only do this once
-        std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {};
-        termios_original = null;
-    }
-    std.debug.defaultPanic(msg, first_trace_addr);
-}
-pub const panic = std.debug.FullPanic(panic_after_termios_restore);
+// TODO: Add dbg()
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -58,41 +49,56 @@ pub fn main(init: std.process.Init) !void {
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
     defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original.?) catch {}; // restore on exit
 
+    // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
+    // the convention for fullscreen TUIs like vim, tmux, etc.
+    try writer.writeAll("\x1b[?1049h"); // CSI ? 1049 h <- enable alt screen
     // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes) then
-    // immediately query KKP flags to confirm the protocol is supported. Also request Primary Device
-    // Attributes (DA1) as a fallback so we don't hang on the read if the KKP query isn't
-    // recognised.
+    // immediately query KKP flags to confirm the protocol is supported. Follow with window size
+    // query. We need this anyway but used as fallback here so we don't hang on the read if the KKP
+    // query isn't recognised.
     try writer.writeAll("\x1b[>1u"); // CSI > 1 u <- enable KKP mode 1
     try writer.writeAll("\x1b[?u"); // CSI ? u <- query KKP flags
-    try writer.writeAll("\x1b[c"); // CSI c <- query device attributes
-    try writer.flush(); // send KKP init and queries to stdout
+    try writer.writeAll("\x1b[18t"); // CSI 18 t <- query window size
+    try writer.flush();
+    defer { // clean up terminal on exit -- safe to send even if KKP disabled or not in alt mode
+        writer.writeAll("\x1b[<u") catch {}; // CSI < u <- pop KKP flags
+        writer.writeAll("\x1b[?1049l") catch {}; // CSI ? 1049 l <- exit alt screen
+        writer.writeAll("\x1b[2J") catch {}; // CSI 2 J <- clear the screen
+        writer.writeAll("\x1b[H") catch {}; // CSI H <- place cursor at top left
+        writer.flush() catch {};
+    }
     // Assert KKP mode 1 enabled: CSI ? 1 u (5 bytes).
     if (!std.mem.eql(u8, try reader.take(5), "\x1b[?1u"))
         return error.KittyKeyboardProtocolNotSupported;
-    defer {
-        writer.writeAll("\x1b[<u") catch {}; // pop KKP flags
-        writer.writeAll("\x1b[2J") catch {}; // clear the screen
-        writer.writeAll("\x1b[H") catch {}; // place cursor at top left
-        writer.flush() catch {};
-    }
-    // Make sure DA1 was consumed. DA1 starts with CSI ? and ends with c (only c in sequence).
-    if (!std.mem.eql(u8, try reader.take(3), "\x1b[?")) return error.MissingDA1Response;
-    _ = try reader.discardDelimiterInclusive('c');
-
-    // Get window size.
-    // TODO: Query it with CSI 18 t instead of doing ioctl.
-    // try writer.writeAll("\x1b[18t"); // query window size
-    var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-    const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
-    assert(std.posix.errno(err) == .SUCCESS);
+    // Read window size. Response format is CSI 8 ; <rows> ; <cols> t.
+    assert(std.mem.eql(u8, try reader.take(4), "\x1b[8;"));
+    const rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
+    const cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter('t')).?, 10);
+    _ = cols;
 
     // Render welcome screen.
     try writer.writeAll("\x1b[2J"); // clear the screen
     try writer.writeAll("\x1b[H"); // place cursor at top left
-    for (0..winsize.row - 1) |_| try writer.writeAll("~\r\n"); // start empty rows with ~
+    for (0..rows - 1) |_| try writer.writeAll("~\r\n"); // start empty rows with ~
     try writer.writeAll("~"); // don't add newline on final row (otherwise scrolls to make room)
     try writer.writeAll("\x1b[H"); // place cursor at top left
     try writer.flush();
 
     while (true) if (try reader.takeByte() == 'q') break;
 }
+
+var termios_original: ?std.posix.termios = null;
+/// Wrap panic handler so that we can restore terminal state first. Calls default panic after
+/// cleanup. Cleanup logic runs only once.
+pub const panic = std.debug.FullPanic(struct {
+    pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+        @branchHint(.cold);
+        if (termios_original) |t| {
+            // Pop KKP flags (CSI < u) and exit alt screen (CSI ? 1049 l).
+            _ = std.c.write(std.Io.File.stdout().handle, "\x1b[<u\x1b[?1049l", 12);
+            std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
+            termios_original = null; // so we only do this once
+        }
+        std.debug.defaultPanic(msg, first_trace_addr);
+    }
+}.panic);
