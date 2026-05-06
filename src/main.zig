@@ -51,20 +51,20 @@ pub fn main(init: std.process.Init) !void {
 
     // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
     // the convention for fullscreen TUIs like vim, tmux, etc.
-    try writer.writeAll("\x1b[?1049h"); // CSI ? 1049 h <- enable alt screen
+    try writer.writeAll("\x1b[?1049h"); // enable alt screen
     // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes) then
     // immediately query KKP flags to confirm the protocol is supported. Follow with window size
     // query. We need this anyway but used as fallback here so we don't hang on the read if the KKP
     // query isn't recognised.
-    try writer.writeAll("\x1b[>1u"); // CSI > 1 u <- enable KKP mode 1
-    try writer.writeAll("\x1b[?u"); // CSI ? u <- query KKP flags
-    try writer.writeAll("\x1b[18t"); // CSI 18 t <- query window size
+    try writer.writeAll("\x1b[>1u"); // enable KKP mode 1
+    try writer.writeAll("\x1b[?u"); // query KKP flags
+    try writer.writeAll("\x1b[18t"); // query window size
     try writer.flush();
     defer { // clean up terminal on exit -- safe to send even if KKP disabled or not in alt mode
-        writer.writeAll("\x1b[<u") catch {}; // CSI < u <- pop KKP flags
-        writer.writeAll("\x1b[?1049l") catch {}; // CSI ? 1049 l <- exit alt screen
-        writer.writeAll("\x1b[2J") catch {}; // CSI 2 J <- clear the screen
-        writer.writeAll("\x1b[H") catch {}; // CSI H <- place cursor at top left
+        writer.writeAll("\x1b[<u") catch {}; // pop KKP flags
+        writer.writeAll("\x1b[?1049l") catch {}; // exit alt screen
+        writer.writeAll("\x1b[2J") catch {}; // clear the screen
+        writer.writeAll("\x1b[H") catch {}; // place cursor at top left
         writer.flush() catch {};
     }
     // Assert KKP mode 1 enabled: CSI ? 1 u (5 bytes).
