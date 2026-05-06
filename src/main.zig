@@ -67,19 +67,16 @@ pub fn main(init: std.process.Init) !void {
         writer.writeAll("\x1b[H") catch {}; // place cursor at top left
         writer.flush() catch {};
     }
-    // Assert KKP mode 1 enabled: CSI ? 1 u (5 bytes).
-    if (!std.mem.eql(u8, try reader.take(5), "\x1b[?1u"))
-        return error.KittyKeyboardProtocolNotSupported;
-    // Read window size. Response format is CSI 8 ; <rows> ; <cols> t.
-    assert(std.mem.eql(u8, try reader.take(4), "\x1b[8;"));
-    const rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-    const cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter('t')).?, 10);
-    _ = cols;
+
+    // Get window size.
+    var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
+    assert(std.posix.errno(err) == .SUCCESS);
 
     // Render welcome screen.
     try writer.writeAll("\x1b[2J"); // clear the screen
     try writer.writeAll("\x1b[H"); // place cursor at top left
-    for (0..rows - 1) |_| try writer.writeAll("~\r\n"); // start empty rows with ~
+    for (0..winsize.row - 1) |_| try writer.writeAll("~\r\n"); // start empty rows with ~
     try writer.writeAll("~"); // don't add newline on final row (otherwise scrolls to make room)
     try writer.writeAll("\x1b[H"); // place cursor at top left
     try writer.flush();
