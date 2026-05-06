@@ -94,8 +94,9 @@ pub const panic = std.debug.FullPanic(struct {
     pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         @branchHint(.cold);
         if (termios_original) |t| {
+            var threaded: std.Io.Threaded = .init_single_threaded;
             // Pop KKP flags (CSI < u) and exit alt screen (CSI ? 1049 l).
-            _ = std.c.write(std.Io.File.stdout().handle, "\x1b[<u\x1b[?1049l", 12);
+            std.Io.File.stdout().writeStreamingAll(threaded.io(), "\x1b[<u\x1b[?1049l") catch {};
             std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
             termios_original = null; // so we only do this once
         }
