@@ -51,30 +51,47 @@ pub fn main(init: std.process.Init) !void {
 
     // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
     // the convention for fullscreen TUIs like vim, tmux, etc.
-    try writer.writeAll("\x1b[?1049h"); // CSI ? 1049 h <- enable alt screen
+    try writer.writeAll("\x1b[?1049h"); // enable alt screen
     // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes) then
     // immediately query KKP flags to confirm the protocol is supported. Follow with window size
     // query. We need this anyway but used as fallback here so we don't hang on the read if the KKP
     // query isn't recognised.
-    try writer.writeAll("\x1b[>1u"); // CSI > 1 u <- enable KKP mode 1
-    try writer.writeAll("\x1b[?u"); // CSI ? u <- query KKP flags
-    try writer.writeAll("\x1b[18t"); // CSI 18 t <- query window size
+    try writer.writeAll("\x1b[>1u"); // enable KKP mode 1
+    try writer.writeAll("\x1b[?u"); // query KKP flags
+    try writer.writeAll("\x1b[18t"); // query window size
     try writer.flush();
     defer { // clean up terminal on exit -- safe to send even if KKP disabled or not in alt mode
-        writer.writeAll("\x1b[<u") catch {}; // CSI < u <- pop KKP flags
-        writer.writeAll("\x1b[?1049l") catch {}; // CSI ? 1049 l <- exit alt screen
-        writer.writeAll("\x1b[2J") catch {}; // CSI 2 J <- clear the screen
-        writer.writeAll("\x1b[H") catch {}; // CSI H <- place cursor at top left
+        writer.writeAll("\x1b[<u") catch {}; // pop KKP flags
+        writer.writeAll("\x1b[?1049l") catch {}; // exit alt screen
+        writer.writeAll("\x1b[2J") catch {}; // clear the screen
+        writer.writeAll("\x1b[H") catch {}; // place cursor at top left
         writer.flush() catch {};
     }
-    // Assert KKP mode 1 enabled: CSI ? 1 u (5 bytes).
-    if (!std.mem.eql(u8, try reader.take(5), "\x1b[?1u"))
-        return error.KittyKeyboardProtocolNotSupported;
-    // Read window size. Response format is CSI 8 ; <rows> ; <cols> t.
-    assert(std.mem.eql(u8, try reader.take(4), "\x1b[8;"));
-    const rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-    const cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter('t')).?, 10);
-    _ = cols;
+    // The responses don't necessarily come in order (e.g. reversed on WezTerm). Switch on escape
+    // sequence then handle the other. There are three possibilities:
+    // - KKP -> winsize
+    // - winsize -> KKP
+    // - winsize: KKP query ignored -- assume not supported
+
+    for (0..2) |_| {
+        assert(std.mem.eql(u8, try reader.take(2), "\x1b[")); // next two bytes are CSI
+        switch (try reader.takeByte()) {
+            // Parsing KKP response. Expected response for mode 1 enabled is CSI ? 1 u.
+            '?' => {
+                if (!std.mem.eql(u8, try reader.take(5), "\x1b[?1u"))
+                    return error.KittyKeyboardProtocolNotSupported;
+            },
+            // Parsing window size. Response format is CSI 8 ; <rows> ; <cols> t.
+            '8' => {
+                assert(try reader.takeByte() == ';');
+                assert(std.mem.eql(u8, try reader.take(4), "\x1b[8;"));
+                const rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
+                const cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter('t')).?, 10);
+                _ = cols;
+            },
+            else => {},
+        }
+    }
 
     // Render welcome screen.
     try writer.writeAll("\x1b[2J"); // clear the screen
@@ -94,8 +111,9 @@ pub const panic = std.debug.FullPanic(struct {
     pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         @branchHint(.cold);
         if (termios_original) |t| {
+            var threaded: std.Io.Threaded = .init_single_threaded;
             // Pop KKP flags (CSI < u) and exit alt screen (CSI ? 1049 l).
-            _ = std.c.write(std.Io.File.stdout().handle, "\x1b[<u\x1b[?1049l", 12);
+            std.Io.File.stdout().writeStreamingAll(threaded.io(), "\x1b[<u\x1b[?1049l") catch {};
             std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
             termios_original = null; // so we only do this once
         }
