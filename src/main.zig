@@ -32,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Put terminal in raw mode. Restore original termios on exit.
     termios_original = try std.posix.tcgetattr(stdin.handle);
+    defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original.?) catch {}; // restore on exit
     var termios_raw = termios_original.?;
     termios_raw.iflag.BRKINT = false;
     termios_raw.iflag.ICRNL = false;
@@ -47,28 +48,24 @@ pub fn main(init: std.process.Init) !void {
     termios_raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
     termios_raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
-    defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original.?) catch {}; // restore on exit
 
-    // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
-    // the convention for fullscreen TUIs like vim, tmux, etc.
-    try writer.writeAll("\x1b[?1049h"); // enable alt screen
-    // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes) then
-    // immediately query KKP flags to confirm the protocol is supported. Follow with window size
-    // query. We need this anyway but used as fallback here so we don't hang on the read if the KKP
-    // query isn't recognised.
-    try writer.writeAll("\x1b[>1u"); // enable KKP mode 1
-    try writer.writeAll("\x1b[?u"); // query KKP flags
-    try writer.writeAll("\x1b[18t"); // query window size
-    try writer.flush();
     defer { // clean up terminal on exit -- safe to send even if KKP disabled or not in alt mode
         writer.writeAll("\x1b[<u") catch {}; // pop KKP flags
+        writer.writeAll("\x1b[?2048l") catch {}; // disable in-band resize notifications
         writer.writeAll("\x1b[?1049l") catch {}; // exit alt screen
-        writer.writeAll("\x1b[2J") catch {}; // clear the screen
-        writer.writeAll("\x1b[H") catch {}; // place cursor at top left
         writer.flush() catch {};
     }
+    // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
+    // the convention for fullscreen TUIs like vim, tmux, etc.
+    try writer.writeAll("\x1b[?1049h");
+    // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes).
+    try writer.writeAll("\x1b[>1u");
+    // Enable in-band resize notifications.
+    try writer.writeAll("\x1b[?2048h");
+    try writer.flush();
 
-    // Get window size.
+    // Get window size using ioctl. Future resizing relies on in-band resize notifications (escape
+    // sequences).
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     assert(std.posix.errno(err) == .SUCCESS);
@@ -85,15 +82,18 @@ pub fn main(init: std.process.Init) !void {
 }
 
 var termios_original: ?std.posix.termios = null;
-/// Wrap panic handler so that we can restore terminal state first. Calls default panic after
-/// cleanup. Cleanup logic runs only once.
+// Wrap panic handler so that we can restore terminal state first. Calls default panic after
+// cleanup. Cleanup logic runs only once. This prevents jank backtraces when we crash.
 pub const panic = std.debug.FullPanic(struct {
     pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         @branchHint(.cold);
         if (termios_original) |t| {
             var threaded: std.Io.Threaded = .init_single_threaded;
-            // Pop KKP flags (CSI < u) and exit alt screen (CSI ? 1049 l).
-            std.Io.File.stdout().writeStreamingAll(threaded.io(), "\x1b[<u\x1b[?1049l") catch {};
+            // Disable KKP (CSI < u) and resize (CSI ) then exit alt screen (CSI ? 1049 l).
+            std.Io.File.stdout().writeStreamingAll(
+                threaded.io(),
+                "\x1b[<u\x1b[?2048l\x1b[?1049l",
+            ) catch {};
             std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
             termios_original = null; // so we only do this once
         }
