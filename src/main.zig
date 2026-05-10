@@ -16,6 +16,7 @@ const assert = std.debug.assert;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    const allocator = init.arena.allocator();
 
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
@@ -72,15 +73,16 @@ pub fn main(init: std.process.Init) !void {
 
     // Load and process buffer.
     const file_name = "src/main.zig";
-    var file_buffer: [1 * 1024 * 1024]u8 = undefined; // 1 MiB
-    const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, &file_buffer);
+    const file_buffer = try allocator.alloc(u8, 1 * 1024 * 1024); // 1 MiB
+    const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
     var lines = std.mem.splitScalar(u8, file_bytes, '\n');
+
+    // Render buffer.
     for (0..winsize.row - 1) |_| {
         try writer.writeAll(if (lines.next()) |l| l else "~");
         try writer.writeAll("\r\n");
     }
-    // Print status line on final row.
-    try writer.writeAll(file_name); // for now just file name on status line
+    try writer.writeAll(file_name); // status line
     try writer.writeAll("\x1b[H"); // place cursor at top left
     try writer.flush();
 
