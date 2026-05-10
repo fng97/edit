@@ -78,9 +78,8 @@ pub fn main(init: std.process.Init) !void {
     var lines = std.mem.splitScalar(u8, file_bytes, '\n');
 
     // Render buffer.
-    for (0..winsize.row - 1) |_| {
-        try writer.writeAll(if (lines.next()) |l| l else "~");
-        try writer.writeAll("\r\n");
+    for (0..winsize.row - 1, 1..) |_, line_number| {
+        try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
     }
     try writer.writeAll(file_name); // status line
     try writer.writeAll("\x1b[H"); // place cursor at top left
