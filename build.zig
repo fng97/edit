@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(exe);
         const run = b.addRunArtifact(exe);
         run.step.dependOn(b.getInstallStep()); // run from prefix
+        if (b.args) |args| run.addArgs(args); // pass args: e.g. zig build run -- arg1
         break :blk &run.step;
     });
 

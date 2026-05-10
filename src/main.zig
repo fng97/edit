@@ -72,7 +72,9 @@ pub fn main(init: std.process.Init) !void {
     assert(std.posix.errno(err) == .SUCCESS);
 
     // Load and process buffer.
-    const file_name = "src/main.zig";
+    var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
+    assert(args_iterator.skip()); // first arg is executable path
+    const file_name = args_iterator.next() orelse @panic("Missing file path arg");
     const file_buffer = try allocator.alloc(u8, 1 * 1024 * 1024); // 1 MiB
     const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
     var lines = std.mem.splitScalar(u8, file_bytes, '\n');
