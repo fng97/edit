@@ -76,7 +76,9 @@ pub fn main(init: std.process.Init) !void {
     assert(args_iterator.skip()); // first arg is executable path
     const file_name = args_iterator.next() orelse @panic("Missing file path arg");
     const file_buffer = try allocator.alloc(u8, 1 * 1024 * 1024); // 1 MiB
+    defer allocator.free(file_buffer);
     const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
+    for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
     var lines = std.mem.splitScalar(u8, file_bytes, '\n');
 
     // Render buffer.
