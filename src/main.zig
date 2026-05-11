@@ -70,6 +70,8 @@ pub fn main(init: std.process.Init) !void {
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     assert(std.posix.errno(err) == .SUCCESS);
+    var rows = winsize.row;
+    var cols = winsize.col;
 
     // Load and process buffer.
     var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
@@ -82,14 +84,37 @@ pub fn main(init: std.process.Init) !void {
     var lines = std.mem.splitScalar(u8, file_bytes, '\n');
 
     // Render buffer.
-    for (0..winsize.row - 1, 1..) |_, line_number| {
+    for (0..rows - 1, 1..) |_, line_number| {
         try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
     }
     try writer.writeAll(file_name); // status line
     try writer.writeAll("\x1b[H"); // place cursor at top left
     try writer.flush();
 
-    while (true) if (try reader.takeByte() == 'q') break;
+    while (true) {
+        switch (try reader.takeByte()) {
+            'a'...'p' => {},
+            'q' => break,
+            'r'...'z' => {},
+            '\x1b' => {
+                assert(try reader.takeByte() == '[');
+                switch (try std.fmt.parseInt(i32, (try reader.takeDelimiter(';')).?, 10)) {
+                    // Resize notifications: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
+                    48 => {
+                        rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
+                        cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
+                        _ = try reader.takeDelimiter(';'); // height_pix
+                        _ = try reader.takeDelimiter('t'); // width_pix
+                    },
+                    else => |c| std.debug.panic(
+                        "Unrecognized sequence: {x}{x}",
+                        .{ c, reader.buffered() },
+                    ),
+                }
+            },
+            else => |c| std.debug.panic("Unrecognized sequence: {x}{x}", .{ c, reader.buffered() }),
+        }
+    }
 }
 
 var termios_original: ?std.posix.termios = null;
