@@ -81,17 +81,9 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(file_buffer);
     const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
     for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
-    var lines = std.mem.splitScalar(u8, file_bytes, '\n');
-
-    // Render buffer.
-    for (0..rows - 1, 1..) |_, line_number| {
-        try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
-    }
-    try writer.writeAll(file_name); // status line
-    try writer.writeAll("\x1b[H"); // place cursor at top left
-    try writer.flush();
 
     while (true) {
+        // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
             0x21...0x7E => |c| if (c == 'q') break,
@@ -116,6 +108,17 @@ pub fn main(init: std.process.Init) !void {
             },
             else => |c| std.debug.panic("Unrecognized sequence: {x}{x}", .{ c, reader.buffered() }),
         }
+
+        // Render screen.
+        try writer.writeAll("\x1b[2J"); // clear screen
+        try writer.writeAll("\x1b[H"); // place cursor at top left
+        var lines = std.mem.splitScalar(u8, file_bytes, '\n');
+        for (0..rows - 1, 1..) |_, line_number| {
+            try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
+        }
+        try writer.writeAll(file_name); // status line
+        try writer.writeAll("\x1b[H"); // place cursor at top left
+        try writer.flush();
     }
 }
 
