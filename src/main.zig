@@ -93,13 +93,15 @@ pub fn main(init: std.process.Init) !void {
 
     while (true) {
         switch (try reader.takeByte()) {
-            'a'...'p' => {},
-            'q' => break,
-            'r'...'z' => {},
-            '\x1b' => {
-                assert(try reader.takeByte() == '[');
+            // Key events that produce text are sent directly as UTF-8 encyoded bytes.
+            0x21...0x7E => |c| if (c == 'q') break,
+            '\x1b' => { // escape sequence
+                assert(try reader.takeByte() == '['); // escape sequences must start with CSI
                 switch (try std.fmt.parseInt(i32, (try reader.takeDelimiter(';')).?, 10)) {
-                    // Resize notifications: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
+                    // TODO: Enforce that escape codes use lowercase codepoint:
+                    // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#key-codes
+
+                    // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
                     48 => {
                         rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
                         cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
