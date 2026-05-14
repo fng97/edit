@@ -9,6 +9,8 @@
 // 0x6  `    a    b    c    d    e    f    g    h    i    j    k    l    m    n    o
 // 0x7  p    q    r    s    t    u    v    w    x    y    z    {    |    }    ~    DEL
 
+// NB: Rows and columns are indexed from (0, 0), representing the top left corner.
+
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -81,25 +83,36 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(file_buffer);
     const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
     for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
+    // TODO: Keep track of lines.
+    const line_count = 1000; // just stub it out for now
 
     const Cursor = struct { row: u16, col: u16 };
-    const cursor: Cursor = .{ .row = 0, .col = 4 };
+    // Determine gutter width: enough for the digits of the greatest line number plus one more for
+    // padding. This trick gets us the number of digits in a positive number: log_10(x) + 1.
+    var gutter_width = std.math.log10_int(@as(u16, @max(rows, line_count))) + 2;
+    var cursor: Cursor = .{ .row = 0, .col = gutter_width };
+
+    loop: while (true) {
 
         // Render screen.
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
+        gutter_width = std.math.log10_int(@as(u16, @max(rows, line_count))) + 2; // TODO: duped
         var lines = std.mem.splitScalar(u8, file_bytes, '\n');
-        for (0..rows - 1, 1..) |_, line_number| {
-            // TODO: Once we're calculating the number of lines, determine how much space to make
-            // for the line numbers based on the number of digits in the last line number.
-            try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
-        }
+        for (0..rows - 1, 1..) |_, line_number| try writer.print(
+            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
+            .{
+                .line_number = line_number,
+                .gutter_width = gutter_width - 1, // extra space of padding already in format string
+                .line = if (lines.next()) |l| l else "~",
+            },
+        );
         try writer.writeAll(file_name); // status line
         // Make sure cursor is within bounds.
-        assert(cursor.col >= 3); // right of line numbers
+        assert(cursor.col >= gutter_width); // right of line numbers
         assert(cursor.col < cols); // does not exceed screen bounds horizontally
         assert(cursor.row < rows); // does not exceed screen bounds vertically
-        // Place the cursor (escape code indexes from 1).
+        // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
         try writer.print("\x1b[{d};{d}H", .{ cursor.row + 1, cursor.col + 1 });
         try writer.flush();
 
