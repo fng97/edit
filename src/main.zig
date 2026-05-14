@@ -82,16 +82,25 @@ pub fn main(init: std.process.Init) !void {
     const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
     for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
 
-    while (true) {
+    const Cursor = struct { row: u16, col: u16 };
+    const cursor: Cursor = .{ .row = 0, .col = 4 };
+
         // Render screen.
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
         var lines = std.mem.splitScalar(u8, file_bytes, '\n');
         for (0..rows - 1, 1..) |_, line_number| {
+            // TODO: Once we're calculating the number of lines, determine how much space to make
+            // for the line numbers based on the number of digits in the last line number.
             try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
         }
         try writer.writeAll(file_name); // status line
-        try writer.writeAll("\x1b[H"); // place cursor at top left
+        // Make sure cursor is within bounds.
+        assert(cursor.col >= 3); // right of line numbers
+        assert(cursor.col < cols); // does not exceed screen bounds horizontally
+        assert(cursor.row < rows); // does not exceed screen bounds vertically
+        // Place the cursor (escape code indexes from 1).
+        try writer.print("\x1b[{d};{d}H", .{ cursor.row + 1, cursor.col + 1 });
         try writer.flush();
 
         // Handle input: parse Kitty Keyboard Protocol events.
