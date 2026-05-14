@@ -11,6 +11,8 @@
 
 // NB: Rows and columns are indexed from (0, 0), representing the top left corner.
 
+// TODO: Diagnose and get rid of occasional flickering.
+
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -119,7 +121,22 @@ pub fn main(init: std.process.Init) !void {
         // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-            0x21...0x7E => |c| if (c == 'q') break,
+            0x21...0x7E => |c| switch (c) {
+                'q' => break :loop, // quit
+                'h' => { // move cursor left
+                    if (cursor.col != gutter_width) cursor.col -= 1;
+                },
+                'j' => { // move cursor down
+                    if (cursor.row != rows - 2) cursor.row += 1; // rows - 2 to keep off statusline
+                },
+                'k' => { // move cursor up
+                    if (cursor.row != 0) cursor.row -= 1;
+                },
+                'l' => { // move cursor right
+                    if (cursor.col != cols - 1) cursor.col += 1;
+                },
+                else => {},
+            },
             '\x1b' => { // escape sequence
                 assert(try reader.takeByte() == '['); // escape sequences must start with CSI
                 switch (try std.fmt.parseInt(i32, (try reader.takeDelimiter(';')).?, 10)) {
