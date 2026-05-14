@@ -83,6 +83,17 @@ pub fn main(init: std.process.Init) !void {
     for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
 
     while (true) {
+        // Render screen.
+        try writer.writeAll("\x1b[2J"); // clear screen
+        try writer.writeAll("\x1b[H"); // place cursor at top left
+        var lines = std.mem.splitScalar(u8, file_bytes, '\n');
+        for (0..rows - 1, 1..) |_, line_number| {
+            try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
+        }
+        try writer.writeAll(file_name); // status line
+        try writer.writeAll("\x1b[H"); // place cursor at top left
+        try writer.flush();
+
         // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
@@ -108,17 +119,6 @@ pub fn main(init: std.process.Init) !void {
             },
             else => |c| std.debug.panic("Unrecognized sequence: {x}{x}", .{ c, reader.buffered() }),
         }
-
-        // Render screen.
-        try writer.writeAll("\x1b[2J"); // clear screen
-        try writer.writeAll("\x1b[H"); // place cursor at top left
-        var lines = std.mem.splitScalar(u8, file_bytes, '\n');
-        for (0..rows - 1, 1..) |_, line_number| {
-            try writer.print("{d: >3} {s}\r\n", .{ line_number, if (lines.next()) |l| l else "~" });
-        }
-        try writer.writeAll(file_name); // status line
-        try writer.writeAll("\x1b[H"); // place cursor at top left
-        try writer.flush();
     }
 }
 
