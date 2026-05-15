@@ -85,13 +85,22 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(file_buffer);
     const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
     for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
-    // TODO: Keep track of lines.
-    const line_count = 1000; // just stub it out for now
+    const lines_buffer = try allocator.alloc(Line, 10 * 1024); // ~10k lines max
+    defer allocator.free(lines_buffer);
+    var lines: std.ArrayList(Line) = .initBuffer(lines_buffer);
+    assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
+    var head: u32 = 0;
+    while (head < file_bytes.len) {
+        var tail = head;
+        while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
+        lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
+        head = tail + 1;
+    }
 
     const Cursor = struct { row: u16, col: u16 };
     // Determine gutter width: enough for the digits of the greatest line number plus one more for
     // padding.
-    var gutter_width = digit_count(@max(rows, line_count)) + 1;
+    var gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
     var cursor: Cursor = .{ .row = 0, .col = gutter_width };
 
     loop: while (true) {
@@ -99,14 +108,13 @@ pub fn main(init: std.process.Init) !void {
         // Render screen.
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
-        gutter_width = digit_count(@max(rows, line_count)) + 1;
-        var lines = std.mem.splitScalar(u8, file_bytes, '\n');
-        for (0..rows - 1, 1..) |_, line_number| try writer.print(
+        gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
+        for (0..rows - 1) |row| try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
             .{
-                .line_number = line_number,
+                .line_number = row + 1, // line numbers indexed from 1
                 .gutter_width = gutter_width - 1, // extra space of padding already in format string
-                .line = if (lines.next()) |l| l else "~",
+                .line = if (row < lines.items.len) lines.items[row].slice(file_bytes) else "~",
             },
         );
         // Draw status line. Displayed row,col should be indexed from 1.
@@ -167,6 +175,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
+
+const Line = struct {
+    head: u32, // line start offset
+    tail: u32, // line end offset (always a newline)
+
+    pub fn slice(line: *const Line, file_bytes: []const u8) []const u8 {
+        return file_bytes[line.head..line.tail];
+    }
+};
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
 fn digit_count(number: u16) u8 {
