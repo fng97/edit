@@ -90,8 +90,8 @@ pub fn main(init: std.process.Init) !void {
 
     const Cursor = struct { row: u16, col: u16 };
     // Determine gutter width: enough for the digits of the greatest line number plus one more for
-    // padding. This trick gets us the number of digits in a positive number: log_10(x) + 1.
-    var gutter_width = std.math.log10_int(@as(u16, @max(rows, line_count))) + 2;
+    // padding.
+    var gutter_width = digit_count(@max(rows, line_count)) + 1;
     var cursor: Cursor = .{ .row = 0, .col = gutter_width };
 
     loop: while (true) {
@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
         // Render screen.
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
-        gutter_width = std.math.log10_int(@as(u16, @max(rows, line_count))) + 2; // TODO: duped
+        gutter_width = digit_count(@max(rows, line_count)) + 1;
         var lines = std.mem.splitScalar(u8, file_bytes, '\n');
         for (0..rows - 1, 1..) |_, line_number| try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
@@ -109,7 +109,14 @@ pub fn main(init: std.process.Init) !void {
                 .line = if (lines.next()) |l| l else "~",
             },
         );
-        try writer.writeAll(file_name); // status line
+        // Draw status line. Displayed row,col should be indexed from 1.
+        const displayed_row = cursor.row + 1;
+        const displayed_col = cursor.col + 1;
+        const cursor_position_cols = digit_count(displayed_row) + digit_count(displayed_col) + 1;
+        const padding_count = cols - file_name.len - cursor_position_cols;
+        try writer.writeAll(file_name);
+        try writer.splatByteAll(' ', padding_count);
+        try writer.print("{d},{d}", .{ displayed_row, displayed_col - gutter_width });
         // Make sure cursor is within bounds.
         assert(cursor.col >= gutter_width); // right of line numbers
         assert(cursor.col < cols); // does not exceed screen bounds horizontally
@@ -159,6 +166,11 @@ pub fn main(init: std.process.Init) !void {
             else => |c| std.debug.panic("Unrecognized sequence: {x}{x}", .{ c, reader.buffered() }),
         }
     }
+}
+
+// This trick gets us the number of digits in a positive number: log_10(x) + 1.
+fn digit_count(number: u16) u8 {
+    return std.math.log10_int(number) + 1;
 }
 
 var termios_original: ?std.posix.termios = null;
