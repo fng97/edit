@@ -16,8 +16,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-// TODO: Add dbg()
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
@@ -88,14 +86,7 @@ pub fn main(init: std.process.Init) !void {
     const lines_buffer = try allocator.alloc(Line, 10 * 1024); // ~10k lines max
     defer allocator.free(lines_buffer);
     var lines: std.ArrayList(Line) = .initBuffer(lines_buffer);
-    assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
-    var head: u32 = 0;
-    while (head < file_bytes.len) {
-        var tail = head;
-        while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
-        lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
-        head = tail + 1;
-    }
+    index_lines(file_bytes, &lines);
 
     const Cursor = struct { row: u16, col: u16 };
     // Determine gutter width: enough for the digits of the greatest line number plus one more for
@@ -184,6 +175,44 @@ const Line = struct {
         return file_bytes[line.head..line.tail];
     }
 };
+
+fn index_lines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
+    lines.clearRetainingCapacity();
+    assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
+    var head: u32 = 0;
+    while (head < file_bytes.len) {
+        var tail = head;
+        while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
+        lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
+        head = tail + 1;
+    }
+}
+
+test index_lines {
+    var lines_buffer: [32]Line = undefined;
+    var lines: std.ArrayList(Line) = .initBuffer(&lines_buffer);
+
+    const hello_c =
+        \\#include <stdio.h>
+        \\
+        \\int main() {
+        \\  printf("Hello, world!\n");
+        \\  return 0;
+        \\}
+        \\
+    ;
+    index_lines(hello_c, &lines);
+    try std.testing.expect(lines.items.len == 6);
+    try std.testing.expect(lines.items[0].head == 0);
+    try std.testing.expect(lines.items[0].tail == 18);
+    try std.testing.expect(lines.getLast().tail == hello_c.len - 1);
+
+    const empty_file = "\n"; // need at least a newline
+    index_lines(empty_file, &lines);
+    try std.testing.expect(lines.items.len == 1);
+    try std.testing.expect(lines.items[0].head == 0);
+    try std.testing.expect(lines.items[0].tail == 0);
+}
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
 fn digit_count(number: u16) u8 {
