@@ -20,6 +20,19 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
 
+    // Load and process buffer.
+    var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
+    assert(args_iterator.skip()); // first arg is executable path
+    const file_name = args_iterator.next() orelse @panic("Missing file path arg");
+    const file_buffer = try allocator.alloc(u8, 1 * 1024 * 1024); // 1 MiB
+    defer allocator.free(file_buffer);
+    const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
+    for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
+    const lines_buffer = try allocator.alloc(Line, 10 * 1024); // ~10k lines max
+    defer allocator.free(lines_buffer);
+    var lines: std.ArrayList(Line) = .initBuffer(lines_buffer);
+    index_lines(file_bytes, &lines);
+
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
     var stdin_reader = stdin.reader(io, &stdin_buffer);
@@ -74,19 +87,6 @@ pub fn main(init: std.process.Init) !void {
     assert(std.posix.errno(err) == .SUCCESS);
     var rows = winsize.row;
     var cols = winsize.col;
-
-    // Load and process buffer.
-    var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
-    assert(args_iterator.skip()); // first arg is executable path
-    const file_name = args_iterator.next() orelse @panic("Missing file path arg");
-    const file_buffer = try allocator.alloc(u8, 1 * 1024 * 1024); // 1 MiB
-    defer allocator.free(file_buffer);
-    const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
-    for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
-    const lines_buffer = try allocator.alloc(Line, 10 * 1024); // ~10k lines max
-    defer allocator.free(lines_buffer);
-    var lines: std.ArrayList(Line) = .initBuffer(lines_buffer);
-    index_lines(file_bytes, &lines);
 
     const Cursor = struct { row: u16, col: u16 };
     // Determine gutter width: enough for the digits of the greatest line number plus one more for
