@@ -80,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.writeAll("\x1b[?2048h");
     try writer.flush();
 
+    // TODO: Get rid of this. Expect to get the dimensions on first pass of loop below.
     // Get window size using ioctl. Future resizing relies on in-band resize notifications (escape
     // sequences).
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
@@ -88,14 +89,13 @@ pub fn main(init: std.process.Init) !void {
     var rows = winsize.row;
     var cols = winsize.col;
 
-    const Cursor = struct { row: u16, col: u16 };
     // Determine gutter width: enough for the digits of the greatest line number plus one more for
     // padding.
     var gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
-    var cursor: Cursor = .{ .row = 0, .col = gutter_width };
+    var cursor_offset: u32 = 0; // start at the first character of the first line
 
     loop: while (true) {
-
+        // TODO: Render screen after handling input.
         // Render screen.
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
@@ -108,20 +108,33 @@ pub fn main(init: std.process.Init) !void {
                 .line = if (row < lines.items.len) lines.items[row].slice(file_bytes) else "~",
             },
         );
-        // Draw status line. Displayed row,col should be indexed from 1.
-        const displayed_row = cursor.row + 1;
-        const displayed_col = cursor.col + 1;
-        const cursor_position_cols = digit_count(displayed_row) + digit_count(displayed_col) + 1;
-        const padding_count = cols - file_name.len - cursor_position_cols;
+        // Draw status line. Displayed line number and offset should be indexed from 1.
+        const cursor_file_pos: FilePos = .from_offset(cursor_offset, lines.items);
         try writer.writeAll(file_name);
-        try writer.splatByteAll(' ', padding_count);
-        try writer.print("{d},{d}", .{ displayed_row, displayed_col - gutter_width });
+        const padding_cols_count = cols -
+            file_name.len -
+            digit_count(cursor_file_pos.line_number + 1) -
+            digit_count(cursor_file_pos.line_offset + 1) -
+            1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+        try writer.splatByteAll(' ', padding_cols_count);
+        try writer.print("{d},{d}", .{
+            cursor_file_pos.line_number + 1,
+            cursor_file_pos.line_offset + 1,
+        });
         // Make sure cursor is within bounds.
-        assert(cursor.col >= gutter_width); // right of line numbers
-        assert(cursor.col < cols); // does not exceed screen bounds horizontally
-        assert(cursor.row < rows); // does not exceed screen bounds vertically
+        const cursor_view_pos: ViewPos = .from_file_pos(
+            cursor_file_pos,
+            lines.items,
+            0,
+            gutter_width,
+            rows,
+            cols,
+        );
+        assert(cursor_view_pos.col >= gutter_width); // right of line numbers
+        assert(cursor_view_pos.col < cols); // does not exceed screen bounds horizontally
+        assert(cursor_view_pos.row < rows); // does not exceed screen bounds vertically
         // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
-        try writer.print("\x1b[{d};{d}H", .{ cursor.row + 1, cursor.col + 1 });
+        try writer.print("\x1b[{d};{d}H", .{ cursor_view_pos.row + 1, cursor_view_pos.col + 1 });
         try writer.flush();
 
         // Handle input: parse Kitty Keyboard Protocol events.
@@ -129,18 +142,14 @@ pub fn main(init: std.process.Init) !void {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
             0x21...0x7E => |c| switch (c) {
                 'q' => break :loop, // quit
-                'h' => { // move cursor left
-                    if (cursor.col != gutter_width) cursor.col -= 1;
-                },
-                'j' => { // move cursor down
-                    if (cursor.row != rows - 2) cursor.row += 1; // rows - 2 to keep off statusline
-                },
-                'k' => { // move cursor up
-                    if (cursor.row != 0) cursor.row -= 1;
-                },
-                'l' => { // move cursor right
-                    if (cursor.col != cols - 1) cursor.col += 1;
-                },
+                'h' => cursor_offset =
+                    cursor_file_pos.move(.left, lines.items).to_offset(lines.items),
+                'j' => cursor_offset =
+                    cursor_file_pos.move(.down, lines.items).to_offset(lines.items),
+                'k' => cursor_offset =
+                    cursor_file_pos.move(.up, lines.items).to_offset(lines.items),
+                'l' => cursor_offset =
+                    cursor_file_pos.move(.right, lines.items).to_offset(lines.items),
                 else => {},
             },
             '\x1b' => { // escape sequence
@@ -167,12 +176,89 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+const FilePos = struct {
+    line_number: u16, // zero-indexed
+    line_offset: u16,
+
+    pub fn from_offset(offset: u32, lines: []const Line) FilePos {
+        for (lines, 0..) |line, line_number| {
+            if (offset <= line.tail) return .{
+                .line_number = @intCast(line_number),
+                .line_offset = @intCast(offset - line.head),
+            };
+        } else @panic("Offset not within file bounds");
+    }
+
+    pub fn move(file_pos: FilePos, direction: enum { left, down, up, right }, lines: []const Line) FilePos {
+        const line_number = file_pos.line_number;
+        const line_offset = file_pos.line_offset;
+        const line = lines[line_number];
+        const line_size = line.tail - line.head;
+
+        switch (direction) {
+            .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
+            .right => if (line_offset + 1 < line_size) return .{
+                .line_number = line_number,
+                .line_offset = line_offset + 1,
+            },
+            .up => if (line_number > 0) {
+                // Clamp the offset in case previous line is shorter than the current one. Subtract
+                // 1 to go from size to offset, saturated so we don't underflow.
+                const prev_line_end = lines[line_number - 1].size() -| 1;
+                return .{
+                    .line_number = line_number - 1,
+                    .line_offset = @intCast(if (line_offset > prev_line_end) prev_line_end else line_offset),
+                };
+            },
+            .down => if (line_number + 1 < lines.len) {
+                const next_line_end = lines[line_number + 1].size() -| 1;
+                return .{
+                    .line_number = line_number + 1,
+                    .line_offset = @intCast(if (line_offset > next_line_end) next_line_end else line_offset),
+                };
+            },
+        }
+        return file_pos;
+    }
+
+    pub fn to_offset(file_pos: FilePos, lines: []const Line) u32 {
+        return lines[file_pos.line_number].head + file_pos.line_offset;
+    }
+};
+
+const ViewPos = struct {
+    row: u16,
+    col: u16,
+
+    pub fn from_file_pos(
+        file_pos: FilePos,
+        lines: []const Line,
+        first_line: u16,
+        gutter_width: u8,
+        row_count: u16,
+        col_count: u16,
+    ) ViewPos {
+        // TODO: Get line wrapping working later.
+        for (first_line..first_line + row_count) |i|
+            assert(lines[i].tail - lines[i].head <= col_count);
+        const row = file_pos.line_number - first_line;
+        assert(row < row_count);
+        const col = file_pos.line_offset + gutter_width;
+        assert(col < col_count);
+        return .{ .row = row, .col = col };
+    }
+};
+
 const Line = struct {
     head: u32, // line start offset
     tail: u32, // line end offset (always a newline)
 
-    pub fn slice(line: *const Line, file_bytes: []const u8) []const u8 {
+    pub fn slice(line: Line, file_bytes: []const u8) []const u8 {
         return file_bytes[line.head..line.tail];
+    }
+
+    pub fn size(line: Line) u32 {
+        return line.tail - line.head;
     }
 };
 
