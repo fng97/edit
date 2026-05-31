@@ -32,8 +32,8 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(lines_buffer);
 
     var file: File = .{
-        .file_name = file_name,
-        .file_bytes = file_bytes,
+        .name = file_name,
+        .bytes = file_bytes,
         .lines = .initBuffer(lines_buffer),
     };
     index_lines(file_bytes, &file.lines);
@@ -104,31 +104,29 @@ pub fn main(init: std.process.Init) !void {
     loop: while (true) {
         // TODO: Handle file changes. Re-index lines and update gutter width.
 
-        const cursor_file_pos = file.position_from(cursor_offset);
+        const cursor_position = file.position_from(cursor_offset);
         const lines = file.lines.items;
 
         // TODO: Render screen after handling input.
-        try viewport.render(writer, cursor_file_pos, lines, file_bytes, file_name);
+        try viewport.render(writer, cursor_position, &file);
 
         // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
             0x21...0x7E => |c| switch (c) {
                 'q' => break :loop, // quit
-                'h' => cursor_offset =
-                    file.offset_from(cursor_file_pos.move(.left, lines)),
-
+                'h' => cursor_offset = file.offset_from(cursor_position.move(.left, lines)),
                 'j' => {
-                    const file_pos_new = cursor_file_pos.move(.down, lines);
-                    cursor_offset = file.offset_from(file_pos_new);
-                    if (file_pos_new.line_number > viewport.last_line()) viewport.first_line += 1;
+                    const moved = cursor_position.move(.down, lines);
+                    cursor_offset = file.offset_from(moved);
+                    if (moved.line_number > viewport.last_line()) viewport.first_line += 1;
                 },
                 'k' => {
-                    const file_pos_new = cursor_file_pos.move(.up, lines);
-                    cursor_offset = file.offset_from(file_pos_new);
-                    if (file_pos_new.line_number < viewport.first_line) viewport.first_line -= 1;
+                    const moved = cursor_position.move(.up, lines);
+                    cursor_offset = file.offset_from(moved);
+                    if (moved.line_number < viewport.first_line) viewport.first_line -= 1;
                 },
-                'l' => cursor_offset = file.offset_from(cursor_file_pos.move(.right, lines)),
+                'l' => cursor_offset = file.offset_from(cursor_position.move(.right, lines)),
                 else => {},
             },
             '\x1b' => { // escape sequence
@@ -175,18 +173,19 @@ const Viewport = struct {
         viewport: Viewport,
         writer: *std.Io.Writer,
         cursor: File.Position,
-        lines: []const Line,
-        file_bytes: []const u8,
-        file_name: []const u8,
+        file: *const File,
     ) !void {
         const row_count = viewport.row_count;
         const col_count = viewport.col_count;
         const first_line = viewport.first_line;
         const gutter_width = viewport.gutter_width;
+        const lines = file.lines.items;
+        const file_bytes = file.bytes;
+        const file_name = file.name;
 
-        // Render screen.
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
+
         // The -1 below is to leave room for the status line.
         for (first_line..first_line + row_count - 1) |line_number| try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
@@ -196,6 +195,7 @@ const Viewport = struct {
                 .line = if (line_number < lines.len) lines[line_number].slice(file_bytes) else "~",
             },
         );
+
         // Draw status line. Displayed line number and offset should be indexed from 1.
         try writer.writeAll(file_name);
         const padding_cols_count = col_count -
@@ -208,11 +208,13 @@ const Viewport = struct {
             cursor.line_number + 1,
             cursor.line_offset + 1,
         });
+
         // Make sure cursor is within the viewport's bounds.
         const cursor_view_pos = viewport.position_of(cursor, lines);
         assert(cursor_view_pos.col >= gutter_width); // right of line numbers
         assert(cursor_view_pos.col < col_count); // does not exceed screen bounds horizontally
         assert(cursor_view_pos.row < row_count); // does not exceed screen bounds vertically
+
         // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
         try writer.print("\x1b[{d};{d}H", .{ cursor_view_pos.row + 1, cursor_view_pos.col + 1 });
         try writer.flush();
@@ -253,8 +255,8 @@ const Viewport = struct {
 };
 
 const File = struct {
-    file_name: []const u8,
-    file_bytes: []const u8,
+    name: []const u8,
+    bytes: []const u8,
     lines: std.ArrayList(Line),
 
     const Position = struct {
