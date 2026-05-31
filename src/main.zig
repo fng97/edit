@@ -89,10 +89,10 @@ pub fn main(init: std.process.Init) !void {
     var rows = winsize.row;
     var cols = winsize.col;
 
-    // Determine gutter width: enough for the digits of the greatest line number plus one more for
-    // padding.
-    var gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
     var cursor_offset: u32 = 0; // start at the first character of the first line
+    var screen_top_line: u16 = 0; // for scrolling, first line shown in viewport
+    // Determine gutter width: enough digits for the greatest line number plus one more for padding.
+    var gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
 
     loop: while (true) {
         // TODO: Render screen after handling input.
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         try writer.writeAll("\x1b[2J"); // clear screen
         try writer.writeAll("\x1b[H"); // place cursor at top left
         gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
-        for (0..rows - 1) |row| try writer.print(
+        for (screen_top_line..screen_top_line + rows - 1) |row| try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
             .{
                 .line_number = row + 1, // line numbers indexed from 1
@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
         const cursor_view_pos: ViewPos = .from_file_pos(
             cursor_file_pos,
             lines.items,
-            0,
+            screen_top_line,
             gutter_width,
             rows,
             cols,
@@ -144,10 +144,16 @@ pub fn main(init: std.process.Init) !void {
                 'q' => break :loop, // quit
                 'h' => cursor_offset =
                     cursor_file_pos.move(.left, lines.items).to_offset(lines.items),
-                'j' => cursor_offset =
-                    cursor_file_pos.move(.down, lines.items).to_offset(lines.items),
-                'k' => cursor_offset =
-                    cursor_file_pos.move(.up, lines.items).to_offset(lines.items),
+                'j' => {
+                    const file_pos_new = cursor_file_pos.move(.down, lines.items);
+                    cursor_offset = file_pos_new.to_offset(lines.items);
+                    if (file_pos_new.line_number > screen_top_line + rows - 2) screen_top_line += 1;
+                },
+                'k' => {
+                    const file_pos_new = cursor_file_pos.move(.up, lines.items);
+                    cursor_offset = file_pos_new.to_offset(lines.items);
+                    if (file_pos_new.line_number < screen_top_line) screen_top_line -= 1;
+                },
                 'l' => cursor_offset =
                     cursor_file_pos.move(.right, lines.items).to_offset(lines.items),
                 else => {},
@@ -239,7 +245,7 @@ const ViewPos = struct {
         col_count: u16,
     ) ViewPos {
         // TODO: Get line wrapping working later.
-        for (first_line..first_line + row_count) |i|
+        for (first_line..first_line + row_count) |i| if (i < lines.len)
             assert(lines[i].tail - lines[i].head <= col_count);
         const row = file_pos.line_number - first_line;
         assert(row < row_count);
