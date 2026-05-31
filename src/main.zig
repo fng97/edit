@@ -86,56 +86,23 @@ pub fn main(init: std.process.Init) !void {
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
     const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     assert(std.posix.errno(err) == .SUCCESS);
-    var rows = winsize.row;
-    var cols = winsize.col;
 
     var cursor_offset: u32 = 0; // start at the first character of the first line
-    var screen_top_line: u16 = 0; // for scrolling, first line shown in viewport
-    // Determine gutter width: enough digits for the greatest line number plus one more for padding.
-    var gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
+    var viewport: Viewport = .{
+        .row_count = winsize.row,
+        .col_count = winsize.col,
+        .first_line = 0,
+        .gutter_width = 0,
+    };
+    viewport.update_gutter_width(lines.items);
 
     loop: while (true) {
-        // TODO: Render screen after handling input.
-        // Render screen.
-        try writer.writeAll("\x1b[2J"); // clear screen
-        try writer.writeAll("\x1b[H"); // place cursor at top left
-        gutter_width = digit_count(@intCast(@max(rows, lines.items.len))) + 1;
-        for (screen_top_line..screen_top_line + rows - 1) |row| try writer.print(
-            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
-            .{
-                .line_number = row + 1, // line numbers indexed from 1
-                .gutter_width = gutter_width - 1, // extra space of padding already in format string
-                .line = if (row < lines.items.len) lines.items[row].slice(file_bytes) else "~",
-            },
-        );
-        // Draw status line. Displayed line number and offset should be indexed from 1.
         const cursor_file_pos: FilePos = .from_offset(cursor_offset, lines.items);
-        try writer.writeAll(file_name);
-        const padding_cols_count = cols -
-            file_name.len -
-            digit_count(cursor_file_pos.line_number + 1) -
-            digit_count(cursor_file_pos.line_offset + 1) -
-            1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-        try writer.splatByteAll(' ', padding_cols_count);
-        try writer.print("{d},{d}", .{
-            cursor_file_pos.line_number + 1,
-            cursor_file_pos.line_offset + 1,
-        });
-        // Make sure cursor is within bounds.
-        const cursor_view_pos: ViewPos = .from_file_pos(
-            cursor_file_pos,
-            lines.items,
-            screen_top_line,
-            gutter_width,
-            rows,
-            cols,
-        );
-        assert(cursor_view_pos.col >= gutter_width); // right of line numbers
-        assert(cursor_view_pos.col < cols); // does not exceed screen bounds horizontally
-        assert(cursor_view_pos.row < rows); // does not exceed screen bounds vertically
-        // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
-        try writer.print("\x1b[{d};{d}H", .{ cursor_view_pos.row + 1, cursor_view_pos.col + 1 });
-        try writer.flush();
+
+        // TODO: Handle file changes. Re-index lines and update gutter width.
+
+        // TODO: Render screen after handling input.
+        try viewport.render(writer, cursor_file_pos, lines.items, file_bytes, file_name);
 
         // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
@@ -147,12 +114,13 @@ pub fn main(init: std.process.Init) !void {
                 'j' => {
                     const file_pos_new = cursor_file_pos.move(.down, lines.items);
                     cursor_offset = file_pos_new.to_offset(lines.items);
-                    if (file_pos_new.line_number > screen_top_line + rows - 2) screen_top_line += 1;
+                    if (file_pos_new.line_number > viewport.last_line())
+                        viewport.first_line += 1;
                 },
                 'k' => {
                     const file_pos_new = cursor_file_pos.move(.up, lines.items);
                     cursor_offset = file_pos_new.to_offset(lines.items);
-                    if (file_pos_new.line_number < screen_top_line) screen_top_line -= 1;
+                    if (file_pos_new.line_number < viewport.first_line) viewport.first_line -= 1;
                 },
                 'l' => cursor_offset =
                     cursor_file_pos.move(.right, lines.items).to_offset(lines.items),
@@ -166,8 +134,10 @@ pub fn main(init: std.process.Init) !void {
 
                     // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
                     48 => {
-                        rows = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-                        cols = try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
+                        viewport.row_count =
+                            try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
+                        viewport.col_count =
+                            try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
                         _ = try reader.takeDelimiter(';'); // height_pix
                         _ = try reader.takeDelimiter('t'); // width_pix
                     },
@@ -184,6 +154,98 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
+
+const Viewport = struct {
+    row_count: u16,
+    col_count: u16,
+    first_line: u16, // line number of the top line
+    gutter_width: u8, // cols to allow for line numbers (and delimiting whitespace)
+
+    pub const Position = struct {
+        row: u16,
+        col: u16,
+    };
+
+    pub fn render(
+        viewport: Viewport,
+        writer: *std.Io.Writer,
+        cursor: FilePos,
+        lines: []const Line,
+        file_bytes: []const u8,
+        file_name: []const u8,
+    ) !void {
+        const row_count = viewport.row_count;
+        const col_count = viewport.col_count;
+        const first_line = viewport.first_line;
+        const gutter_width = viewport.gutter_width;
+
+        // Render screen.
+        try writer.writeAll("\x1b[2J"); // clear screen
+        try writer.writeAll("\x1b[H"); // place cursor at top left
+        // The -1 below is to leave room for the status line.
+        for (first_line..first_line + row_count - 1) |line_number| try writer.print(
+            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
+            .{
+                .line_number = line_number + 1, // displayed line number indexed from 1
+                .gutter_width = gutter_width - 1, // extra space of padding already in format string
+                .line = if (line_number < lines.len) lines[line_number].slice(file_bytes) else "~",
+            },
+        );
+        // Draw status line. Displayed line number and offset should be indexed from 1.
+        try writer.writeAll(file_name);
+        const padding_cols_count = col_count -
+            file_name.len -
+            digit_count(cursor.line_number + 1) -
+            digit_count(cursor.line_offset + 1) -
+            1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+        try writer.splatByteAll(' ', padding_cols_count);
+        try writer.print("{d},{d}", .{
+            cursor.line_number + 1,
+            cursor.line_offset + 1,
+        });
+        // Make sure cursor is within the viewport's bounds.
+        const cursor_view_pos = viewport.position_of(cursor, lines);
+        assert(cursor_view_pos.col >= gutter_width); // right of line numbers
+        assert(cursor_view_pos.col < col_count); // does not exceed screen bounds horizontally
+        assert(cursor_view_pos.row < row_count); // does not exceed screen bounds vertically
+        // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
+        try writer.print("\x1b[{d};{d}H", .{ cursor_view_pos.row + 1, cursor_view_pos.col + 1 });
+        try writer.flush();
+    }
+
+    /// Update gutter width, enough digits for the greatest line number plus one for padding.
+    pub fn update_gutter_width(viewport: *Viewport, lines: []const Line) void {
+        viewport.gutter_width = digit_count(@intCast(@max(viewport.row_count, lines.len))) + 1;
+    }
+
+    pub fn position_of(
+        viewport: Viewport,
+        file_pos: FilePos,
+        lines: []const Line,
+    ) Position {
+        const row_count = viewport.row_count;
+        const col_count = viewport.col_count;
+        const first_line = viewport.first_line;
+        const gutter_width = viewport.gutter_width;
+
+        // TODO: Get line wrapping working later.
+        for (first_line..first_line + row_count) |i| if (i < lines.len)
+            assert(lines[i].tail - lines[i].head <= col_count);
+
+        const row = file_pos.line_number - first_line;
+        const col = file_pos.line_offset + gutter_width;
+        assert(row < row_count);
+        assert(col < col_count);
+
+        return .{ .row = row, .col = col };
+    }
+
+    // Calculate index of last line in viewport.
+    pub fn last_line(viewport: Viewport) u16 {
+        // The -2 below: -1 to go from count to index and another -1 for the status line.
+        return viewport.first_line + viewport.row_count - 2;
+    }
+};
 
 const FilePos = struct {
     line_number: u16, // zero-indexed
@@ -242,29 +304,6 @@ const FilePos = struct {
     }
 };
 
-const ViewPos = struct {
-    row: u16,
-    col: u16,
-
-    pub fn from_file_pos(
-        file_pos: FilePos,
-        lines: []const Line,
-        first_line: u16,
-        gutter_width: u8,
-        row_count: u16,
-        col_count: u16,
-    ) ViewPos {
-        // TODO: Get line wrapping working later.
-        for (first_line..first_line + row_count) |i| if (i < lines.len)
-            assert(lines[i].tail - lines[i].head <= col_count);
-        const row = file_pos.line_number - first_line;
-        assert(row < row_count);
-        const col = file_pos.line_offset + gutter_width;
-        assert(col < col_count);
-        return .{ .row = row, .col = col };
-    }
-};
-
 const Line = struct {
     head: u32, // line start offset
     tail: u32, // line end offset (always a newline)
@@ -293,7 +332,7 @@ fn index_lines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
 // TODO: Add simple test for rendering.
 // TODO: Add simple test for rendering.
 // TODO: Add simple fuzz test. Maybe just load file and navigate? Add constraints (like viewport
-// smaller than max line length to get it passing initially) and leave FIXMEs to address later.
+// smaller than max line length to get it passing initially) and leave fixmes to address later.
 
 test index_lines {
     var lines_buffer: [32]Line = undefined;
