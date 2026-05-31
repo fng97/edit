@@ -30,8 +30,13 @@ pub fn main(init: std.process.Init) !void {
     for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
     const lines_buffer = try allocator.alloc(Line, 10 * 1024); // ~10k lines max
     defer allocator.free(lines_buffer);
-    var lines: std.ArrayList(Line) = .initBuffer(lines_buffer);
-    index_lines(file_bytes, &lines);
+
+    var file: File = .{
+        .file_name = file_name,
+        .file_bytes = file_bytes,
+        .lines = .initBuffer(lines_buffer),
+    };
+    index_lines(file_bytes, &file.lines);
 
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
@@ -94,15 +99,16 @@ pub fn main(init: std.process.Init) !void {
         .first_line = 0,
         .gutter_width = 0,
     };
-    viewport.update_gutter_width(lines.items);
+    viewport.update_gutter_width(file.lines.items);
 
     loop: while (true) {
-        const cursor_file_pos: FilePos = .from_offset(cursor_offset, lines.items);
-
         // TODO: Handle file changes. Re-index lines and update gutter width.
 
+        const cursor_file_pos = file.position_from(cursor_offset);
+        const lines = file.lines.items;
+
         // TODO: Render screen after handling input.
-        try viewport.render(writer, cursor_file_pos, lines.items, file_bytes, file_name);
+        try viewport.render(writer, cursor_file_pos, lines, file_bytes, file_name);
 
         // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
@@ -110,20 +116,19 @@ pub fn main(init: std.process.Init) !void {
             0x21...0x7E => |c| switch (c) {
                 'q' => break :loop, // quit
                 'h' => cursor_offset =
-                    cursor_file_pos.move(.left, lines.items).to_offset(lines.items),
+                    file.offset_from(cursor_file_pos.move(.left, lines)),
+
                 'j' => {
-                    const file_pos_new = cursor_file_pos.move(.down, lines.items);
-                    cursor_offset = file_pos_new.to_offset(lines.items);
-                    if (file_pos_new.line_number > viewport.last_line())
-                        viewport.first_line += 1;
+                    const file_pos_new = cursor_file_pos.move(.down, lines);
+                    cursor_offset = file.offset_from(file_pos_new);
+                    if (file_pos_new.line_number > viewport.last_line()) viewport.first_line += 1;
                 },
                 'k' => {
-                    const file_pos_new = cursor_file_pos.move(.up, lines.items);
-                    cursor_offset = file_pos_new.to_offset(lines.items);
+                    const file_pos_new = cursor_file_pos.move(.up, lines);
+                    cursor_offset = file.offset_from(file_pos_new);
                     if (file_pos_new.line_number < viewport.first_line) viewport.first_line -= 1;
                 },
-                'l' => cursor_offset =
-                    cursor_file_pos.move(.right, lines.items).to_offset(lines.items),
+                'l' => cursor_offset = file.offset_from(cursor_file_pos.move(.right, lines)),
                 else => {},
             },
             '\x1b' => { // escape sequence
@@ -169,7 +174,7 @@ const Viewport = struct {
     pub fn render(
         viewport: Viewport,
         writer: *std.Io.Writer,
-        cursor: FilePos,
+        cursor: File.Position,
         lines: []const Line,
         file_bytes: []const u8,
         file_name: []const u8,
@@ -218,9 +223,9 @@ const Viewport = struct {
         viewport.gutter_width = digit_count(@intCast(@max(viewport.row_count, lines.len))) + 1;
     }
 
-    pub fn position_of(
+    fn position_of(
         viewport: Viewport,
-        file_pos: FilePos,
+        file_position: File.Position,
         lines: []const Line,
     ) Position {
         const row_count = viewport.row_count;
@@ -232,8 +237,8 @@ const Viewport = struct {
         for (first_line..first_line + row_count) |i| if (i < lines.len)
             assert(lines[i].tail - lines[i].head <= col_count);
 
-        const row = file_pos.line_number - first_line;
-        const col = file_pos.line_offset + gutter_width;
+        const row = file_position.line_number - first_line;
+        const col = file_position.line_offset + gutter_width;
         assert(row < row_count);
         assert(col < col_count);
 
@@ -247,12 +252,58 @@ const Viewport = struct {
     }
 };
 
-const FilePos = struct {
-    line_number: u16, // zero-indexed
-    line_offset: u16,
+const File = struct {
+    file_name: []const u8,
+    file_bytes: []const u8,
+    lines: std.ArrayList(Line),
 
-    pub fn from_offset(offset: u32, lines: []const Line) FilePos {
-        for (lines, 0..) |line, line_number| {
+    const Position = struct {
+        line_number: u16, // zero-indexed
+        line_offset: u16,
+
+        pub fn move(
+            position: Position,
+            direction: enum { left, down, up, right },
+            lines: []const Line,
+        ) Position {
+            const line_number = position.line_number;
+            const line_offset = position.line_offset;
+            const line = lines[line_number];
+
+            switch (direction) {
+                .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
+                .right => if (line_offset + 1 < line.size()) return .{
+                    .line_number = line_number,
+                    .line_offset = line_offset + 1,
+                },
+                .up => if (line_number > 0) {
+                    // Clamp the offset in case previous line is shorter than the current one.
+                    // Subtract 1 to go from size to offset, saturated so we don't underflow in the
+                    // case of an empty line.
+                    const prev_line_end = lines[line_number - 1].size() -| 1;
+                    return .{
+                        .line_number = line_number - 1,
+                        .line_offset = @intCast(
+                            if (line_offset > prev_line_end) prev_line_end else line_offset,
+                        ),
+                    };
+                },
+                .down => if (line_number + 1 < lines.len) {
+                    const next_line_end = lines[line_number + 1].size() -| 1;
+                    return .{
+                        .line_number = line_number + 1,
+                        .line_offset = @intCast(
+                            if (line_offset > next_line_end) next_line_end else line_offset,
+                        ),
+                    };
+                },
+            }
+            return position;
+        }
+    };
+
+    pub fn position_from(file: *const File, offset: u32) Position {
+        for (file.lines.items, 0..) |line, line_number| {
             if (offset <= line.tail) return .{
                 .line_number = @intCast(line_number),
                 .line_offset = @intCast(offset - line.head),
@@ -260,47 +311,8 @@ const FilePos = struct {
         } else @panic("Offset not within file bounds");
     }
 
-    pub fn move(
-        file_pos: FilePos,
-        direction: enum { left, down, up, right },
-        lines: []const Line,
-    ) FilePos {
-        const line_number = file_pos.line_number;
-        const line_offset = file_pos.line_offset;
-        const line = lines[line_number];
-
-        switch (direction) {
-            .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
-            .right => if (line_offset + 1 < line.size()) return .{
-                .line_number = line_number,
-                .line_offset = line_offset + 1,
-            },
-            .up => if (line_number > 0) {
-                // Clamp the offset in case previous line is shorter than the current one. Subtract
-                // 1 to go from size to offset, saturated so we don't underflow on empty line.
-                const prev_line_end = lines[line_number - 1].size() -| 1;
-                return .{
-                    .line_number = line_number - 1,
-                    .line_offset = @intCast(
-                        if (line_offset > prev_line_end) prev_line_end else line_offset,
-                    ),
-                };
-            },
-            .down => if (line_number + 1 < lines.len) {
-                const next_line_end = lines[line_number + 1].size() -| 1;
-                return .{
-                    .line_number = line_number + 1,
-                    .line_offset = @intCast(
-                        if (line_offset > next_line_end) next_line_end else line_offset,
-                    ),
-                };
-            },
-        }
-        return file_pos;
-    }
-
-    pub fn to_offset(file_pos: FilePos, lines: []const Line) u32 {
-        return lines[file_pos.line_number].head + file_pos.line_offset;
+    pub fn offset_from(file: *const File, position: Position) u32 {
+        return file.lines.items[position.line_number].head + position.line_offset;
     }
 };
 
