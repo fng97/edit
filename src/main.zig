@@ -172,12 +172,15 @@ pub fn main(init: std.process.Init) !void {
                         _ = try reader.takeDelimiter('t'); // width_pix
                     },
                     else => |c| std.debug.panic(
-                        "Unrecognized sequence: {x}{x}",
+                        "Unrecognised KKP escape sequence: {x}{x}",
                         .{ c, reader.buffered() },
                     ),
                 }
             },
-            else => |c| std.debug.panic("Unrecognized sequence: {x}{x}", .{ c, reader.buffered() }),
+            else => |c| std.debug.panic(
+                "Unrecognised KKP escape sequence: {x}{x}{x}",
+                .{ "\x1b[", c, reader.buffered() },
+            ),
         }
     }
 }
@@ -195,32 +198,39 @@ const FilePos = struct {
         } else @panic("Offset not within file bounds");
     }
 
-    pub fn move(file_pos: FilePos, direction: enum { left, down, up, right }, lines: []const Line) FilePos {
+    pub fn move(
+        file_pos: FilePos,
+        direction: enum { left, down, up, right },
+        lines: []const Line,
+    ) FilePos {
         const line_number = file_pos.line_number;
         const line_offset = file_pos.line_offset;
         const line = lines[line_number];
-        const line_size = line.tail - line.head;
 
         switch (direction) {
             .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
-            .right => if (line_offset + 1 < line_size) return .{
+            .right => if (line_offset + 1 < line.size()) return .{
                 .line_number = line_number,
                 .line_offset = line_offset + 1,
             },
             .up => if (line_number > 0) {
                 // Clamp the offset in case previous line is shorter than the current one. Subtract
-                // 1 to go from size to offset, saturated so we don't underflow.
+                // 1 to go from size to offset, saturated so we don't underflow on empty line.
                 const prev_line_end = lines[line_number - 1].size() -| 1;
                 return .{
                     .line_number = line_number - 1,
-                    .line_offset = @intCast(if (line_offset > prev_line_end) prev_line_end else line_offset),
+                    .line_offset = @intCast(
+                        if (line_offset > prev_line_end) prev_line_end else line_offset,
+                    ),
                 };
             },
             .down => if (line_number + 1 < lines.len) {
                 const next_line_end = lines[line_number + 1].size() -| 1;
                 return .{
                     .line_number = line_number + 1,
-                    .line_offset = @intCast(if (line_offset > next_line_end) next_line_end else line_offset),
+                    .line_offset = @intCast(
+                        if (line_offset > next_line_end) next_line_end else line_offset,
+                    ),
                 };
             },
         }
@@ -280,6 +290,11 @@ fn index_lines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
     }
 }
 
+// TODO: Add simple test for rendering.
+// TODO: Add simple test for rendering.
+// TODO: Add simple fuzz test. Maybe just load file and navigate? Add constraints (like viewport
+// smaller than max line length to get it passing initially) and leave FIXMEs to address later.
+
 test index_lines {
     var lines_buffer: [32]Line = undefined;
     var lines: std.ArrayList(Line) = .initBuffer(&lines_buffer);
@@ -317,6 +332,8 @@ var termios_original: ?std.posix.termios = null;
 pub const panic = std.debug.FullPanic(struct {
     pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         @branchHint(.cold);
+        // TODO: Worth draining stdin on panic so we don't get garbage input by the terminal cursor
+        // once prior terminal restored?
         if (termios_original) |t| {
             var threaded: std.Io.Threaded = .init_single_threaded;
             // Disable KKP (CSI < u) and resize (CSI ) then exit alt screen (CSI ? 1049 l).
