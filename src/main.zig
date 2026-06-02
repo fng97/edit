@@ -9,7 +9,8 @@
 // 0x6  `    a    b    c    d    e    f    g    h    i    j    k    l    m    n    o
 // 0x7  p    q    r    s    t    u    v    w    x    y    z    {    |    }    ~    DEL
 
-// NB: Rows and columns are indexed from (0, 0), representing the top left corner.
+// NB: File cooridnates (line_number, line_offset) are represented by a `File.Position,` while
+// viewport coordinates (row, col) are represented by a `Viewport.Cell`. Both are indexed from 0.
 
 // TODO: Diagnose and get rid of occasional flickering.
 
@@ -164,7 +165,7 @@ const Viewport = struct {
     first_line: u16, // line number of the top line
     gutter_width: u8, // cols to allow for line numbers (and delimiting whitespace)
 
-    pub const Position = struct {
+    pub const Cell = struct {
         row: u16,
         col: u16,
     };
@@ -172,7 +173,7 @@ const Viewport = struct {
     pub fn render(
         viewport: Viewport,
         writer: *std.Io.Writer,
-        cursor: File.Position,
+        cursor_position: File.Position,
         file: *const File,
     ) !void {
         const row_count = viewport.row_count;
@@ -200,23 +201,23 @@ const Viewport = struct {
         try writer.writeAll(file_name);
         const padding_cols_count = col_count -
             file_name.len -
-            digit_count(cursor.line_number + 1) -
-            digit_count(cursor.line_offset + 1) -
+            digit_count(cursor_position.line_number + 1) -
+            digit_count(cursor_position.line_offset + 1) -
             1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
         try writer.splatByteAll(' ', padding_cols_count);
         try writer.print("{d},{d}", .{
-            cursor.line_number + 1,
-            cursor.line_offset + 1,
+            cursor_position.line_number + 1,
+            cursor_position.line_offset + 1,
         });
 
         // Make sure cursor is within the viewport's bounds.
-        const cursor_view_pos = viewport.position_of(cursor, lines);
-        assert(cursor_view_pos.col >= gutter_width); // right of line numbers
-        assert(cursor_view_pos.col < col_count); // does not exceed screen bounds horizontally
-        assert(cursor_view_pos.row < row_count); // does not exceed screen bounds vertically
+        const cursor_cell = viewport.cell_from(cursor_position, lines);
+        assert(cursor_cell.col >= gutter_width); // right of line numbers
+        assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+        assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
 
         // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
-        try writer.print("\x1b[{d};{d}H", .{ cursor_view_pos.row + 1, cursor_view_pos.col + 1 });
+        try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
         try writer.flush();
     }
 
@@ -225,11 +226,11 @@ const Viewport = struct {
         viewport.gutter_width = digit_count(@intCast(@max(viewport.row_count, lines.len))) + 1;
     }
 
-    fn position_of(
+    fn cell_from(
         viewport: Viewport,
-        file_position: File.Position,
+        position: File.Position,
         lines: []const Line,
-    ) Position {
+    ) Cell {
         const row_count = viewport.row_count;
         const col_count = viewport.col_count;
         const first_line = viewport.first_line;
@@ -239,8 +240,8 @@ const Viewport = struct {
         for (first_line..first_line + row_count) |i| if (i < lines.len)
             assert(lines[i].tail - lines[i].head <= col_count);
 
-        const row = file_position.line_number - first_line;
-        const col = file_position.line_offset + gutter_width;
+        const row = position.line_number - first_line;
+        const col = position.line_offset + gutter_width;
         assert(row < row_count);
         assert(col < col_count);
 
