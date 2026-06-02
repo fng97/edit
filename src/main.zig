@@ -344,24 +344,75 @@ fn index_lines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
     }
 }
 
-// TODO: Add simple test for rendering.
-// TODO: Add simple test for rendering.
 // TODO: Add simple fuzz test. Maybe just load file and navigate? Add constraints (like viewport
 // smaller than max line length to get it passing initially) and leave fixmes to address later.
+
+const hello_c =
+    \\#include <stdio.h>
+    \\
+    \\int main() {
+    \\  printf("Hello, world!\n");
+    \\  return 0;
+    \\}
+    \\
+;
+
+test "rendering" {
+    var lines_buffer: [6]Line = undefined;
+    var file: File = .{
+        .name = "hello.c",
+        .bytes = hello_c,
+        .lines = .initBuffer(&lines_buffer),
+    };
+    index_lines(hello_c, &file.lines);
+
+    const row_count = 12;
+    const col_count = 36;
+    var viewport: Viewport = .{
+        .row_count = row_count,
+        .col_count = col_count,
+        .first_line = 0,
+        .gutter_width = 0,
+    };
+    viewport.update_gutter_width(file.lines.items);
+
+    // Need enough room for all cells (rows * cols) plus some extra for escape sequences.
+    const buffer_size = row_count * col_count + 32;
+    var buffer: [buffer_size]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+
+    const cursor: File.Position = .{ .line_number = 0, .line_offset = 0 };
+
+    try viewport.render(&writer, cursor, &file);
+    const result = buffer[0..writer.end];
+
+    // For the comparison below to work we need to strip the carriage returns ('\r').
+    var buffer_stripped: [buffer_size]u8 = undefined;
+    const stripped_count = std.mem.replace(u8, result, "\r", "", &buffer_stripped);
+    const stripped = buffer_stripped[0 .. result.len - stripped_count];
+
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    , stripped);
+}
 
 test index_lines {
     var lines_buffer: [32]Line = undefined;
     var lines: std.ArrayList(Line) = .initBuffer(&lines_buffer);
 
-    const hello_c =
-        \\#include <stdio.h>
-        \\
-        \\int main() {
-        \\  printf("Hello, world!\n");
-        \\  return 0;
-        \\}
-        \\
-    ;
     index_lines(hello_c, &lines);
     try std.testing.expect(lines.items.len == 6);
     try std.testing.expect(lines.items[0].head == 0);
