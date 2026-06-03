@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     const test_step = b.step("test", "Run tests");
+    const install_step = b.getInstallStep();
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -17,7 +18,7 @@ pub fn build(b: *std.Build) void {
         const exe = b.addExecutable(.{ .name = "edit", .root_module = mod });
         b.installArtifact(exe);
         const run = b.addRunArtifact(exe);
-        run.step.dependOn(b.getInstallStep()); // run from prefix
+        run.step.dependOn(install_step); // run from prefix
         if (b.args) |args| run.addArgs(args); // pass args: e.g. zig build run -- arg1
         break :blk &run.step;
     });
@@ -27,6 +28,7 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(exe);
         break :blk &run.step;
     });
+    test_step.dependOn(install_step); // make sure main executable gets built as part of tests
 
     test_step.dependOn(blk: {
         const dep = b.dependency("tidy", .{ .target = b.graph.host, .optimize = .ReleaseSafe });
