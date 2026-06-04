@@ -25,19 +25,13 @@ pub fn main(init: std.process.Init) !void {
     var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
     assert(args_iterator.skip()); // first arg is executable path
     const file_name = args_iterator.next() orelse @panic("Missing file path arg");
-    const file_buffer = try allocator.alloc(u8, 1 * 1024 * 1024); // 1 MiB
-    defer allocator.free(file_buffer);
-    const file_bytes = try std.Io.Dir.cwd().readFile(io, file_name, file_buffer);
-    for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
-    const lines_buffer = try allocator.alloc(Line, 10 * 1024); // ~10k lines max
-    defer allocator.free(lines_buffer);
-
-    var file: File = .{
-        .name = file_name,
-        .bytes = file_bytes,
-        .lines = .initBuffer(lines_buffer),
-    };
-    index_lines(file_bytes, &file.lines);
+    const file_bytes = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        file_name,
+        allocator,
+        .limited(1 * 1024 * 1024), // 1 MiB
+    );
+    defer allocator.free(file_bytes);
 
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
@@ -93,41 +87,48 @@ pub fn main(init: std.process.Init) !void {
     const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
     assert(std.posix.errno(err) == .SUCCESS);
 
-    var cursor_offset: u32 = 0; // start at the first character of the first line
-    var viewport: Viewport = .{
-        .row_count = winsize.row,
-        .col_count = winsize.col,
-        .first_line = 0,
-        .gutter_width = 0,
-    };
-    viewport.update_gutter_width(file.lines.items);
+    var editor: Editor = try .init(
+        allocator,
+        reader,
+        writer,
+        file_name,
+        file_bytes,
+        winsize.row,
+        winsize.col,
+        .{ .file_lines_max = 1024 * 10 },
+    );
+    defer editor.deinit();
 
     loop: while (true) {
         // TODO: Handle file changes. Re-index lines and update gutter width.
 
-        const cursor_position = file.position_from(cursor_offset);
-        const lines = file.lines.items;
+        const cursor_position = editor.file.position_from(editor.cursor_offset);
+        const lines = editor.file.lines.items;
 
         // TODO: Render screen after handling input.
-        try viewport.render(writer, cursor_position, &file);
+        try editor.viewport.render(editor.writer, cursor_position, &editor.file);
 
         // Handle input: parse Kitty Keyboard Protocol events.
         switch (try reader.takeByte()) {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
             0x21...0x7E => |c| switch (c) {
                 'q' => break :loop, // quit
-                'h' => cursor_offset = file.offset_from(cursor_position.move(.left, lines)),
+                'h' => editor.cursor_offset =
+                    editor.file.offset_from(cursor_position.move(.left, lines)),
                 'j' => {
                     const moved = cursor_position.move(.down, lines);
-                    cursor_offset = file.offset_from(moved);
-                    if (moved.line_number > viewport.last_line()) viewport.first_line += 1;
+                    editor.cursor_offset = editor.file.offset_from(moved);
+                    if (moved.line_number > editor.viewport.last_line())
+                        editor.viewport.first_line += 1;
                 },
                 'k' => {
                     const moved = cursor_position.move(.up, lines);
-                    cursor_offset = file.offset_from(moved);
-                    if (moved.line_number < viewport.first_line) viewport.first_line -= 1;
+                    editor.cursor_offset = editor.file.offset_from(moved);
+                    if (moved.line_number < editor.viewport.first_line)
+                        editor.viewport.first_line -= 1;
                 },
-                'l' => cursor_offset = file.offset_from(cursor_position.move(.right, lines)),
+                'l' => editor.cursor_offset =
+                    editor.file.offset_from(cursor_position.move(.right, lines)),
                 else => {},
             },
             '\x1b' => { // escape sequence
@@ -138,9 +139,9 @@ pub fn main(init: std.process.Init) !void {
 
                     // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
                     48 => {
-                        viewport.row_count =
+                        editor.viewport.row_count =
                             try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-                        viewport.col_count =
+                        editor.viewport.col_count =
                             try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
                         _ = try reader.takeDelimiter(';'); // height_pix
                         _ = try reader.takeDelimiter('t'); // width_pix
@@ -158,6 +159,58 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
+
+const Editor = struct {
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    file: File,
+    viewport: Viewport,
+    cursor_offset: u32,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        reader: *std.Io.Reader,
+        writer: *std.Io.Writer,
+        file_name: []const u8,
+        file_bytes: []const u8,
+        row_count: u16,
+        col_count: u16,
+        options: struct { file_lines_max: u16 },
+    ) !Editor {
+        // File must be ASCII.
+        for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
+
+        var file: File = .{
+            .name = file_name,
+            .bytes = file_bytes,
+            .lines = try .initCapacity(allocator, options.file_lines_max),
+        };
+        errdefer file.lines.deinit(allocator);
+        index_lines(file_bytes, &file.lines);
+
+        var viewport: Viewport = .{
+            .row_count = row_count,
+            .col_count = col_count,
+            .first_line = 0,
+            .gutter_width = 0,
+        };
+        viewport.update_gutter_width(file.lines.items);
+
+        return .{
+            .allocator = allocator,
+            .reader = reader,
+            .writer = writer,
+            .file = file,
+            .viewport = viewport,
+            .cursor_offset = 0,
+        };
+    }
+
+    pub fn deinit(editor: *Editor) void {
+        editor.file.lines.deinit(editor.allocator);
+    }
+};
 
 const Viewport = struct {
     row_count: u16,
@@ -358,38 +411,39 @@ const hello_c =
 ;
 
 test "rendering" {
-    var lines_buffer: [6]Line = undefined;
-    var file: File = .{
-        .name = "hello.c",
-        .bytes = hello_c,
-        .lines = .initBuffer(&lines_buffer),
-    };
-    index_lines(hello_c, &file.lines);
-
+    const allocator = std.testing.allocator;
+    var reader = std.Io.Reader.fixed(&.{});
+    var writer = std.Io.Writer.Allocating.init(allocator);
     const row_count = 12;
     const col_count = 36;
-    var viewport: Viewport = .{
-        .row_count = row_count,
-        .col_count = col_count,
-        .first_line = 0,
-        .gutter_width = 0,
-    };
-    viewport.update_gutter_width(file.lines.items);
 
-    // Need enough room for all cells (rows * cols) plus some extra for escape sequences.
-    const buffer_size = row_count * col_count + 32;
-    var buffer: [buffer_size]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
+    var editor: Editor = try .init(
+        std.testing.allocator,
+        &reader,
+        &writer.writer,
+        "hello.c",
+        hello_c,
+        row_count,
+        col_count,
+        .{ .file_lines_max = 1024 * 10 },
+    );
+    defer editor.deinit();
 
-    const cursor: File.Position = .{ .line_number = 0, .line_offset = 0 };
+    try editor.viewport.render(
+        &writer.writer,
+        editor.file.position_from(editor.cursor_offset),
+        &editor.file,
+    );
 
-    try viewport.render(&writer, cursor, &file);
-    const result = buffer[0..writer.end];
+    var array_list = writer.toArrayList();
+    defer array_list.deinit(allocator);
+    const result = array_list.items;
 
     // For the comparison below to work we need to strip the carriage returns ('\r').
-    var buffer_stripped: [buffer_size]u8 = undefined;
-    const stripped_count = std.mem.replace(u8, result, "\r", "", &buffer_stripped);
-    const stripped = buffer_stripped[0 .. result.len - stripped_count];
+    var stripped_buffer = try allocator.alloc(u8, result.len);
+    defer allocator.free(stripped_buffer);
+    const stripped_count = std.mem.replace(u8, result, "\r", "", stripped_buffer);
+    const stripped = stripped_buffer[0 .. result.len - stripped_count];
 
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
