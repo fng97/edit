@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
     loop: while (true) {
         // TODO: Handle file changes. Re-index lines and update gutter width.
 
-        const cursor_position = editor.file.position_from(editor.cursor_offset);
+        const cursor_position = editor.file.position_from(editor.cursor.offset);
         const lines = editor.file.lines.items;
 
         // TODO: Render screen after handling input.
@@ -113,21 +113,21 @@ pub fn main(init: std.process.Init) !void {
             // Key events that produce text are sent directly as UTF-8 encyoded bytes.
             0x21...0x7E => |c| switch (c) {
                 'q' => break :loop, // quit
-                'h' => editor.cursor_offset =
+                'h' => editor.cursor.offset =
                     editor.file.offset_from(cursor_position.move(.left, lines)),
                 'j' => {
                     const moved = cursor_position.move(.down, lines);
-                    editor.cursor_offset = editor.file.offset_from(moved);
+                    editor.cursor.offset = editor.file.offset_from(moved);
                     if (moved.line_number > editor.viewport.last_line())
                         editor.viewport.first_line += 1;
                 },
                 'k' => {
                     const moved = cursor_position.move(.up, lines);
-                    editor.cursor_offset = editor.file.offset_from(moved);
+                    editor.cursor.offset = editor.file.offset_from(moved);
                     if (moved.line_number < editor.viewport.first_line)
                         editor.viewport.first_line -= 1;
                 },
-                'l' => editor.cursor_offset =
+                'l' => editor.cursor.offset =
                     editor.file.offset_from(cursor_position.move(.right, lines)),
                 else => {},
             },
@@ -166,7 +166,7 @@ const Editor = struct {
     writer: *std.Io.Writer,
     file: File,
     viewport: Viewport,
-    cursor_offset: u32,
+    cursor: Cursor,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -203,13 +203,18 @@ const Editor = struct {
             .writer = writer,
             .file = file,
             .viewport = viewport,
-            .cursor_offset = 0,
+            .cursor = .{ .offset = 0, .sticky_col = 0 },
         };
     }
 
     pub fn deinit(editor: *Editor) void {
         editor.file.lines.deinit(editor.allocator);
     }
+};
+
+const Cursor = struct {
+    offset: u32,
+    sticky_col: u16,
 };
 
 const Viewport = struct {
@@ -431,7 +436,7 @@ test "rendering" {
 
     try editor.viewport.render(
         &writer.writer,
-        editor.file.position_from(editor.cursor_offset),
+        editor.file.position_from(editor.cursor.offset),
         &editor.file,
     );
 
