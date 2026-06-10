@@ -419,6 +419,7 @@ test "rendering" {
     const allocator = std.testing.allocator;
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
     const row_count = 12;
     const col_count = 36;
 
@@ -439,10 +440,7 @@ test "rendering" {
         editor.file.position_from(editor.cursor.offset),
         &editor.file,
     );
-
-    var array_list = writer.toArrayList();
-    defer array_list.deinit(allocator);
-    const result = array_list.items;
+    const result = writer.written();
 
     // For the comparison below to work we need to strip the carriage returns ('\r').
     var stripped_buffer = try allocator.alloc(u8, result.len);
