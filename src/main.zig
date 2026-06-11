@@ -102,7 +102,7 @@ pub fn main(init: std.process.Init) !void {
     loop: while (true) {
         // TODO: Handle file changes. Re-index lines and update gutter width.
 
-        const cursor_position = editor.file.position_from(editor.cursor.offset);
+        const cursor_position = editor.file.positionFrom(editor.cursor.offset);
         const lines = editor.file.lines.items;
 
         // TODO: Render screen after handling input.
@@ -114,21 +114,21 @@ pub fn main(init: std.process.Init) !void {
             0x21...0x7E => |c| switch (c) {
                 'q' => break :loop, // quit
                 'h' => editor.cursor.offset =
-                    editor.file.offset_from(cursor_position.move(.left, lines)),
+                    editor.file.offsetFrom(cursor_position.move(.left, lines)),
                 'j' => {
                     const moved = cursor_position.move(.down, lines);
-                    editor.cursor.offset = editor.file.offset_from(moved);
-                    if (moved.line_number > editor.viewport.last_line())
+                    editor.cursor.offset = editor.file.offsetFrom(moved);
+                    if (moved.line_number > editor.viewport.lastLine())
                         editor.viewport.first_line += 1;
                 },
                 'k' => {
                     const moved = cursor_position.move(.up, lines);
-                    editor.cursor.offset = editor.file.offset_from(moved);
+                    editor.cursor.offset = editor.file.offsetFrom(moved);
                     if (moved.line_number < editor.viewport.first_line)
                         editor.viewport.first_line -= 1;
                 },
                 'l' => editor.cursor.offset =
-                    editor.file.offset_from(cursor_position.move(.right, lines)),
+                    editor.file.offsetFrom(cursor_position.move(.right, lines)),
                 else => {},
             },
             '\x1b' => { // escape sequence
@@ -187,7 +187,7 @@ const Editor = struct {
             .lines = try .initCapacity(allocator, options.file_lines_max),
         };
         errdefer file.lines.deinit(allocator);
-        index_lines(file_bytes, &file.lines);
+        indexLines(file_bytes, &file.lines);
 
         var viewport: Viewport = .{
             .row_count = row_count,
@@ -195,7 +195,7 @@ const Editor = struct {
             .first_line = 0,
             .gutter_width = 0,
         };
-        viewport.update_gutter_width(file.lines.items);
+        viewport.updateGutterWidth(file.lines.items);
 
         return .{
             .allocator = allocator,
@@ -259,8 +259,8 @@ const Viewport = struct {
         try writer.writeAll(file_name);
         const padding_cols_count = col_count -
             file_name.len -
-            digit_count(cursor_position.line_number + 1) -
-            digit_count(cursor_position.line_offset + 1) -
+            digitCount(cursor_position.line_number + 1) -
+            digitCount(cursor_position.line_offset + 1) -
             1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
         try writer.splatByteAll(' ', padding_cols_count);
         try writer.print("{d},{d}", .{
@@ -269,7 +269,7 @@ const Viewport = struct {
         });
 
         // Make sure cursor is within the viewport's bounds.
-        const cursor_cell = viewport.cell_from(cursor_position, lines);
+        const cursor_cell = viewport.cellFrom(cursor_position, lines);
         assert(cursor_cell.col >= gutter_width); // right of line numbers
         assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
         assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
@@ -280,11 +280,11 @@ const Viewport = struct {
     }
 
     /// Update gutter width, enough digits for the greatest line number plus one for padding.
-    pub fn update_gutter_width(viewport: *Viewport, lines: []const Line) void {
-        viewport.gutter_width = digit_count(@intCast(@max(viewport.row_count, lines.len))) + 1;
+    pub fn updateGutterWidth(viewport: *Viewport, lines: []const Line) void {
+        viewport.gutter_width = digitCount(@intCast(@max(viewport.row_count, lines.len))) + 1;
     }
 
-    fn cell_from(
+    fn cellFrom(
         viewport: Viewport,
         position: File.Position,
         lines: []const Line,
@@ -307,7 +307,7 @@ const Viewport = struct {
     }
 
     // Calculate index of last line in viewport.
-    pub fn last_line(viewport: Viewport) u16 {
+    pub fn lastLine(viewport: Viewport) u16 {
         // The -2 below: -1 to go from count to index and another -1 for the status line.
         return viewport.first_line + viewport.row_count - 2;
     }
@@ -363,7 +363,7 @@ const File = struct {
         }
     };
 
-    pub fn position_from(file: *const File, offset: u32) Position {
+    pub fn positionFrom(file: *const File, offset: u32) Position {
         for (file.lines.items, 0..) |line, line_number| {
             if (offset <= line.tail) return .{
                 .line_number = @intCast(line_number),
@@ -372,7 +372,7 @@ const File = struct {
         } else @panic("Offset not within file bounds");
     }
 
-    pub fn offset_from(file: *const File, position: Position) u32 {
+    pub fn offsetFrom(file: *const File, position: Position) u32 {
         return file.lines.items[position.line_number].head + position.line_offset;
     }
 };
@@ -390,7 +390,7 @@ const Line = struct {
     }
 };
 
-fn index_lines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
+fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
     lines.clearRetainingCapacity();
     assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
     var head: u32 = 0;
@@ -437,7 +437,7 @@ test "rendering" {
 
     try editor.viewport.render(
         &writer.writer,
-        editor.file.position_from(editor.cursor.offset),
+        editor.file.positionFrom(editor.cursor.offset),
         &editor.file,
     );
     const result = writer.written();
@@ -466,25 +466,25 @@ test "rendering" {
     , stripped);
 }
 
-test index_lines {
+test indexLines {
     var lines_buffer: [32]Line = undefined;
     var lines: std.ArrayList(Line) = .initBuffer(&lines_buffer);
 
-    index_lines(hello_c, &lines);
+    indexLines(hello_c, &lines);
     try std.testing.expect(lines.items.len == 6);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 18);
     try std.testing.expect(lines.getLast().tail == hello_c.len - 1);
 
     const empty_file = "\n"; // need at least a newline
-    index_lines(empty_file, &lines);
+    indexLines(empty_file, &lines);
     try std.testing.expect(lines.items.len == 1);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 0);
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
-fn digit_count(number: u16) u8 {
+fn digitCount(number: u16) u8 {
     return std.math.log10_int(number) + 1;
 }
 
