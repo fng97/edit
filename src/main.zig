@@ -160,6 +160,85 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
+/// Kitty Keyboard Protocol modifiers:
+///
+/// shift     0b1         (1)
+/// alt       0b10        (2)
+/// ctrl      0b100       (4)
+/// super     0b1000      (8)
+/// hyper     0b10000     (16)
+/// meta      0b100000    (32)
+/// caps_lock 0b1000000   (64)
+/// num_lock  0b10000000  (128)
+const Modifiers = packed struct(u8) {
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
+    super: bool,
+    hyper: bool,
+    meta: bool,
+    caps_lock: bool,
+    num_lock: bool,
+
+    /// Decode modifiers from ASCII value passed in escape sequence: "In the escape code, the
+    /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
+    /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
+    /// 0b101 = 6 and so on.".
+    pub fn decode(encoded: []const u8) !Modifiers {
+        // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
+        const value = try std.fmt.parseInt(u9, encoded, 10);
+        assert(value != 0);
+        const byte: u8 = @intCast(value - 1);
+        return @bitCast(byte);
+    }
+};
+
+test Modifiers {
+    try std.testing.expect(try Modifiers.decode("1") == Modifiers{
+        .shift = false,
+        .alt = false,
+        .ctrl = false,
+        .super = false,
+        .hyper = false,
+        .meta = false,
+        .caps_lock = false,
+        .num_lock = false,
+    });
+
+    try std.testing.expect(try Modifiers.decode("2") == Modifiers{
+        .shift = true,
+        .alt = false,
+        .ctrl = false,
+        .super = false,
+        .hyper = false,
+        .meta = false,
+        .caps_lock = false,
+        .num_lock = false,
+    });
+
+    try std.testing.expect(try Modifiers.decode("6") == Modifiers{
+        .shift = true,
+        .alt = false,
+        .ctrl = true,
+        .super = false,
+        .hyper = false,
+        .meta = false,
+        .caps_lock = false,
+        .num_lock = false,
+    });
+
+    try std.testing.expect(try Modifiers.decode("256") == Modifiers{
+        .shift = true,
+        .alt = true,
+        .ctrl = true,
+        .super = true,
+        .hyper = true,
+        .meta = true,
+        .caps_lock = true,
+        .num_lock = true,
+    });
+}
+
 const Editor = struct {
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -420,8 +499,6 @@ test "rendering" {
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-    const row_count = 12;
-    const col_count = 36;
 
     var editor: Editor = try .init(
         std.testing.allocator,
@@ -429,8 +506,8 @@ test "rendering" {
         &writer.writer,
         "hello.c",
         hello_c,
-        row_count,
-        col_count,
+        12,
+        36,
         .{ .file_lines_max = 1024 * 10 },
     );
     defer editor.deinit();
