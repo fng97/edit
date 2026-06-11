@@ -467,8 +467,12 @@ test "rendering" {
 }
 
 test indexLines {
-    var lines_buffer: [32]Line = undefined;
-    var lines: std.ArrayList(Line) = .initBuffer(&lines_buffer);
+    const allocator = std.testing.allocator;
+    var lines: std.ArrayList(Line) = try .initCapacity(
+        allocator,
+        std.mem.countScalar(u8, hello_c, '\n'),
+    );
+    defer lines.deinit(allocator);
 
     indexLines(hello_c, &lines);
     try std.testing.expect(lines.items.len == 6);
