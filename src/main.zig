@@ -481,8 +481,49 @@ fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
     }
 }
 
-// TODO: Add simple fuzz test. Maybe just load file and navigate? Add constraints (like viewport
-// smaller than max line length to get it passing initially) and leave fixmes to address later.
+test fuzzer {
+    return std.testing.fuzz({}, fuzzer, .{});
+}
+fn fuzzer(_: void, smith: *std.testing.Smith) !void {
+    @disableInstrumentation();
+
+    const allocator = std.testing.allocator;
+
+    // FIXME: I think instead of generating a file size then allocating we could just allocate a max
+    // buffer and use the Smith slice functions.
+    const file_size_max = 1 * 1024 * 1024;
+    const file_size = smith.valueRangeAtMost(u32, 0, file_size_max);
+    const file_buffer = try allocator.alloc(u8, file_size);
+    // TODO: Use multiple strategies. Random bytes, weighted (mimic code character distribution),
+    // empty, etc.
+    smith.bytes(file_buffer);
+    const file_name_size = smith.value(u8);
+    const file_name_buffer = try allocator.alloc(u8, file_name_size);
+    smith.bytes(file_name_buffer);
+
+    var reader = std.Io.Reader.fixed(&.{});
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+
+    var editor: Editor = try .init(
+        std.testing.allocator,
+        &reader,
+        &writer.writer,
+        file_name_buffer,
+        file_buffer,
+        // TODO: Generate dimensions randomly too.
+        12,
+        36,
+        .{ .file_lines_max = 1024 * 10 },
+    );
+    defer editor.deinit();
+
+    try editor.viewport.render(
+        &writer.writer,
+        editor.file.positionFrom(editor.cursor.offset),
+        &editor.file,
+    );
+}
 
 const hello_c =
     \\#include <stdio.h>
