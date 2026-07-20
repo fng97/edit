@@ -260,7 +260,7 @@ const Editor = struct {
     ) !Editor {
         // File must not be empty, contain only ASCII, and end in newline.
         assert(file_bytes.len != 0);
-        for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
+        for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
         if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
 
         var file: File = .{
@@ -522,7 +522,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         36,
         .{ .file_lines_max = 1024 * 10 },
     ) catch |err| switch (err) {
-        error.FileNotNewlineTerminated => return,
+        error.FileNotNewlineTerminated, error.FileNotAscii => return,
         else => return err,
     };
     defer editor.deinit();
