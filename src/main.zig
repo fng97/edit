@@ -499,13 +499,31 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     const file_size = smith.valueRangeAtMost(u32, 1, file_size_max);
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
-    // TODO: Use multiple strategies. Random bytes, weighted (mimic code character distribution),
-    // empty, etc.
-    smith.bytes(file_buffer);
-    const file_name_size = smith.value(u8);
-    const file_name_buffer = try allocator.alloc(u8, file_name_size);
-    defer allocator.free(file_name_buffer);
-    smith.bytes(file_name_buffer);
+
+    const Strategy = enum { all, ascii, printable, code };
+    smith.bytesWeighted(file_buffer, switch (smith.valueWeighted(Strategy, &.{
+        .value(Strategy, .all, 1),
+        .value(Strategy, .ascii, 1),
+        .value(Strategy, .printable, 1),
+        .value(Strategy, .code, 27),
+    })) {
+        .all => std.testing.Smith.baselineWeights(u8),
+        .ascii => &.{.rangeAtMost(u8, 0, 127, 1)},
+        .printable => &.{.rangeAtMost(u8, 0x20, 0x7E, 1)},
+        .code => &.{
+            .value(u8, ' ', 30),
+            .rangeAtMost(u8, '!', '/', 5), // ! " # $ % & ' ( ) * + , - . /
+            .rangeAtMost(u8, '0', '9', 10),
+            .rangeAtMost(u8, ':', '@', 5), // : ; < = > ? @
+            .rangeAtMost(u8, 'A', 'Z', 15),
+            .rangeAtMost(u8, '[', '`', 5), // [ \ ] ^ _ `
+            .rangeAtMost(u8, 'a', 'z', 30),
+            .rangeAtMost(u8, '{', '~', 5), // { | } ~
+            .value(u8, '\n', 15),
+            // TODO: Handle tabs.
+            // .value(u8, '\t', 5),
+        },
+    });
 
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
