@@ -257,8 +257,10 @@ const Editor = struct {
         col_count: u16,
         options: struct { file_lines_max: u16 },
     ) !Editor {
-        // File must be ASCII.
+        // File must not be empty, contain only ASCII, and end in newline.
+        assert(file_bytes.len != 0);
         for (file_bytes) |byte| assert(std.ascii.isAscii(byte));
+        if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
 
         var file: File = .{
             .name = file_name,
@@ -492,7 +494,8 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     // FIXME: I think instead of generating a file size then allocating we could just allocate a max
     // buffer and use the Smith slice functions.
     const file_size_max = 1 * 1024 * 1024;
-    const file_size = smith.valueRangeAtMost(u32, 0, file_size_max);
+    // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
+    const file_size = smith.valueRangeAtMost(u32, 1, file_size_max);
     const file_buffer = try allocator.alloc(u8, file_size);
     // TODO: Use multiple strategies. Random bytes, weighted (mimic code character distribution),
     // empty, etc.
@@ -505,7 +508,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
 
-    var editor: Editor = try .init(
+    var editor = Editor.init(
         std.testing.allocator,
         &reader,
         &writer.writer,
@@ -515,7 +518,10 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         12,
         36,
         .{ .file_lines_max = 1024 * 10 },
-    );
+    ) catch |err| switch (err) {
+        error.FileNotNewlineTerminated => return,
+        else => return err,
+    };
     defer editor.deinit();
 
     try editor.viewport.render(
@@ -535,7 +541,7 @@ const hello_c =
     \\
 ;
 
-test "rendering" {
+test "rendering: hello_c" {
     const allocator = std.testing.allocator;
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
@@ -584,6 +590,55 @@ test "rendering" {
     , stripped);
 }
 
+test "rendering: empty" {
+    const allocator = std.testing.allocator;
+    var reader = std.Io.Reader.fixed(&.{});
+    var writer = std.Io.Writer.Allocating.init(allocator);
+    defer writer.deinit();
+
+    var editor: Editor = try .init(
+        std.testing.allocator,
+        &reader,
+        &writer.writer,
+        "empty.zig",
+        "\n",
+        12,
+        36,
+        .{ .file_lines_max = 1024 * 10 },
+    );
+    defer editor.deinit();
+
+    try editor.viewport.render(
+        &writer.writer,
+        editor.file.positionFrom(editor.cursor.offset),
+        &editor.file,
+    );
+    const result = writer.written();
+
+    // For the comparison below to work we need to strip the carriage returns ('\r').
+    var stripped_buffer = try allocator.alloc(u8, result.len);
+    defer allocator.free(stripped_buffer);
+    const stripped_count = std.mem.replace(u8, result, "\r", "", stripped_buffer);
+    const stripped = stripped_buffer[0 .. result.len - stripped_count];
+
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 
+        \\ 2 ~
+        \\ 3 ~
+        \\ 4 ~
+        \\ 5 ~
+        \\ 6 ~
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\empty.zig                        1,1
+    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    , stripped);
+}
+
 test indexLines {
     const allocator = std.testing.allocator;
     var lines: std.ArrayList(Line) = try .initCapacity(
@@ -598,7 +653,9 @@ test indexLines {
     try std.testing.expect(lines.items[0].tail == 18);
     try std.testing.expect(lines.getLast().tail == hello_c.len - 1);
 
-    const empty_file = "\n"; // need at least a newline
+    // This function should never be called with an empty slice. Empty files are handled by
+    // inserting a single newline.
+    const empty_file = "\n";
     indexLines(empty_file, &lines);
     try std.testing.expect(lines.items.len == 1);
     try std.testing.expect(lines.items[0].head == 0);
