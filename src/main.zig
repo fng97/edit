@@ -71,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
         writer.writeAll("\x1b[?1049l") catch {}; // exit alt screen
         writer.flush() catch {};
     }
+
     // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
     // the convention for fullscreen TUIs like vim, tmux, etc.
     try writer.writeAll("\x1b[?1049h");
@@ -80,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.writeAll("\x1b[?2048h");
     try writer.flush();
 
-    // TODO: Get rid of this. Expect to get the dimensions on first pass of loop below.
+    // TODO: Get rid of this? Expect to get the dimensions on first pass of loop below.
     // Get window size using ioctl. Future resizing relies on in-band resize notifications (escape
     // sequences).
     var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
@@ -183,7 +184,7 @@ const Modifiers = packed struct(u8) {
     /// Decode modifiers from ASCII value passed in escape sequence: "In the escape code, the
     /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
     /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
-    /// 0b101 = 6 and so on.".
+    /// 0b101 = 6 and so on."
     pub fn decode(encoded: []const u8) !Modifiers {
         // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
         const value = try std.fmt.parseInt(u9, encoded, 10);
@@ -491,17 +492,19 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
 
     const allocator = std.testing.allocator;
 
-    // FIXME: I think instead of generating a file size then allocating we could just allocate a max
+    // TODO: I think instead of generating a file size then allocating we could just allocate a max
     // buffer and use the Smith slice functions.
     const file_size_max = 1 * 1024 * 1024;
     // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
     const file_size = smith.valueRangeAtMost(u32, 1, file_size_max);
     const file_buffer = try allocator.alloc(u8, file_size);
+    defer allocator.free(file_buffer);
     // TODO: Use multiple strategies. Random bytes, weighted (mimic code character distribution),
     // empty, etc.
     smith.bytes(file_buffer);
     const file_name_size = smith.value(u8);
     const file_name_buffer = try allocator.alloc(u8, file_name_size);
+    defer allocator.free(file_name_buffer);
     smith.bytes(file_name_buffer);
 
     var reader = std.Io.Reader.fixed(&.{});
@@ -676,14 +679,14 @@ pub const panic = std.debug.FullPanic(struct {
         // TODO: Worth draining stdin on panic so we don't get garbage input by the terminal cursor
         // once prior terminal restored?
         if (termios_original) |t| {
+            termios_original = null; // so we only do this once
             var threaded: std.Io.Threaded = .init_single_threaded;
-            // Disable KKP (CSI < u) and resize (CSI ) then exit alt screen (CSI ? 1049 l).
+            // Disable KKP (CSI < u) and resize (CSI ? 2048 l) then exit alt screen (CSI ? 1049 l).
             std.Io.File.stdout().writeStreamingAll(
                 threaded.io(),
                 "\x1b[<u\x1b[?2048l\x1b[?1049l",
             ) catch {};
             std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
-            termios_original = null; // so we only do this once
         }
         std.debug.defaultPanic(msg, first_trace_addr);
     }
