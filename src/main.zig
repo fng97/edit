@@ -338,13 +338,14 @@ const Viewport = struct {
         );
 
         // Draw status line. Displayed line number and offset should be indexed from 1.
-        try writer.writeAll(file_name);
-        const padding_cols_count = col_count -
-            file_name.len -
-            digitCount(cursor_position.line_number + 1) -
-            digitCount(cursor_position.line_offset + 1) -
+        const cursor_coordinates_col_count =
+            digitCount(cursor_position.line_number + 1) +
+            digitCount(cursor_position.line_offset + 1) +
             1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-        try writer.splatByteAll(' ', padding_cols_count);
+        assert(file_name.len < col_count - cursor_coordinates_col_count);
+        const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
+        try writer.writeAll(file_name);
+        try writer.splatByteAll(' ', padding_col_count);
         try writer.print("{d},{d}", .{
             cursor_position.line_number + 1,
             cursor_position.line_offset + 1,
@@ -525,6 +526,16 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         },
     });
 
+    // TODO: Generate these too.
+    const row_count = 12;
+    const col_count = 36;
+
+    // TODO: Handle file path not fitting in status bar. For now just use fixed name.
+    // const file_name_size = smith.valueRangeAtMost(u8, 0, col_count);
+    // const file_name_buffer = try allocator.alloc(u8, file_name_size);
+    // defer allocator.free(file_name_buffer);
+    // smith.bytes(file_name_buffer);
+
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
@@ -533,17 +544,18 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         std.testing.allocator,
         &reader,
         &writer.writer,
-        file_name_buffer,
+        "main.zig",
         file_buffer,
-        // TODO: Generate dimensions randomly too.
-        12,
-        36,
+        row_count,
+        col_count,
         .{ .file_lines_max = 1024 * 10 },
     ) catch |err| switch (err) {
         error.FileNotNewlineTerminated, error.FileNotAscii => return,
         else => return err,
     };
     defer editor.deinit();
+
+    // TODO: Place cursor somewhere randomly.
 
     try editor.viewport.render(
         &writer.writer,
