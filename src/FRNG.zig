@@ -1,15 +1,12 @@
 const std = @import("std");
+
 const assert = std.debug.assert;
+const log = std.log;
+const FRNG = @This();
 
 entropy: []const u8,
 
 pub const Error = error{OutOfEntropy};
-
-const FRNG = @This();
-
-pub fn init(entropy: []const u8) FRNG {
-    return .{ .entropy = entropy };
-}
 
 pub fn bytes(frng: *FRNG, size: usize) Error![]const u8 {
     if (frng.entropy.len < size) return error.OutOfEntropy;
@@ -69,7 +66,7 @@ pub fn index(frng: *FRNG, slice: anytype) Error!usize {
     return try frng.range_inclusive(usize, 0, slice.len - 1);
 }
 
-pub fn swarm_weights(frng: *FRNG, Weights: type) Error!Weights {
+pub fn random_weights(frng: *FRNG, Weights: type) Error!Weights {
     var result: Weights = undefined;
     inline for (comptime std.meta.fieldNames(Weights)) |field| {
         @field(result, field) = try frng.range_inclusive(u32, 1, 100);
@@ -98,60 +95,13 @@ pub fn weighted(frng: *FRNG, weights: anytype) Error!std.meta.FieldEnum(@TypeOf(
     unreachable;
 }
 
-pub const Driver = struct {
+const Driver = struct {
     io: std.Io,
     sut: []const u8,
     buffer: []u8,
 
-    const log = std.log;
-
-    pub fn main(
-        gpa: std.mem.Allocator,
-        io: std.Io,
-        sut: []const u8,
-        operation: union(enum) {
-            replay: struct { size: u32, seed: u64 },
-            search: struct {
-                attempts: u32 = 100,
-                size_max: u32 = 4 * 1024 * 1024,
-            },
-        },
-    ) !void {
-        const size_max = switch (operation) {
-            .replay => |options| options.size,
-            .search => |options| options.size_max,
-        };
-
-        const buffer = try gpa.alloc(u8, size_max);
-        defer gpa.free(buffer);
-
-        var driver: Driver = .{
-            .io = io,
-            .buffer = buffer,
-            .sut = sut,
-        };
-
-        switch (operation) {
-            .replay => |options| {
-                const outcome = try driver.run_once(.{
-                    .size = options.size,
-                    .seed = options.seed,
-                    .quiet = false,
-                });
-                log.info("{t}", .{outcome});
-            },
-            .search => |options| {
-                const outcome = try driver.search(.{ .attempts = options.attempts });
-                switch (outcome) {
-                    .pass => log.info("ok", .{}),
-                    .fail => |fail| {
-                        log.err("minimized size={} seed={}", .{ fail.size, fail.seed });
-                    },
-                }
-            },
-        }
-    }
-
+    // TODO: Rewrite this. Difficult to read. `pass` should track the inverse and be called
+    // `found_fail`. Refactor to get rid of the `_next` suffixes.
     fn search(driver: Driver, options: struct {
         attempts: u32 = 100,
     }) !union(enum) { pass, fail: struct { size: u32, seed: u64 } } {
@@ -162,9 +112,9 @@ pub const Driver = struct {
         var size: u32 = 16;
         var step: u32 = 16;
         for (0..1024) |_| {
-            if (step == 0) break;
+            if (step == 0 or size == 0) break;
             const size_next = if (pass) size + step else size -| step;
-            if (size > driver.buffer.len) break;
+            if (size_next > driver.buffer.len) break;
 
             const outcome = try driver.run_multiple(.{
                 .size = size_next,
@@ -211,12 +161,11 @@ pub const Driver = struct {
             var seed: u64 = undefined;
             driver.io.random(@ptrCast(&seed));
 
-            const outcome = try driver.run_once(.{
+            switch (try driver.run_once(.{
                 .seed = seed,
                 .size = options.size,
                 .quiet = true,
-            });
-            switch (outcome) {
+            })) {
                 .fail => return .{ .fail = seed },
                 .pass => {},
             }
@@ -246,10 +195,63 @@ pub const Driver = struct {
         child.stdin = null;
 
         const term = try child.wait(driver.io);
-        return if (success(term)) .pass else .fail;
-    }
-
-    fn success(term: std.process.Child.Term) bool {
-        return term == .exited and term.exited == 0;
+        return if (term == .exited and term.exited == 0) .pass else .fail;
     }
 };
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+
+    var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
+    assert(args_iterator.skip()); // first arg is executable path
+    const sut = args_iterator.next() orelse @panic("Missing file path arg");
+
+    const operation: union(enum) {
+        replay: struct { size: u32, seed: u64 },
+        search: struct {
+            attempts: u32 = 100,
+            size_max: u32 = 4 * 1024 * 1024,
+        },
+    } = .{ .search = .{} }; // FIXME: Use arg.
+
+    const size_max = switch (operation) {
+        .replay => |options| options.size,
+        .search => |options| options.size_max,
+    };
+
+    const buffer = try allocator.alloc(u8, size_max);
+    defer allocator.free(buffer);
+
+    var driver: Driver = .{
+        .io = io,
+        .buffer = buffer,
+        .sut = sut,
+    };
+
+    switch (operation) {
+        .replay => |options| {
+            const outcome = try driver.run_once(.{
+                .size = options.size,
+                .seed = options.seed,
+                .quiet = false,
+            });
+            log.info("{t}", .{outcome});
+        },
+        .search => |options| {
+            const outcome = try driver.search(.{ .attempts = options.attempts });
+            switch (outcome) {
+                .pass => log.info("ok", .{}),
+                .fail => |fail| {
+                    log.err("minimized size={} seed={}", .{ fail.size, fail.seed });
+                    // Replay the minimised seed verbosely.
+                    _ = try driver.run_once(.{
+                        .size = fail.size,
+                        .seed = fail.seed,
+                        .quiet = false,
+                    });
+                },
+            }
+        },
+    }
+}
