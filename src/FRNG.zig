@@ -203,19 +203,32 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
-    assert(args_iterator.skip()); // first arg is executable path
-    const sut = args_iterator.next() orelse @panic("Missing file path arg");
-
-    const operation: union(enum) {
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    assert(args.skip()); // first arg is executable path
+    const sut = args.next() orelse @panic("Missing file path arg");
+    const mode: union(enum) {
         replay: struct { size: u32, seed: u64 },
-        search: struct {
-            attempts: u32 = 100,
-            size_max: u32 = 4 * 1024 * 1024,
-        },
-    } = .{ .search = .{} }; // FIXME: Use arg.
+        search: struct { attempts: u32, size_max: u32 },
+    } = blk: {
+        const arg = args.next() orelse @panic("Missing mode arg");
+        const replay_prefix = "--replay="; // --replay={size}:{seed}
+        const search_prefix = "--search="; // --search={attempts}:{size_max}
+        const colon_index = std.mem.indexOfScalar(u8, arg, ':') orelse @panic("Invalid arg");
 
-    const size_max = switch (operation) {
+        if (std.mem.startsWith(u8, arg, search_prefix)) break :blk .{
+            .search = .{
+                .attempts = try std.fmt.parseInt(u32, arg[search_prefix.len..colon_index], 10),
+                .size_max = try std.fmt.parseInt(u32, arg[colon_index + 1 ..], 10),
+            },
+        } else if (std.mem.startsWith(u8, arg, replay_prefix)) break :blk .{
+            .replay = .{
+                .size = try std.fmt.parseInt(u32, arg[replay_prefix.len..colon_index], 10),
+                .seed = try std.fmt.parseInt(u64, arg[colon_index + 1 ..], 10),
+            },
+        } else @panic("Unrecognised arg");
+    };
+
+    const size_max = switch (mode) {
         .replay => |options| options.size,
         .search => |options| options.size_max,
     };
@@ -229,29 +242,30 @@ pub fn main(init: std.process.Init) !void {
         .sut = sut,
     };
 
-    switch (operation) {
-        .replay => |options| {
-            const outcome = try driver.run_once(.{
-                .size = options.size,
-                .seed = options.seed,
-                .quiet = false,
-            });
-            log.info("{t}", .{outcome});
-        },
-        .search => |options| {
-            const outcome = try driver.search(.{ .attempts = options.attempts });
-            switch (outcome) {
-                .pass => log.info("ok", .{}),
-                .fail => |fail| {
-                    log.err("minimized size={} seed={}", .{ fail.size, fail.seed });
-                    // Replay the minimised seed verbosely.
-                    _ = try driver.run_once(.{
-                        .size = fail.size,
-                        .seed = fail.seed,
-                        .quiet = false,
-                    });
-                },
-            }
+    switch (mode) {
+        .replay => |options| _ = try driver.run_once(.{
+            .size = options.size,
+            .seed = options.seed,
+            .quiet = false,
+        }),
+        .search => |options| switch (try driver.search(.{ .attempts = options.attempts })) {
+            .pass => log.info("ok", .{}),
+            .fail => |fail| {
+                log.err(
+                    "minimized failure (size={}, seed={}) printed the following to stderr",
+                    .{ fail.size, fail.seed },
+                );
+                // Replay the minimised seed verbosely.
+                _ = try driver.run_once(.{
+                    .size = fail.size,
+                    .seed = fail.seed,
+                    .quiet = false,
+                });
+                log.err(
+                    "replay with:\n\tzig build fuzz -- --replay={}:{}",
+                    .{ fail.size, fail.seed },
+                );
+            },
         },
     }
 }
