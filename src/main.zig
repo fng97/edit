@@ -240,7 +240,7 @@ test Modifiers {
     });
 }
 
-const Editor = struct {
+pub const Editor = struct {
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
