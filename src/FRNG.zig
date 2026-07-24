@@ -29,7 +29,7 @@ pub fn boolean(frng: *FRNG) Error!bool {
     return (try frng.int(u8)) & 1 == 1;
 }
 
-pub fn int_inclusive(frng: *FRNG, Int: type, max: Int) Error!Int {
+pub fn intInclusive(frng: *FRNG, Int: type, max: Int) Error!Int {
     comptime assert(@typeInfo(Int).int.signedness == .unsigned);
     if (max == std.math.maxInt(Int)) return try frng.int(Int);
 
@@ -55,21 +55,21 @@ pub fn int_inclusive(frng: *FRNG, Int: type, max: Int) Error!Int {
     return @intCast(m >> bits);
 }
 
-pub fn range_inclusive(frng: *FRNG, Int: type, min: Int, max: Int) Error!Int {
+pub fn rangeInclusive(frng: *FRNG, Int: type, min: Int, max: Int) Error!Int {
     comptime assert(@typeInfo(Int).int.signedness == .unsigned);
     assert(min <= max);
-    return min + try frng.int_inclusive(Int, max - min);
+    return min + try frng.intInclusive(Int, max - min);
 }
 
 pub fn index(frng: *FRNG, slice: anytype) Error!usize {
     assert(slice.len > 0);
-    return try frng.range_inclusive(usize, 0, slice.len - 1);
+    return try frng.rangeInclusive(usize, 0, slice.len - 1);
 }
 
-pub fn random_weights(frng: *FRNG, Weights: type) Error!Weights {
+pub fn randomWeights(frng: *FRNG, Weights: type) Error!Weights {
     var result: Weights = undefined;
     inline for (comptime std.meta.fieldNames(Weights)) |field| {
-        @field(result, field) = try frng.range_inclusive(u32, 1, 100);
+        @field(result, field) = try frng.rangeInclusive(u32, 1, 100);
     }
     return result;
 }
@@ -81,7 +81,7 @@ pub fn weighted(frng: *FRNG, weights: anytype) Error!std.meta.FieldEnum(@TypeOf(
     inline for (fields) |field| total += @field(weights, field);
     assert(total > 0);
 
-    var pick = try frng.int_inclusive(u64, total - 1);
+    var pick = try frng.intInclusive(u64, total - 1);
     inline for (fields) |field| {
         const weight = @field(weights, field);
         if (pick < weight) {
@@ -116,7 +116,7 @@ const Driver = struct {
             const size_next = if (pass) size + step else size -| step;
             if (size_next > driver.buffer.len) break;
 
-            const outcome = try driver.run_multiple(.{
+            const outcome = try driver.runMultiple(.{
                 .size = size_next,
                 .attempts = options.attempts,
             });
@@ -151,7 +151,7 @@ const Driver = struct {
         } };
     }
 
-    fn run_multiple(driver: Driver, options: struct {
+    fn runMultiple(driver: Driver, options: struct {
         size: u32,
         attempts: u32,
     }) !union(enum) { pass, fail: u64 } {
@@ -161,7 +161,7 @@ const Driver = struct {
             var seed: u64 = undefined;
             driver.io.random(@ptrCast(&seed));
 
-            switch (try driver.run_once(.{
+            switch (try driver.runOnce(.{
                 .seed = seed,
                 .size = options.size,
                 .quiet = true,
@@ -173,7 +173,7 @@ const Driver = struct {
         return .pass;
     }
 
-    fn run_once(driver: Driver, options: struct {
+    fn runOnce(driver: Driver, options: struct {
         size: u32,
         seed: u64,
         quiet: bool,
@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     switch (mode) {
-        .replay => |options| _ = try driver.run_once(.{
+        .replay => |options| _ = try driver.runOnce(.{
             .size = options.size,
             .seed = options.seed,
             .quiet = false,
@@ -256,7 +256,7 @@ pub fn main(init: std.process.Init) !void {
                     .{ fail.size, fail.seed },
                 );
                 // Replay the minimised seed verbosely.
-                _ = try driver.run_once(.{
+                _ = try driver.runOnce(.{
                     .size = fail.size,
                     .seed = fail.seed,
                     .quiet = false,

@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
 
     // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
     if (frng.entropy.len / 2 < 1) return;
-    const file_size = frng.range_inclusive(u32, 1, @intCast(frng.entropy.len / 2)) catch return;
+    const file_size = frng.rangeInclusive(u32, 1, @intCast(frng.entropy.len / 2)) catch return;
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
     // These weights are based on the byte distribution of some big projects I had cloned.
@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         .newline = 24,
         .tab = 62,
     }) catch return) {
-        .printable => frng.range_inclusive(u8, '!', '~') catch return,
+        .printable => frng.rangeInclusive(u8, '!', '~') catch return,
         .space => ' ',
         .tab => '\t',
         .newline => '\n',
@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     // const file_name_size = frng.int(u8); // TODO: Is this big enough?
     // const file_name_buffer = try.allocator.alloc(u8, file_name_size);
     // defer allocator.free(file_name_buffer);
-    // for (file_name_buffer) |*byte| byte.* = frng.range_inclusive(u8, ?, ?) catch return;
+    // for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, ?, ?) catch return;
 
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
