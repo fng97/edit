@@ -354,7 +354,7 @@ const Viewport = struct {
         });
 
         // Make sure cursor is within the viewport's bounds.
-        const cursor_cell = viewport.cellFrom(cursor_position, lines);
+        const cursor_cell = viewport.cellFrom(cursor_position);
         assert(cursor_cell.col >= gutter_width); // right of line numbers
         assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
         assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
@@ -369,19 +369,17 @@ const Viewport = struct {
         viewport.gutter_width = digitCount(@intCast(@max(viewport.row_count, lines.len))) + 1;
     }
 
-    fn cellFrom(
-        viewport: Viewport,
-        position: File.Position,
-        lines: []const Line,
-    ) Cell {
+    fn cellFrom(viewport: Viewport, position: File.Position) Cell {
         const row_count = viewport.row_count;
         const col_count = viewport.col_count;
         const first_line = viewport.first_line;
         const gutter_width = viewport.gutter_width;
 
-        // TODO: Get line wrapping working later.
-        for (first_line..first_line + row_count) |i| if (i < lines.len)
-            assert(lines[i].tail - lines[i].head <= col_count);
+        assert(position.line_number >= first_line);
+        assert(position.line_number < first_line + row_count);
+        const start_offset = 0; // TODO: Add this to viewport state.
+        assert(position.line_offset >= start_offset);
+        assert(position.line_offset < start_offset + col_count);
 
         const row = position.line_number - first_line;
         const col = position.line_offset + gutter_width;
