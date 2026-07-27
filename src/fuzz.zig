@@ -37,11 +37,10 @@ pub fn main(init: std.process.Init) !void {
     const row_count = 12;
     const col_count = 36;
 
-    // TODO: Handle file path not fitting in status bar. For now just use fixed name.
-    // const file_name_size = frng.int(u8); // TODO: Is this big enough?
-    // const file_name_buffer = try.allocator.alloc(u8, file_name_size);
-    // defer allocator.free(file_name_buffer);
-    // for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, ?, ?) catch return;
+    const file_name_size = frng.int(u8) catch return; // TODO: Is this big enough?
+    const file_name_buffer = try allocator.alloc(u8, file_name_size);
+    defer allocator.free(file_name_buffer);
+    for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, 0x20, 0x7E) catch return;
 
     var reader = std.Io.Reader.fixed(&.{});
     var writer = std.Io.Writer.Allocating.init(allocator);
@@ -51,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         &reader,
         &writer.writer,
-        "main.zig",
+        file_name_buffer,
         file_buffer,
         row_count,
         col_count,

@@ -344,6 +344,8 @@ const Viewport = struct {
             digitCount(cursor_position.line_number + 1) +
             digitCount(cursor_position.line_offset + 1) +
             1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+        // TODO: Display the relative file path.
+        // TODO: Minimise the file_name (path).
         assert(file_name.len < col_count - cursor_coordinates_col_count);
         const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
         try writer.writeAll(file_name);
