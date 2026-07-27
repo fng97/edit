@@ -1,8 +1,6 @@
 const std = @import("std");
 const FRNG = @import("FRNG.zig");
-
-// TODO: Move this struct out into separate file.
-const Editor = @import("main.zig").Editor;
+const Editor = @import("Editor.zig");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
