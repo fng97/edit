@@ -242,6 +242,7 @@ test Modifiers {
 
 pub const Editor = struct {
     const file_lines_max = 1024 * 10; // 10 MiB
+    const file_line_size_max = 999;
 
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
@@ -344,10 +345,17 @@ const Viewport = struct {
             digitCount(cursor_position.line_number + 1) +
             digitCount(cursor_position.line_offset + 1) +
             1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-        assert(file_name.len < col_count - cursor_coordinates_col_count);
-        const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
-        try writer.writeAll(file_name);
-        try writer.splatByteAll(' ', padding_col_count);
+        // TODO: Display the relative file path.
+        // TODO: Minimise the file_name (path). For now, only print it if it fits.
+        const cursor_coordinates_col_count_max =
+            digitCount(Editor.file_lines_max) +
+            digitCount(Editor.file_line_size_max) +
+            1;
+        if (file_name.len + cursor_coordinates_col_count_max < col_count) {
+            const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
+            try writer.writeAll(file_name);
+            try writer.splatByteAll(' ', padding_col_count);
+        } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count_max);
         try writer.print("{d},{d}", .{
             cursor_position.line_number + 1,
             cursor_position.line_offset + 1,
