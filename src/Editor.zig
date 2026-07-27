@@ -247,14 +247,21 @@ const Viewport = struct {
         try writer.writeAll("\x1b[H"); // place cursor at top left
 
         // The -1 below is to leave room for the status line.
-        for (first_line..first_line + row_count - 1) |line_number| try writer.print(
-            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
-            .{
-                .line_number = line_number + 1, // displayed line number indexed from 1
-                .gutter_width = gutter_width - 1, // extra space of padding already in format string
-                .line = if (line_number < lines.len) lines[line_number].slice(file_bytes) else "~",
-            },
-        );
+        for (first_line..first_line + row_count - 1) |line_number| {
+            const line = if (line_number < lines.len) blk: {
+                const line_full = lines[line_number].slice(file_bytes);
+                const line_size = @min(line_full.len, col_count - gutter_width);
+                break :blk line_full[0..line_size];
+            } else "~";
+            try writer.print(
+                "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
+                .{
+                    .line_number = line_number + 1, // displayed line number indexed from 1
+                    .gutter_width = gutter_width - 1, // extra space already in format string
+                    .line = line,
+                },
+            );
+        }
 
         // Draw status line. Displayed line number and offset should be indexed from 1.
         const cursor_coordinates_col_count =
