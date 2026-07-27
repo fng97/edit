@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
         // By default, run fuzzing search (find failure then minimise).
         if (b.args) |args| run.addArgs(args) else {
             const attempts = 100; // test attempts per fuzzing input size
-            const size_max = 4 * 1024 * 1024; // max entropy size per test
+            const size_max = 8 * 1024 * 1024; // max entropy size per test
             run.addArg(b.fmt("--search={}:{}", .{ attempts, size_max }));
         }
         break :blk &run.step;
