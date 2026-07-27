@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
     const file_size = frng.rangeInclusive(u32, 1, @intCast(frng.entropy.len / 2)) catch return;
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
-    // These weights are based on the byte distribution of some big projects I had cloned.
+    // These weights are loosely based on the byte distribution of the TigerBeetle source code.
     for (file_buffer) |*byte| byte.* = switch (frng.weighted(.{
         .printable = 662,
         .space = 252,
@@ -57,16 +57,16 @@ pub fn main(init: std.process.Init) !void {
         col_count,
         .{ .file_lines_max = 1024 * 10 },
     ) catch |err| switch (err) {
-        error.FileNotAscii => return,
+        error.FileNotAscii, error.FileTooManyLines => return,
         else => return err,
     };
     defer editor.deinit();
-
-    // TODO: Place cursor somewhere randomly.
 
     try editor.viewport.render(
         &writer.writer,
         editor.file.positionFrom(editor.cursor.offset),
         &editor.file,
     );
+
+    // TODO: Feed input to stdin.
 }

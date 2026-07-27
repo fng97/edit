@@ -241,6 +241,8 @@ test Modifiers {
 }
 
 pub const Editor = struct {
+    const file_lines_max = 1024 * 10; // 10 MiB
+
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
@@ -269,7 +271,7 @@ pub const Editor = struct {
             .lines = try .initCapacity(allocator, options.file_lines_max),
         };
         errdefer file.lines.deinit(allocator);
-        indexLines(file_bytes, &file.lines);
+        try indexLines(file_bytes, &file.lines);
 
         var viewport: Viewport = .{
             .row_count = row_count,
@@ -473,13 +475,14 @@ const Line = struct {
     }
 };
 
-fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) void {
+fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileTooManyLines}!void {
     lines.clearRetainingCapacity();
     assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
     var head: u32 = 0;
     while (head < file_bytes.len) {
         var tail = head;
         while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
+        if (lines.items.len == Editor.file_lines_max) return error.FileTooManyLines;
         lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
         head = tail + 1;
     }
@@ -637,7 +640,7 @@ test "rendering: empty" {
         "\n",
         12,
         36,
-        .{ .file_lines_max = 1024 * 10 },
+        .{ .file_lines_max = Editor.file_lines_max },
     );
     defer editor.deinit();
 
@@ -680,7 +683,7 @@ test indexLines {
     );
     defer lines.deinit(allocator);
 
-    indexLines(hello_c, &lines);
+    try indexLines(hello_c, &lines);
     try std.testing.expect(lines.items.len == 6);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 18);
@@ -689,7 +692,7 @@ test indexLines {
     // This function should never be called with an empty slice. Empty files are handled by
     // inserting a single newline.
     const empty_file = "\n";
-    indexLines(empty_file, &lines);
+    try indexLines(empty_file, &lines);
     try std.testing.expect(lines.items.len == 1);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 0);
