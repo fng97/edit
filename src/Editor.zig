@@ -22,9 +22,119 @@ const file_line_size_max = 999;
 allocator: std.mem.Allocator,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
-file: File,
-viewport: Viewport,
+
+// Viewport state:
+row_count: u16,
+col_count: u16,
+first_line: u16, // line number of the top line
+
+// File state:
+name: []const u8,
+bytes: []const u8,
+lines: std.ArrayList(Line),
+
 cursor: Cursor,
+
+const Position = struct {
+    line_number: u16, // zero-indexed
+    line_offset: u16,
+
+    pub fn move(
+        position: Position,
+        direction: enum { left, down, up, right },
+        lines: []const Line,
+    ) Position {
+        const line_number = position.line_number;
+        const line_offset = position.line_offset;
+        const line = lines[line_number];
+
+        switch (direction) {
+            .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
+            .right => if (line_offset + 1 < line.size()) return .{
+                .line_number = line_number,
+                .line_offset = line_offset + 1,
+            },
+            .up => if (line_number > 0) {
+                // Clamp the offset in case previous line is shorter than the current one.
+                // Subtract 1 to go from size to offset, saturated so we don't underflow in the
+                // case of an empty line.
+                const prev_line_end = lines[line_number - 1].size() -| 1;
+                return .{
+                    .line_number = line_number - 1,
+                    .line_offset = @intCast(
+                        if (line_offset > prev_line_end) prev_line_end else line_offset,
+                    ),
+                };
+            },
+            .down => if (line_number + 1 < lines.len) {
+                const next_line_end = lines[line_number + 1].size() -| 1;
+                return .{
+                    .line_number = line_number + 1,
+                    .line_offset = @intCast(
+                        if (line_offset > next_line_end) next_line_end else line_offset,
+                    ),
+                };
+            },
+        }
+        return position;
+    }
+};
+
+const Cell = struct {
+    row: u16,
+    col: u16,
+};
+
+const Cursor = struct {
+    offset: u32,
+    sticky_col: u16,
+};
+
+const Line = struct {
+    head: u32, // line start offset
+    tail: u32, // line end offset (always a newline)
+
+    pub fn slice(line: Line, file_bytes: []const u8) []const u8 {
+        return file_bytes[line.head..line.tail];
+    }
+
+    pub fn size(line: Line) u32 {
+        return line.tail - line.head;
+    }
+};
+
+/// Kitty Keyboard Protocol modifiers:
+///
+/// shift     0b1         (1)
+/// alt       0b10        (2)
+/// ctrl      0b100       (4)
+/// super     0b1000      (8)
+/// hyper     0b10000     (16)
+/// meta      0b100000    (32)
+/// caps_lock 0b1000000   (64)
+/// num_lock  0b10000000  (128)
+const Modifiers = packed struct(u8) {
+    shift: bool,
+    alt: bool,
+    ctrl: bool,
+    super: bool,
+    hyper: bool,
+    meta: bool,
+    caps_lock: bool,
+    num_lock: bool,
+
+    /// Decode modifiers from ASCII value passed in escape sequence: "In the escape code, the
+    /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
+    /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
+    /// 0b101 = 6 and so on."
+    pub fn decode(encoded: []const u8) !Modifiers {
+        // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
+        const value = try std.fmt.parseInt(u9, encoded, 10);
+        assert(value != 0);
+        const byte: u8 = @intCast(value - 1);
+        return @bitCast(byte);
+    }
+};
 
 pub fn init(
     allocator: std.mem.Allocator,
@@ -39,36 +149,30 @@ pub fn init(
     for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
     if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
 
-    var file: File = .{
-        .name = file_name,
-        .bytes = file_bytes,
-        .lines = try .initCapacity(allocator, options.file_lines_max),
-    };
-    errdefer file.lines.deinit(allocator);
-    try indexLines(file_bytes, &file.lines);
-
     const dimensions = switch (try parseOne(reader)) {
         .resize => |resize| resize,
         else => @panic("First event must be resize"),
     };
 
-    return .{
+    var editor: Editor = .{
         .allocator = allocator,
         .reader = reader,
         .writer = writer,
-        .file = file,
-        .viewport = .{
-            .row_count = dimensions.row_count,
-            .col_count = dimensions.col_count,
-            .first_line = 0,
-            .gutter_width = gutterWidth(dimensions.row_count, @intCast(file.lines.items.len)),
-        },
+        .row_count = dimensions.row_count,
+        .col_count = dimensions.col_count,
+        .first_line = 0,
+        .name = file_name,
+        .bytes = file_bytes,
+        .lines = try .initCapacity(allocator, options.file_lines_max),
         .cursor = .{ .offset = 0, .sticky_col = 0 },
     };
+    try indexLines(file_bytes, &editor.lines);
+
+    return editor;
 }
 
 pub fn deinit(editor: *Editor) void {
-    editor.file.lines.deinit(editor.allocator);
+    editor.lines.deinit(editor.allocator);
 }
 
 /// Handle input: parse Kitty Keyboard Protocol events.
@@ -112,49 +216,51 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 pub fn tick(editor: *Editor) !bool {
     try editor.render();
 
-    const lines = editor.file.lines;
-    var cursor_position = editor.file.positionFrom(editor.cursor.offset);
+    const lines = editor.lines.items;
+    const cursor_position = positionFrom(lines, editor.cursor.offset);
     switch (try parseOne(editor.reader)) {
         .ascii => |c| switch (c) {
             'q' => return false, // quit
-            'h' => editor.cursor.offset =
-                editor.file.offsetFrom(cursor_position.move(.left, lines.items)),
+            'h' => editor.cursor.offset = offsetFrom(lines, cursor_position.move(.left, lines)),
             'j' => {
-                const moved = cursor_position.move(.down, lines.items);
-                editor.cursor.offset = editor.file.offsetFrom(moved);
-                if (moved.line_number > editor.viewport.lastLine())
-                    editor.viewport.first_line += 1;
+                const moved = cursor_position.move(.down, lines);
+                editor.cursor.offset = offsetFrom(lines, moved);
+                // The -2 below: -1 to go from count to index and another -1 for the status line.
+                const last_line = editor.first_line + editor.row_count - 2;
+                if (moved.line_number > last_line) editor.first_line += 1;
             },
             'k' => {
-                const moved = cursor_position.move(.up, lines.items);
-                editor.cursor.offset = editor.file.offsetFrom(moved);
-                if (moved.line_number < editor.viewport.first_line)
-                    editor.viewport.first_line -= 1;
+                const moved = cursor_position.move(.up, lines);
+                editor.cursor.offset = offsetFrom(lines, moved);
+                if (moved.line_number < editor.first_line) editor.first_line -= 1;
             },
-            'l' => editor.cursor.offset =
-                editor.file.offsetFrom(cursor_position.move(.right, lines.items)),
+            'l' => editor.cursor.offset = offsetFrom(lines, cursor_position.move(.right, lines)),
             else => {},
         },
         .resize => |resize| {
-            editor.viewport.row_count = resize.row_count;
-            editor.viewport.col_count = resize.col_count;
+            editor.row_count = resize.row_count;
+            editor.col_count = resize.col_count;
         },
     }
 
     return true;
 }
 
+// TODO: Make this private and only use `tick()`?
 pub fn render(editor: *const Editor) !void {
     const writer = editor.writer;
-    const row_count = editor.viewport.row_count;
-    const col_count = editor.viewport.col_count;
-    const first_line = editor.viewport.first_line;
-    const file_bytes = editor.file.bytes;
-    const file_name = editor.file.name;
-    const lines = editor.file.lines.items;
-    const cursor_position = editor.file.positionFrom(editor.cursor.offset);
+    const row_count = editor.row_count;
+    const col_count = editor.col_count;
+    const first_line = editor.first_line;
+    const file_bytes = editor.bytes;
+    const file_name = editor.name;
+    const lines = editor.lines.items;
+    const cursor = editor.cursor;
 
-    const gutter_width = gutterWidth(col_count, @intCast(lines.len));
+    // TODO: Do we need to calculate this here AND in tick()?
+    const cursor_position = positionFrom(lines, cursor.offset);
+    // Determine gutter width, enough digits for the greatest line number plus one for padding.
+    const gutter_width: u8 = digitCount(@intCast(@max(row_count, lines.len))) + 1;
 
     try writer.writeAll("\x1b[2J"); // clear screen
     try writer.writeAll("\x1b[H"); // place cursor at top left
@@ -202,7 +308,7 @@ pub fn render(editor: *const Editor) !void {
     const start_offset = 0; // TODO: Add this to viewport state.
     assert(cursor_position.line_offset >= start_offset);
     assert(cursor_position.line_offset < start_offset + col_count);
-    const cursor_cell: Viewport.Cell = .{
+    const cursor_cell: Cell = .{
         .row = cursor_position.line_number - first_line,
         .col = cursor_position.line_offset + gutter_width,
     };
@@ -215,194 +321,23 @@ pub fn render(editor: *const Editor) !void {
     try writer.flush();
 }
 
-/// Kitty Keyboard Protocol modifiers:
-///
-/// shift     0b1         (1)
-/// alt       0b10        (2)
-/// ctrl      0b100       (4)
-/// super     0b1000      (8)
-/// hyper     0b10000     (16)
-/// meta      0b100000    (32)
-/// caps_lock 0b1000000   (64)
-/// num_lock  0b10000000  (128)
-const Modifiers = packed struct(u8) {
-    shift: bool,
-    alt: bool,
-    ctrl: bool,
-    super: bool,
-    hyper: bool,
-    meta: bool,
-    caps_lock: bool,
-    num_lock: bool,
-
-    /// Decode modifiers from ASCII value passed in escape sequence: "In the escape code, the
-    /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
-    /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
-    /// 0b101 = 6 and so on."
-    pub fn decode(encoded: []const u8) !Modifiers {
-        // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
-        const value = try std.fmt.parseInt(u9, encoded, 10);
-        assert(value != 0);
-        const byte: u8 = @intCast(value - 1);
-        return @bitCast(byte);
-    }
-};
-
-test Modifiers {
-    try std.testing.expect(try Modifiers.decode("1") == Modifiers{
-        .shift = false,
-        .alt = false,
-        .ctrl = false,
-        .super = false,
-        .hyper = false,
-        .meta = false,
-        .caps_lock = false,
-        .num_lock = false,
-    });
-
-    try std.testing.expect(try Modifiers.decode("2") == Modifiers{
-        .shift = true,
-        .alt = false,
-        .ctrl = false,
-        .super = false,
-        .hyper = false,
-        .meta = false,
-        .caps_lock = false,
-        .num_lock = false,
-    });
-
-    try std.testing.expect(try Modifiers.decode("6") == Modifiers{
-        .shift = true,
-        .alt = false,
-        .ctrl = true,
-        .super = false,
-        .hyper = false,
-        .meta = false,
-        .caps_lock = false,
-        .num_lock = false,
-    });
-
-    try std.testing.expect(try Modifiers.decode("256") == Modifiers{
-        .shift = true,
-        .alt = true,
-        .ctrl = true,
-        .super = true,
-        .hyper = true,
-        .meta = true,
-        .caps_lock = true,
-        .num_lock = true,
-    });
-}
-
-const Cursor = struct {
-    offset: u32,
-    sticky_col: u16,
-};
-
-/// Determine gutter width, enough digits for the greatest line number plus one for padding.
-pub fn gutterWidth(row_count: u16, last_line: u16) u8 {
-    return digitCount(@intCast(@max(row_count, last_line))) + 1;
-}
-
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
 fn digitCount(number: u16) u8 {
     return std.math.log10_int(number) + 1;
 }
 
-const Viewport = struct {
-    row_count: u16,
-    col_count: u16,
-    first_line: u16, // line number of the top line
-    gutter_width: u8, // cols to allow for line numbers (and delimiting whitespace)
+fn positionFrom(lines: []const Line, offset: u32) Position {
+    for (lines, 0..) |line, line_number| {
+        if (offset <= line.tail) return .{
+            .line_number = @intCast(line_number),
+            .line_offset = @intCast(offset - line.head),
+        };
+    } else @panic("Offset not within file bounds");
+}
 
-    pub const Cell = struct {
-        row: u16,
-        col: u16,
-    };
-
-    // Calculate index of last line in viewport.
-    pub fn lastLine(viewport: Viewport) u16 {
-        // The -2 below: -1 to go from count to index and another -1 for the status line.
-        return viewport.first_line + viewport.row_count - 2;
-    }
-};
-
-const File = struct {
-    name: []const u8,
-    bytes: []const u8,
-    lines: std.ArrayList(Line),
-
-    const Position = struct {
-        line_number: u16, // zero-indexed
-        line_offset: u16,
-
-        pub fn move(
-            position: Position,
-            direction: enum { left, down, up, right },
-            lines: []const Line,
-        ) Position {
-            const line_number = position.line_number;
-            const line_offset = position.line_offset;
-            const line = lines[line_number];
-
-            switch (direction) {
-                .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
-                .right => if (line_offset + 1 < line.size()) return .{
-                    .line_number = line_number,
-                    .line_offset = line_offset + 1,
-                },
-                .up => if (line_number > 0) {
-                    // Clamp the offset in case previous line is shorter than the current one.
-                    // Subtract 1 to go from size to offset, saturated so we don't underflow in the
-                    // case of an empty line.
-                    const prev_line_end = lines[line_number - 1].size() -| 1;
-                    return .{
-                        .line_number = line_number - 1,
-                        .line_offset = @intCast(
-                            if (line_offset > prev_line_end) prev_line_end else line_offset,
-                        ),
-                    };
-                },
-                .down => if (line_number + 1 < lines.len) {
-                    const next_line_end = lines[line_number + 1].size() -| 1;
-                    return .{
-                        .line_number = line_number + 1,
-                        .line_offset = @intCast(
-                            if (line_offset > next_line_end) next_line_end else line_offset,
-                        ),
-                    };
-                },
-            }
-            return position;
-        }
-    };
-
-    pub fn positionFrom(file: *const File, offset: u32) Position {
-        for (file.lines.items, 0..) |line, line_number| {
-            if (offset <= line.tail) return .{
-                .line_number = @intCast(line_number),
-                .line_offset = @intCast(offset - line.head),
-            };
-        } else @panic("Offset not within file bounds");
-    }
-
-    pub fn offsetFrom(file: *const File, position: Position) u32 {
-        return file.lines.items[position.line_number].head + position.line_offset;
-    }
-};
-
-const Line = struct {
-    head: u32, // line start offset
-    tail: u32, // line end offset (always a newline)
-
-    pub fn slice(line: Line, file_bytes: []const u8) []const u8 {
-        return file_bytes[line.head..line.tail];
-    }
-
-    pub fn size(line: Line) u32 {
-        return line.tail - line.head;
-    }
-};
+fn offsetFrom(lines: []const Line, position: Position) u32 {
+    return lines[position.line_number].head + position.line_offset;
+}
 
 fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileTooManyLines}!void {
     lines.clearRetainingCapacity();
@@ -494,6 +429,52 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     defer editor.deinit();
 
     try editor.render();
+}
+
+test Modifiers {
+    try std.testing.expect(try Modifiers.decode("1") == Modifiers{
+        .shift = false,
+        .alt = false,
+        .ctrl = false,
+        .super = false,
+        .hyper = false,
+        .meta = false,
+        .caps_lock = false,
+        .num_lock = false,
+    });
+
+    try std.testing.expect(try Modifiers.decode("2") == Modifiers{
+        .shift = true,
+        .alt = false,
+        .ctrl = false,
+        .super = false,
+        .hyper = false,
+        .meta = false,
+        .caps_lock = false,
+        .num_lock = false,
+    });
+
+    try std.testing.expect(try Modifiers.decode("6") == Modifiers{
+        .shift = true,
+        .alt = false,
+        .ctrl = true,
+        .super = false,
+        .hyper = false,
+        .meta = false,
+        .caps_lock = false,
+        .num_lock = false,
+    });
+
+    try std.testing.expect(try Modifiers.decode("256") == Modifiers{
+        .shift = true,
+        .alt = true,
+        .ctrl = true,
+        .super = true,
+        .hyper = true,
+        .meta = true,
+        .caps_lock = true,
+        .num_lock = true,
+    });
 }
 
 const hello_c =
