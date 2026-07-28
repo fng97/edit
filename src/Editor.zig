@@ -32,9 +32,7 @@ pub fn init(
     writer: *std.Io.Writer,
     file_name: []const u8,
     file_bytes: []const u8,
-    row_count: u16,
-    col_count: u16,
-    options: struct { file_lines_max: u16 },
+    options: struct { file_lines_max: u16 = file_lines_max },
 ) !Editor {
     // File must not be empty, contain only ASCII, and end in newline.
     assert(file_bytes.len != 0);
@@ -49,20 +47,22 @@ pub fn init(
     errdefer file.lines.deinit(allocator);
     try indexLines(file_bytes, &file.lines);
 
-    var viewport: Viewport = .{
-        .row_count = row_count,
-        .col_count = col_count,
-        .first_line = 0,
-        .gutter_width = 0,
+    const dimensions = switch (try parseOne(reader)) {
+        .resize => |resize| resize,
+        else => @panic("First event must be resize"),
     };
-    viewport.updateGutterWidth(file.lines.items);
 
     return .{
         .allocator = allocator,
         .reader = reader,
         .writer = writer,
         .file = file,
-        .viewport = viewport,
+        .viewport = .{
+            .row_count = dimensions.row_count,
+            .col_count = dimensions.col_count,
+            .first_line = 0,
+            .gutter_width = gutterWidth(dimensions.row_count, @intCast(file.lines.items.len)),
+        },
         .cursor = .{ .offset = 0, .sticky_col = 0 },
     };
 }
@@ -71,39 +71,14 @@ pub fn deinit(editor: *Editor) void {
     editor.file.lines.deinit(editor.allocator);
 }
 
-pub fn tick(editor: *Editor) !bool {
-    // TODO: Handle file changes. Re-index lines and update gutter width.
-
-    const reader = editor.reader;
-    const cursor_position = editor.file.positionFrom(editor.cursor.offset);
-    const lines = editor.file.lines.items;
-
-    // TODO: Render screen after handling input.
-    try editor.viewport.render(editor.writer, cursor_position, &editor.file);
-
-    // Handle input: parse Kitty Keyboard Protocol events.
+/// Handle input: parse Kitty Keyboard Protocol events.
+fn parseOne(reader: *std.Io.Reader) !union(enum) {
+    resize: struct { row_count: u16, col_count: u16 },
+    ascii: u8,
+} {
     switch (try reader.takeByte()) {
         // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-        0x21...0x7E => |c| switch (c) {
-            'q' => return false, // quit
-            'h' => editor.cursor.offset =
-                editor.file.offsetFrom(cursor_position.move(.left, lines)),
-            'j' => {
-                const moved = cursor_position.move(.down, lines);
-                editor.cursor.offset = editor.file.offsetFrom(moved);
-                if (moved.line_number > editor.viewport.lastLine())
-                    editor.viewport.first_line += 1;
-            },
-            'k' => {
-                const moved = cursor_position.move(.up, lines);
-                editor.cursor.offset = editor.file.offsetFrom(moved);
-                if (moved.line_number < editor.viewport.first_line)
-                    editor.viewport.first_line -= 1;
-            },
-            'l' => editor.cursor.offset =
-                editor.file.offsetFrom(cursor_position.move(.right, lines)),
-            else => {},
-        },
+        0x21...0x7E => |c| return .{ .ascii = c },
         '\x1b' => { // escape sequence
             assert(try reader.takeByte() == '['); // escape sequences must start with CSI
             switch (try std.fmt.parseInt(i32, (try reader.takeDelimiter(';')).?, 10)) {
@@ -112,26 +87,132 @@ pub fn tick(editor: *Editor) !bool {
 
                 // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
                 48 => {
-                    editor.viewport.row_count =
+                    const row_count =
                         try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-                    editor.viewport.col_count =
+                    const col_count =
                         try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
                     _ = try reader.takeDelimiter(';'); // height_pix
                     _ = try reader.takeDelimiter('t'); // width_pix
+                    return .{ .resize = .{ .row_count = row_count, .col_count = col_count } };
                 },
-                else => |c| std.debug.panic(
-                    "Unrecognised KKP escape sequence: {x}{x}",
-                    .{ c, reader.buffered() },
-                ),
+                else => |c| std.debug.panic("Unrecognised KKP escape sequence: {x}{x}", .{
+                    c,
+                    reader.buffered(),
+                }),
             }
         },
-        else => |c| std.debug.panic(
-            "Unrecognised KKP escape sequence: {x}{x}{x}",
-            .{ "\x1b[", c, reader.buffered() },
-        ),
+        else => |c| std.debug.panic("Unrecognised KKP escape sequence: {x}{x}{x}", .{
+            "\x1b[",
+            c,
+            reader.buffered(),
+        }),
+    }
+}
+
+pub fn tick(editor: *Editor) !bool {
+    try editor.render();
+
+    const lines = editor.file.lines;
+    var cursor_position = editor.file.positionFrom(editor.cursor.offset);
+    switch (try parseOne(editor.reader)) {
+        .ascii => |c| switch (c) {
+            'q' => return false, // quit
+            'h' => editor.cursor.offset =
+                editor.file.offsetFrom(cursor_position.move(.left, lines.items)),
+            'j' => {
+                const moved = cursor_position.move(.down, lines.items);
+                editor.cursor.offset = editor.file.offsetFrom(moved);
+                if (moved.line_number > editor.viewport.lastLine())
+                    editor.viewport.first_line += 1;
+            },
+            'k' => {
+                const moved = cursor_position.move(.up, lines.items);
+                editor.cursor.offset = editor.file.offsetFrom(moved);
+                if (moved.line_number < editor.viewport.first_line)
+                    editor.viewport.first_line -= 1;
+            },
+            'l' => editor.cursor.offset =
+                editor.file.offsetFrom(cursor_position.move(.right, lines.items)),
+            else => {},
+        },
+        .resize => |resize| {
+            editor.viewport.row_count = resize.row_count;
+            editor.viewport.col_count = resize.col_count;
+        },
     }
 
     return true;
+}
+
+fn render(editor: *const Editor) !void {
+    const writer = editor.writer;
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+    const first_line = editor.viewport.first_line;
+    const file_bytes = editor.file.bytes;
+    const file_name = editor.file.name;
+    const lines = editor.file.lines.items;
+    const cursor_position = editor.file.positionFrom(editor.cursor.offset);
+
+    const gutter_width = gutterWidth(col_count, @intCast(lines.len));
+
+    try writer.writeAll("\x1b[2J"); // clear screen
+    try writer.writeAll("\x1b[H"); // place cursor at top left
+
+    // The -1 below is to leave room for the status line.
+    for (first_line..first_line + row_count - 1) |line_number| {
+        const line = if (line_number < lines.len) blk: {
+            const line_full = lines[line_number].slice(file_bytes);
+            const line_size = @min(line_full.len, col_count - gutter_width);
+            break :blk line_full[0..line_size];
+        } else "~";
+        try writer.print(
+            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
+            .{
+                .line_number = line_number + 1, // displayed line number indexed from 1
+                .gutter_width = gutter_width - 1, // extra space already in format string
+                .line = line,
+            },
+        );
+    }
+
+    // Draw status line. Displayed line number and offset should be indexed from 1.
+    const cursor_coordinates_col_count =
+        digitCount(cursor_position.line_number + 1) +
+        digitCount(cursor_position.line_offset + 1) +
+        1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+    // TODO: Display the relative file path.
+    // TODO: Minimise the file_name (path). For now, only print it if it fits.
+    const cursor_coordinates_col_count_max =
+        digitCount(file_lines_max) +
+        digitCount(file_line_size_max) + 1;
+    if (file_name.len + cursor_coordinates_col_count_max < col_count) {
+        const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
+        try writer.writeAll(file_name);
+        try writer.splatByteAll(' ', padding_col_count);
+    } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count_max);
+    try writer.print("{d},{d}", .{
+        cursor_position.line_number + 1,
+        cursor_position.line_offset + 1,
+    });
+
+    // Make sure cursor is within the viewport's bounds.
+    assert(cursor_position.line_number >= first_line);
+    assert(cursor_position.line_number < first_line + row_count);
+    const start_offset = 0; // TODO: Add this to viewport state.
+    assert(cursor_position.line_offset >= start_offset);
+    assert(cursor_position.line_offset < start_offset + col_count);
+    const cursor_cell: Viewport.Cell = .{
+        .row = cursor_position.line_number - first_line,
+        .col = cursor_position.line_offset + gutter_width,
+    };
+    assert(cursor_cell.col >= gutter_width); // right of line numbers
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
+
+    // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
+    try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
+    try writer.flush();
 }
 
 /// Kitty Keyboard Protocol modifiers:
@@ -218,6 +299,16 @@ const Cursor = struct {
     sticky_col: u16,
 };
 
+/// Determine gutter width, enough digits for the greatest line number plus one for padding.
+pub fn gutterWidth(row_count: u16, last_line: u16) u8 {
+    return digitCount(@intCast(@max(row_count, last_line))) + 1;
+}
+
+// This trick gets us the number of digits in a positive number: log_10(x) + 1.
+fn digitCount(number: u16) u8 {
+    return std.math.log10_int(number) + 1;
+}
+
 const Viewport = struct {
     row_count: u16,
     col_count: u16,
@@ -228,97 +319,6 @@ const Viewport = struct {
         row: u16,
         col: u16,
     };
-
-    pub fn render(
-        viewport: Viewport,
-        writer: *std.Io.Writer,
-        cursor_position: File.Position,
-        file: *const File,
-    ) !void {
-        const row_count = viewport.row_count;
-        const col_count = viewport.col_count;
-        const first_line = viewport.first_line;
-        const gutter_width = viewport.gutter_width;
-        const lines = file.lines.items;
-        const file_bytes = file.bytes;
-        const file_name = file.name;
-
-        try writer.writeAll("\x1b[2J"); // clear screen
-        try writer.writeAll("\x1b[H"); // place cursor at top left
-
-        // The -1 below is to leave room for the status line.
-        for (first_line..first_line + row_count - 1) |line_number| {
-            const line = if (line_number < lines.len) blk: {
-                const line_full = lines[line_number].slice(file_bytes);
-                const line_size = @min(line_full.len, col_count - gutter_width);
-                break :blk line_full[0..line_size];
-            } else "~";
-            try writer.print(
-                "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
-                .{
-                    .line_number = line_number + 1, // displayed line number indexed from 1
-                    .gutter_width = gutter_width - 1, // extra space already in format string
-                    .line = line,
-                },
-            );
-        }
-
-        // Draw status line. Displayed line number and offset should be indexed from 1.
-        const cursor_coordinates_col_count =
-            digitCount(cursor_position.line_number + 1) +
-            digitCount(cursor_position.line_offset + 1) +
-            1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-        // TODO: Display the relative file path.
-        // TODO: Minimise the file_name (path). For now, only print it if it fits.
-        const cursor_coordinates_col_count_max =
-            digitCount(Editor.file_lines_max) +
-            digitCount(Editor.file_line_size_max) +
-            1;
-        if (file_name.len + cursor_coordinates_col_count_max < col_count) {
-            const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
-            try writer.writeAll(file_name);
-            try writer.splatByteAll(' ', padding_col_count);
-        } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count_max);
-        try writer.print("{d},{d}", .{
-            cursor_position.line_number + 1,
-            cursor_position.line_offset + 1,
-        });
-
-        // Make sure cursor is within the viewport's bounds.
-        const cursor_cell = viewport.cellFrom(cursor_position);
-        assert(cursor_cell.col >= gutter_width); // right of line numbers
-        assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-        assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
-
-        // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
-        try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
-        try writer.flush();
-    }
-
-    /// Update gutter width, enough digits for the greatest line number plus one for padding.
-    pub fn updateGutterWidth(viewport: *Viewport, lines: []const Line) void {
-        viewport.gutter_width = digitCount(@intCast(@max(viewport.row_count, lines.len))) + 1;
-    }
-
-    fn cellFrom(viewport: Viewport, position: File.Position) Cell {
-        const row_count = viewport.row_count;
-        const col_count = viewport.col_count;
-        const first_line = viewport.first_line;
-        const gutter_width = viewport.gutter_width;
-
-        assert(position.line_number >= first_line);
-        assert(position.line_number < first_line + row_count);
-        const start_offset = 0; // TODO: Add this to viewport state.
-        assert(position.line_offset >= start_offset);
-        assert(position.line_offset < start_offset + col_count);
-
-        const row = position.line_number - first_line;
-        const col = position.line_offset + gutter_width;
-        assert(row < row_count);
-        assert(col < col_count);
-
-        return .{ .row = row, .col = col };
-    }
 
     // Calculate index of last line in viewport.
     pub fn lastLine(viewport: Viewport) u16 {
@@ -411,7 +411,7 @@ fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileToo
     while (head < file_bytes.len) {
         var tail = head;
         while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
-        if (lines.items.len == Editor.file_lines_max) return error.FileTooManyLines;
+        if (lines.items.len == file_lines_max) return error.FileTooManyLines;
         lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
         head = tail + 1;
     }
@@ -468,7 +468,15 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     // defer allocator.free(file_name_buffer);
     // smith.bytes(file_name_buffer);
 
-    var reader = std.Io.Reader.fixed(&.{});
+    // On init STDIN must start with resize:
+    // CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t
+    const resize = try std.fmt.allocPrint(
+        allocator,
+        "\x1b[48;{d};{d};0;0t", // pix values ignored
+        .{ row_count, col_count },
+    );
+    defer allocator.free(resize);
+    var reader = std.Io.Reader.fixed(resize);
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
 
@@ -478,22 +486,14 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         &writer.writer,
         "main.zig",
         file_buffer,
-        row_count,
-        col_count,
-        .{ .file_lines_max = 1024 * 10 },
+        .{ .file_lines_max = file_lines_max },
     ) catch |err| switch (err) {
         error.FileNotNewlineTerminated, error.FileNotAscii => return,
         else => return err,
     };
     defer editor.deinit();
 
-    // TODO: Place cursor somewhere randomly.
-
-    try editor.viewport.render(
-        &writer.writer,
-        editor.file.positionFrom(editor.cursor.offset),
-        &editor.file,
-    );
+    try editor.render();
 }
 
 const hello_c =
@@ -508,27 +508,14 @@ const hello_c =
 
 test "rendering: hello_c" {
     const allocator = std.testing.allocator;
-    var reader = std.Io.Reader.fixed(&.{});
+
+    var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t"); // 12 rows by 36 cols
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-
-    var editor: Editor = try .init(
-        std.testing.allocator,
-        &reader,
-        &writer.writer,
-        "hello.c",
-        hello_c,
-        12,
-        36,
-        .{ .file_lines_max = 1024 * 10 },
-    );
+    var editor: Editor = try .init(allocator, &reader, &writer.writer, "hello.c", hello_c, .{});
     defer editor.deinit();
 
-    try editor.viewport.render(
-        &writer.writer,
-        editor.file.positionFrom(editor.cursor.offset),
-        &editor.file,
-    );
+    try editor.render();
     const result = writer.written();
 
     // For the comparison below to work we need to strip the carriage returns ('\r').
@@ -557,27 +544,14 @@ test "rendering: hello_c" {
 
 test "rendering: empty" {
     const allocator = std.testing.allocator;
-    var reader = std.Io.Reader.fixed(&.{});
+
+    var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t"); // 12 rows by 36 cols
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-
-    var editor: Editor = try .init(
-        std.testing.allocator,
-        &reader,
-        &writer.writer,
-        "empty.zig",
-        "\n",
-        12,
-        36,
-        .{ .file_lines_max = Editor.file_lines_max },
-    );
+    var editor: Editor = try .init(allocator, &reader, &writer.writer, "empty.zig", "\n", .{});
     defer editor.deinit();
 
-    try editor.viewport.render(
-        &writer.writer,
-        editor.file.positionFrom(editor.cursor.offset),
-        &editor.file,
-    );
+    try editor.render();
     const result = writer.written();
 
     // For the comparison below to work we need to strip the carriage returns ('\r').
@@ -625,9 +599,4 @@ test indexLines {
     try std.testing.expect(lines.items.len == 1);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 0);
-}
-
-// This trick gets us the number of digits in a positive number: log_10(x) + 1.
-fn digitCount(number: u16) u8 {
-    return std.math.log10_int(number) + 1;
 }

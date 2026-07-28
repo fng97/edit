@@ -10,23 +10,31 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/Editor.zig"),
         .target = target,
         .optimize = optimize,
-    });
-
-    run_step.dependOn(blk: {
-        const exe = b.addExecutable(.{ .name = "edit", .root_module = mod });
-        b.installArtifact(exe);
-        const run = b.addRunArtifact(exe);
-        run.step.dependOn(install_step); // run from prefix
-        if (b.args) |args| run.addArgs(args); // pass args: e.g. zig build run -- arg1
-        break :blk &run.step;
     });
 
     test_step.dependOn(blk: {
         const exe = b.addTest(.{ .root_module = mod });
         const run = b.addRunArtifact(exe);
+        break :blk &run.step;
+    });
+
+    run_step.dependOn(blk: {
+        const exe = b.addExecutable(.{
+            .name = "edit",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        exe.root_module.addImport("Editor", mod);
+        b.installArtifact(exe);
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(install_step); // run from prefix
+        if (b.args) |args| run.addArgs(args); // pass args: e.g. zig build run -- arg1
         break :blk &run.step;
     });
     test_step.dependOn(install_step); // make sure main executable gets built as part of tests

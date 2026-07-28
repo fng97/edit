@@ -67,21 +67,12 @@ pub fn main(init: std.process.Init) !void {
     try writer.writeAll("\x1b[?2048h");
     try writer.flush();
 
-    // TODO: Get rid of this? Expect to get the dimensions on first pass of loop below.
-    // Get window size using ioctl. Future resizing relies on in-band resize notifications (escape
-    // sequences).
-    var winsize: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
-    const err = std.posix.system.ioctl(stdout.handle, std.posix.T.IOCGWINSZ, @intFromPtr(&winsize));
-    assert(std.posix.errno(err) == .SUCCESS);
-
     var editor: Editor = try .init(
         allocator,
         reader,
         writer,
         file_name,
         file_bytes,
-        winsize.row,
-        winsize.col,
         .{ .file_lines_max = 1024 * 10 },
     );
     defer editor.deinit();
