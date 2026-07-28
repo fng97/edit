@@ -199,7 +199,7 @@ const Driver = struct {
     }
 };
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
@@ -265,7 +265,10 @@ pub fn main(init: std.process.Init) !void {
                     "replay with:\n\tzig build fuzz -- --replay={}:{}",
                     .{ fail.size, fail.seed },
                 );
+                return 1;
             },
         },
     }
+
+    return 0;
 }

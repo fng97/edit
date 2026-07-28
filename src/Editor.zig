@@ -144,7 +144,7 @@ pub fn tick(editor: *Editor) !bool {
     return true;
 }
 
-fn render(editor: *const Editor) !void {
+pub fn render(editor: *const Editor) !void {
     const writer = editor.writer;
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;

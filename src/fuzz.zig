@@ -2,6 +2,8 @@ const std = @import("std");
 const FRNG = @import("FRNG.zig");
 const Editor = @import("Editor.zig");
 
+const assert = std.debug.assert;
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -31,16 +33,21 @@ pub fn main(init: std.process.Init) !void {
     };
     file_buffer[file_buffer.len - 1] = '\n';
 
-    // TODO: Generate these too.
-    const row_count = 12;
-    const col_count = 36;
-
     const file_name_size = frng.int(u8) catch return; // TODO: Is this big enough?
     const file_name_buffer = try allocator.alloc(u8, file_name_size);
     defer allocator.free(file_name_buffer);
     for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, 0x20, 0x7E) catch return;
 
-    var reader = std.Io.Reader.fixed(&.{});
+    // TODO: Generate these too.
+    const row_count = 12;
+    const col_count = 36;
+    const resize = try std.fmt.allocPrint(
+        allocator,
+        "\x1b[48;{d};{d};0;0t", // pix values ignored
+        .{ row_count, col_count },
+    );
+    defer allocator.free(resize);
+    var reader = std.Io.Reader.fixed(resize);
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
 
@@ -50,20 +57,12 @@ pub fn main(init: std.process.Init) !void {
         &writer.writer,
         file_name_buffer,
         file_buffer,
-        row_count,
-        col_count,
-        .{ .file_lines_max = 1024 * 10 },
+        .{},
     ) catch |err| switch (err) {
         error.FileNotAscii, error.FileTooManyLines => return,
         else => return err,
     };
     defer editor.deinit();
 
-    try editor.viewport.render(
-        &writer.writer,
-        editor.file.positionFrom(editor.cursor.offset),
-        &editor.file,
-    );
-
-    // TODO: Feed input to stdin.
+    // TODO: Feed input to stdin. Call tick instead. Make render private again.
 }
