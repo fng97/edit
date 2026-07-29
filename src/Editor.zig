@@ -28,6 +28,7 @@ row_count: u16,
 col_count: u16,
 first_line: u16, // line number of the top line
 first_offset: u16, // viewport offset into lines (for horizontal scroll)
+snap_offset: u16,
 
 // File state:
 name: []const u8,
@@ -139,6 +140,7 @@ pub fn init(
         .col_count = dimensions.col_count,
         .first_line = 0,
         .first_offset = 0,
+        .snap_offset = 0,
         .name = file_name,
         .bytes = file_bytes,
         .lines = lines,
@@ -196,24 +198,23 @@ pub fn tick(editor: *Editor) !bool {
         .ascii => |byte| switch (byte) {
             'q' => return false, // quit
             'h', 'l' => |c| { // left, right
-                const line_offset_old = editor.cursor.position.line_offset;
-                const line_offset_new = if (c == 'h') line_offset_old -| 1 else line_offset_old + 1;
-                if (line_offset_new < lines[editor.cursor.position.line_number].size()) {
-                    editor.cursor.position.line_offset = line_offset_new;
-                }
+                const line_offset = editor.cursor.position.line_offset;
+                editor.cursor.position.line_offset = @min(
+                    if (c == 'h') line_offset -| 1 else line_offset +| 1,
+                    lines[editor.cursor.position.line_number].size() -| 1, // clamp to end of line
+                );
+                editor.snap_offset = editor.cursor.position.line_offset;
             },
             'j', 'k' => |c| { // down, up
-                const line_number_old = editor.cursor.position.line_number;
-                const line_number_new = if (c == 'j') line_number_old + 1 else line_number_old -| 1;
-                if (line_number_new < lines.len) {
-                    editor.cursor.position.line_number = line_number_new;
-                    // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
-                    // offset, saturated so we don't underflow in the case of an empty line.
-                    const line_size_new = lines[line_number_new].size();
-                    if (editor.cursor.position.line_offset >= line_size_new) {
-                        editor.cursor.position.line_offset = line_size_new -| 1;
-                    }
-                }
+                const line_number = editor.cursor.position.line_number;
+                editor.cursor.position.line_number = @min(
+                    if (c == 'j') line_number +| 1 else line_number -| 1,
+                    lines.len - 1, // clamp to last line in file
+                );
+                // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
+                // offset, saturated so we don't underflow in the case of an empty line.
+                editor.cursor.position.line_offset =
+                    @min(editor.snap_offset, lines[editor.cursor.position.line_number].size() -| 1);
             },
             else => {},
         },
