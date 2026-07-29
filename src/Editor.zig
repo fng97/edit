@@ -27,6 +27,7 @@ writer: *std.Io.Writer,
 row_count: u16,
 col_count: u16,
 first_line: u16, // line number of the top line
+first_offset: u16, // viewport offset into lines (for horizontal scroll)
 
 // File state:
 name: []const u8,
@@ -137,6 +138,7 @@ pub fn init(
         .row_count = dimensions.row_count,
         .col_count = dimensions.col_count,
         .first_line = 0,
+        .first_offset = 0,
         .name = file_name,
         .bytes = file_bytes,
         .lines = lines,
@@ -222,11 +224,18 @@ pub fn tick(editor: *Editor) !bool {
     }
 
     // Cursor must be within viewport.
-    const last_line = editor.first_line + editor.row_count - 2; // -2 for size->index, status line
+    const last_line = editor.lastLine();
     if (editor.cursor.position.line_number < editor.first_line) {
         editor.first_line = editor.cursor.position.line_number;
     } else if (editor.cursor.position.line_number > last_line) {
         editor.first_line += editor.cursor.position.line_number - last_line;
+    }
+
+    const last_offset = editor.lastOffset();
+    if (editor.cursor.position.line_offset < editor.first_offset) {
+        editor.first_offset = editor.cursor.position.line_offset;
+    } else if (editor.cursor.position.line_offset > last_offset) {
+        editor.first_offset += editor.cursor.position.line_offset - last_offset;
     }
 
     return true;
@@ -238,13 +247,13 @@ pub fn render(editor: *const Editor) !void {
     const row_count = editor.row_count;
     const col_count = editor.col_count;
     const first_line = editor.first_line;
+    const first_offset = editor.first_offset;
     const file_bytes = editor.bytes;
     const file_name = editor.name;
     const lines = editor.lines.items;
     const cursor_position = editor.cursor.position;
 
-    // Determine gutter width, enough digits for the greatest line number plus one for padding.
-    const gutter_width: u8 = digitCount(@intCast(@max(row_count, lines.len))) + 1;
+    const gutter_width = editor.gutterWidth();
 
     try writer.writeAll("\x1b[2J"); // clear screen
     try writer.writeAll("\x1b[H"); // place cursor at top left
@@ -253,8 +262,10 @@ pub fn render(editor: *const Editor) !void {
     for (first_line..first_line + row_count - 1) |line_number| {
         const line = if (line_number < lines.len) blk: {
             const line_full = lines[line_number].slice(file_bytes);
-            const line_size = @min(line_full.len, col_count - gutter_width);
-            break :blk line_full[0..line_size];
+            if (first_offset > line_full.len) break :blk "";
+            const line = line_full[first_offset..];
+            const line_size = @min(line.len, col_count - gutter_width);
+            break :blk line_full[first_offset .. first_offset + line_size];
         } else "~";
         try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
@@ -288,13 +299,12 @@ pub fn render(editor: *const Editor) !void {
 
     // Make sure cursor is within the viewport's bounds.
     assert(cursor_position.line_number >= first_line);
-    assert(cursor_position.line_number < first_line + row_count);
-    const start_offset = 0; // TODO: Add this to viewport state.
-    assert(cursor_position.line_offset >= start_offset);
-    assert(cursor_position.line_offset < start_offset + col_count);
+    assert(cursor_position.line_number <= editor.lastLine());
+    assert(cursor_position.line_offset >= first_offset);
+    assert(cursor_position.line_offset <= editor.lastOffset());
     const cursor_cell: Cell = .{
         .row = cursor_position.line_number - first_line,
-        .col = cursor_position.line_offset + gutter_width,
+        .col = cursor_position.line_offset - first_offset + gutter_width,
     };
     assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
@@ -303,6 +313,22 @@ pub fn render(editor: *const Editor) !void {
     // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
     try writer.flush();
+}
+
+/// Last line number visible in the viewport.
+fn lastLine(editor: *const Editor) u16 {
+    return editor.first_line + editor.row_count - 2; // extra -1 for status line
+}
+
+/// Last line offset (col) visible in the viewport.
+fn lastOffset(editor: *const Editor) u16 {
+    const text_width = editor.col_count - editor.gutterWidth();
+    return editor.first_offset + text_width - 1;
+}
+
+fn gutterWidth(editor: *const Editor) u8 {
+    // Determine gutter width, enough digits for the greatest line number plus one for padding.
+    return digitCount(@intCast(@max(editor.row_count, editor.lines.items.len))) + 1;
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
