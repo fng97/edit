@@ -33,61 +33,33 @@ name: []const u8,
 bytes: []const u8,
 lines: std.ArrayList(Line),
 
-cursor: Cursor,
+cursor: struct {
+    position: Position,
+},
 
-const Position = struct {
-    line_number: u16, // zero-indexed
-    line_offset: u16,
-
-    pub fn move(
-        position: Position,
-        direction: enum { left, down, up, right },
-        lines: []const Line,
-    ) Position {
-        const line_number = position.line_number;
-        const line_offset = position.line_offset;
-        const line = lines[line_number];
-
-        switch (direction) {
-            .left => return .{ .line_number = line_number, .line_offset = line_offset -| 1 },
-            .right => if (line_offset + 1 < line.size()) return .{
-                .line_number = line_number,
-                .line_offset = line_offset + 1,
-            },
-            .up => if (line_number > 0) {
-                // Clamp the offset in case previous line is shorter than the current one.
-                // Subtract 1 to go from size to offset, saturated so we don't underflow in the
-                // case of an empty line.
-                const prev_line_end = lines[line_number - 1].size() -| 1;
-                return .{
-                    .line_number = line_number - 1,
-                    .line_offset = @intCast(
-                        if (line_offset > prev_line_end) prev_line_end else line_offset,
-                    ),
-                };
-            },
-            .down => if (line_number + 1 < lines.len) {
-                const next_line_end = lines[line_number + 1].size() -| 1;
-                return .{
-                    .line_number = line_number + 1,
-                    .line_offset = @intCast(
-                        if (line_offset > next_line_end) next_line_end else line_offset,
-                    ),
-                };
-            },
-        }
-        return position;
-    }
-};
-
+/// Coordinate in the viewport.
 const Cell = struct {
     row: u16,
     col: u16,
 };
 
-const Cursor = struct {
-    offset: u32,
-    sticky_col: u16,
+/// Coordinate in the file.
+const Position = struct {
+    line_number: u16,
+    line_offset: u16,
+
+    pub fn fromFileOffset(file_offset: u32, lines: []const Line) Position {
+        for (lines, 0..) |line, line_number| {
+            if (file_offset <= line.tail) return .{
+                .line_number = @intCast(line_number),
+                .line_offset = @intCast(file_offset - line.head),
+            };
+        } else @panic("Offset not within file bounds");
+    }
+
+    pub fn toFileOffset(position: Position, lines: []const Line) u32 {
+        return lines[position.line_number].head + position.line_offset;
+    }
 };
 
 const Line = struct {
@@ -98,8 +70,8 @@ const Line = struct {
         return file_bytes[line.head..line.tail];
     }
 
-    pub fn size(line: Line) u32 {
-        return line.tail - line.head;
+    pub fn size(line: Line) u16 {
+        return @intCast(line.tail - line.head);
     }
 };
 
@@ -154,7 +126,11 @@ pub fn init(
         else => @panic("First event must be resize"),
     };
 
-    var editor: Editor = .{
+    var lines: std.ArrayList(Line) = try .initCapacity(allocator, options.file_lines_max);
+    errdefer lines.deinit(allocator);
+    try indexLines(file_bytes, &lines);
+
+    return .{
         .allocator = allocator,
         .reader = reader,
         .writer = writer,
@@ -163,12 +139,9 @@ pub fn init(
         .first_line = 0,
         .name = file_name,
         .bytes = file_bytes,
-        .lines = try .initCapacity(allocator, options.file_lines_max),
-        .cursor = .{ .offset = 0, .sticky_col = 0 },
+        .lines = lines,
+        .cursor = .{ .position = .{ .line_number = 0, .line_offset = 0 } },
     };
-    try indexLines(file_bytes, &editor.lines);
-
-    return editor;
 }
 
 pub fn deinit(editor: *Editor) void {
@@ -217,30 +190,43 @@ pub fn tick(editor: *Editor) !bool {
     try editor.render();
 
     const lines = editor.lines.items;
-    const cursor_position = positionFrom(lines, editor.cursor.offset);
     switch (try parseOne(editor.reader)) {
-        .ascii => |c| switch (c) {
+        .ascii => |byte| switch (byte) {
             'q' => return false, // quit
-            'h' => editor.cursor.offset = offsetFrom(lines, cursor_position.move(.left, lines)),
-            'j' => {
-                const moved = cursor_position.move(.down, lines);
-                editor.cursor.offset = offsetFrom(lines, moved);
-                // The -2 below: -1 to go from count to index and another -1 for the status line.
-                const last_line = editor.first_line + editor.row_count - 2;
-                if (moved.line_number > last_line) editor.first_line += 1;
+            'h', 'l' => |c| { // left, right
+                const line_offset_old = editor.cursor.position.line_offset;
+                const line_offset_new = if (c == 'h') line_offset_old -| 1 else line_offset_old + 1;
+                if (line_offset_new < lines[editor.cursor.position.line_number].size()) {
+                    editor.cursor.position.line_offset = line_offset_new;
+                }
             },
-            'k' => {
-                const moved = cursor_position.move(.up, lines);
-                editor.cursor.offset = offsetFrom(lines, moved);
-                if (moved.line_number < editor.first_line) editor.first_line -= 1;
+            'j', 'k' => |c| { // down, up
+                const line_number_old = editor.cursor.position.line_number;
+                const line_number_new = if (c == 'j') line_number_old + 1 else line_number_old -| 1;
+                if (line_number_new < lines.len) {
+                    editor.cursor.position.line_number = line_number_new;
+                    // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
+                    // offset, saturated so we don't underflow in the case of an empty line.
+                    const line_size_new = lines[line_number_new].size();
+                    if (editor.cursor.position.line_offset >= line_size_new) {
+                        editor.cursor.position.line_offset = line_size_new -| 1;
+                    }
+                }
             },
-            'l' => editor.cursor.offset = offsetFrom(lines, cursor_position.move(.right, lines)),
             else => {},
         },
         .resize => |resize| {
             editor.row_count = resize.row_count;
             editor.col_count = resize.col_count;
         },
+    }
+
+    // Cursor must be within viewport.
+    const last_line = editor.first_line + editor.row_count - 2; // -2 for size->index, status line
+    if (editor.cursor.position.line_number < editor.first_line) {
+        editor.first_line = editor.cursor.position.line_number;
+    } else if (editor.cursor.position.line_number > last_line) {
+        editor.first_line += editor.cursor.position.line_number - last_line;
     }
 
     return true;
@@ -255,10 +241,8 @@ pub fn render(editor: *const Editor) !void {
     const file_bytes = editor.bytes;
     const file_name = editor.name;
     const lines = editor.lines.items;
-    const cursor = editor.cursor;
+    const cursor_position = editor.cursor.position;
 
-    // TODO: Do we need to calculate this here AND in tick()?
-    const cursor_position = positionFrom(lines, cursor.offset);
     // Determine gutter width, enough digits for the greatest line number plus one for padding.
     const gutter_width: u8 = digitCount(@intCast(@max(row_count, lines.len))) + 1;
 
@@ -333,10 +317,6 @@ fn positionFrom(lines: []const Line, offset: u32) Position {
             .line_offset = @intCast(offset - line.head),
         };
     } else @panic("Offset not within file bounds");
-}
-
-fn offsetFrom(lines: []const Line, position: Position) u32 {
-    return lines[position.line_number].head + position.line_offset;
 }
 
 fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileTooManyLines}!void {
