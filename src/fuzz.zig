@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
     defer input.deinit();
     // First input must be resize (parsed during init below for dimensions).
     try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
-    while (true) switch (frng.weighted(.{ .move = 900, .resize = 10, .quit = 1 }) catch break) {
+    while (true) switch (frng.weighted(.{ .move = 999, .resize = 1 }) catch break) {
         .move => try input.writer.writeByte(switch (frng.weighted(.{
             .h = 1,
             .j = 1,
@@ -66,7 +66,6 @@ pub fn main(init: std.process.Init) !void {
             frng.logInt(u16) catch break,
             frng.logInt(u16) catch break,
         }),
-        .quit => break,
     };
     try input.writer.writeByte('q'); // guarantee a clean exit
     var reader: std.Io.Reader = .fixed(input.written());
