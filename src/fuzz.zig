@@ -23,8 +23,8 @@ pub fn main(init: std.process.Init) !void {
 
     // Generate file contents.
     // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
-    if (frng.entropy.len == 0) return;
-    const file_size = frng.logRangeInclusive(u32, 1, @intCast(frng.entropy.len)) catch return;
+    const file_size_max: u32 = @intCast(frng.entropy.len / 4);
+    const file_size = frng.rangeInclusive(u32, 1, @max(file_size_max, 1)) catch return;
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
     // These weights are loosely based on the byte distribution of the TigerBeetle source code.
