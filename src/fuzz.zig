@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Generate file name.
     // TODO: Is this big enough? Make it look more like a path?
-    const file_name_size = frng.logInt(u8) catch return;
+    const file_name_size = frng.int(u8) catch return;
     const file_name_buffer = try allocator.alloc(u8, file_name_size);
     defer allocator.free(file_name_buffer);
     for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, 0x20, 0x7E) catch return;
