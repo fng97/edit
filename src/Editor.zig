@@ -132,7 +132,7 @@ pub fn init(
     errdefer lines.deinit(allocator);
     try indexLines(file_bytes, &lines);
 
-    return .{
+    const editor: Editor = .{
         .allocator = allocator,
         .reader = reader,
         .writer = writer,
@@ -146,6 +146,9 @@ pub fn init(
         .lines = lines,
         .cursor = .{ .position = .{ .line_number = 0, .line_offset = 0 } },
     };
+    try editor.validate();
+
+    return editor;
 }
 
 pub fn deinit(editor: *Editor) void {
@@ -190,12 +193,14 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     }
 }
 
-pub fn tick(editor: *Editor) !bool {
+fn validate(editor: *const Editor) error{ViewportTooSmall}!void {
     // Vertically, need room for at least one line and the status line.
     if (editor.row_count < 2) return error.ViewportTooSmall;
     // Horizontally, need room for the gutter and one character.
     if (editor.col_count < editor.gutterWidth() + 1) return error.ViewportTooSmall;
+}
 
+pub fn tick(editor: *Editor) !bool {
     try editor.render();
 
     const lines = editor.lines.items;
@@ -229,7 +234,9 @@ pub fn tick(editor: *Editor) !bool {
         },
     }
 
-    // Cursor must be within viewport.
+    try editor.validate();
+
+    // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
     if (editor.cursor.position.line_number < editor.first_line) {
         editor.first_line = editor.cursor.position.line_number;
@@ -289,14 +296,11 @@ pub fn render(editor: *const Editor) !void {
         1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
     // TODO: Display the relative file path.
     // TODO: Minimise the file_name (path). For now, only print it if it fits.
-    const cursor_coordinates_col_count_max =
-        digitCount(file_lines_max) +
-        digitCount(file_line_size_max) + 1;
-    if (file_name.len + cursor_coordinates_col_count_max < col_count) {
+    if (file_name.len + cursor_coordinates_col_count + 1 < col_count) {
         const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
         try writer.writeAll(file_name);
         try writer.splatByteAll(' ', padding_col_count);
-    } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count_max);
+    } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count);
     try writer.print("{d},{d}", .{
         cursor_position.line_number + 1,
         cursor_position.line_offset + 1,

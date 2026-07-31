@@ -16,3 +16,9 @@
 - Crashed because viewport was too small. Minimum viewport width depends on
   gutter width which depends on number of lines so can't easily generate valid
   dimensions. Just catch error in the fuzzer.
+- A couple overflow bugs to do with the status line once I started fuzzing the
+  dimensions. Just hiding the filename and then the cursor indicator if they
+  don't fit in the viewport.
+- Loads of overflows in `tick()`. Ended up moving checks into a `validate()`
+  function. Called in `init()` so that we know the first `render()` call will be
+  safe then called at end of `tick()` to check state after input processed.
