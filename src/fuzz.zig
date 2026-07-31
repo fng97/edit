@@ -42,8 +42,8 @@ pub fn main(init: std.process.Init) !void {
     file_buffer[file_buffer.len - 1] = '\n';
 
     // Generate viewport dimensions.
-    const row_count = frng.logInt(u16) catch return;
-    const col_count = frng.logInt(u16) catch return;
+    const row_count = viewportDimension(&frng) catch return;
+    const col_count = viewportDimension(&frng) catch return;
 
     // Use the remaining entropy to generate inputs.
     var input: std.Io.Writer.Allocating = .init(allocator);
@@ -63,8 +63,8 @@ pub fn main(init: std.process.Init) !void {
             .l => 'l',
         }),
         .resize => try input.writer.print("\x1b[48;{d};{d};0;0t", .{
-            frng.logInt(u16) catch break,
-            frng.logInt(u16) catch break,
+            viewportDimension(&frng) catch break,
+            viewportDimension(&frng) catch break,
         }),
     };
     try input.writer.writeByte('q'); // guarantee a clean exit
@@ -91,4 +91,16 @@ pub fn main(init: std.process.Init) !void {
         error.ViewportTooSmall => return,
         else => return err,
     }) {}
+}
+
+fn viewportDimension(frng: *FRNG) FRNG.Error!u16 {
+    return switch (try frng.weighted(.{
+        .small = 1,
+        .normal = 998,
+        .large = 1,
+    })) {
+        .small => try frng.rangeInclusive(u8, 2, 15), // below 2 triggers error.ViewportTooSmall
+        .normal => try frng.rangeInclusive(u8, 16, 255),
+        .large => try frng.int(u16),
+    };
 }
