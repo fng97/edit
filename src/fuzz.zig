@@ -70,8 +70,7 @@ pub fn main(init: std.process.Init) !void {
     try input.writer.writeByte('q'); // guarantee a clean exit
     var reader: std.Io.Reader = .fixed(input.written());
 
-    var writer_buffer: [4096]u8 = undefined;
-    var writer: std.Io.Writer.Discarding = .init(&writer_buffer);
+    var writer: std.Io.Writer.Discarding = .init(&.{});
     var editor = Editor.init(
         allocator,
         &reader,
