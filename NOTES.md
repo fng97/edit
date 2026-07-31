@@ -13,3 +13,6 @@
 - Crashed on too many lines. This was asserted in `indexLines`. Instead, should
   return an error. Reasonable that we might manually edit a file and leave it
   with more lines than before.
+- Crashed because viewport was too small. Minimum viewport width depends on
+  gutter width which depends on number of lines so can't easily generate valid
+  dimensions. Just catch error in the fuzzer.

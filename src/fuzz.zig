@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Generate file contents.
     // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
+    if (frng.entropy.len == 0) return;
     const file_size = frng.logRangeInclusive(u32, 1, @intCast(frng.entropy.len)) catch return;
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
@@ -85,5 +86,8 @@ pub fn main(init: std.process.Init) !void {
     };
     defer editor.deinit();
 
-    while (try editor.tick()) {}
+    while (editor.tick() catch |err| switch (err) {
+        error.ViewportTooSmall => return,
+        else => return err,
+    }) {}
 }

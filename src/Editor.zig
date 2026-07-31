@@ -191,6 +191,11 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 }
 
 pub fn tick(editor: *Editor) !bool {
+    // Vertically, need room for at least one line and the status line.
+    if (editor.row_count < 2) return error.ViewportTooSmall;
+    // Horizontally, need room for the gutter and one character.
+    if (editor.col_count < editor.gutterWidth() + 1) return error.ViewportTooSmall;
+
     try editor.render();
 
     const lines = editor.lines.items;
@@ -231,7 +236,6 @@ pub fn tick(editor: *Editor) !bool {
     } else if (editor.cursor.position.line_number > last_line) {
         editor.first_line += editor.cursor.position.line_number - last_line;
     }
-
     const last_offset = editor.lastOffset();
     if (editor.cursor.position.line_offset < editor.first_offset) {
         editor.first_offset = editor.cursor.position.line_offset;
