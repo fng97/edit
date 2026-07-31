@@ -15,8 +15,7 @@ pub fn main(init: std.process.Init) !void {
     var frng: FRNG = .{ .entropy = entropy };
 
     // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
-    if (frng.entropy.len / 2 < 1) return;
-    const file_size = frng.rangeInclusive(u32, 1, @intCast(frng.entropy.len / 2)) catch return;
+    const file_size = frng.logRangeInclusive(u32, 1, @intCast(frng.entropy.len)) catch return;
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
     // These weights are loosely based on the byte distribution of the TigerBeetle source code.
@@ -33,14 +32,14 @@ pub fn main(init: std.process.Init) !void {
     };
     file_buffer[file_buffer.len - 1] = '\n';
 
-    const file_name_size = frng.int(u8) catch return; // TODO: Is this big enough?
+    // TODO: Is this big enough? Make it look more like a path?
+    const file_name_size = frng.logInt(u8) catch return;
     const file_name_buffer = try allocator.alloc(u8, file_name_size);
     defer allocator.free(file_name_buffer);
     for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, 0x20, 0x7E) catch return;
 
-    // TODO: Generate these too.
-    const row_count = 12;
-    const col_count = 36;
+    const row_count = frng.logInt(u16) catch return;
+    const col_count = frng.logInt(u16) catch return;
     const resize = try std.fmt.allocPrint(
         allocator,
         "\x1b[48;{d};{d};0;0t", // pix values ignored

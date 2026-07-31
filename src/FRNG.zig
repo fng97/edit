@@ -61,6 +61,40 @@ pub fn rangeInclusive(frng: *FRNG, Int: type, min: Int, max: Int) Error!Int {
     return min + try frng.intInclusive(Int, max - min);
 }
 
+/// Log-biased integer over the full range of `Int`, skewed toward small values.
+pub fn logInt(frng: *FRNG, comptime Int: type) Error!Int {
+    comptime assert(@typeInfo(Int).int.signedness == .unsigned);
+    const bit_count = @typeInfo(Int).int.bits;
+    const bits = try frng.rangeInclusive(u16, 0, bit_count);
+    if (bits == 0) return 0;
+    const max: Int = if (bits == bit_count)
+        std.math.maxInt(Int)
+    else
+        (@as(Int, 1) << @intCast(bits)) - 1;
+    return frng.rangeInclusive(Int, 0, max);
+}
+
+/// Log-biased integer in [min, max] inclusive, skewed toward `min`.
+pub fn logRangeInclusive(frng: *FRNG, comptime Int: type, min: Int, max: Int) Error!Int {
+    comptime assert(@typeInfo(Int).int.signedness == .unsigned);
+    assert(min <= max);
+    if (min == max) return min;
+
+    const span = max - min;
+    const span_bits: u16 = @intCast(@bitSizeOf(Int) - @clz(span));
+    const bits = try frng.rangeInclusive(u16, 0, span_bits);
+
+    const offset: Int = if (bits == 0) 0 else blk: {
+        const cap: Int = if (bits >= @bitSizeOf(Int))
+            std.math.maxInt(Int)
+        else
+            (@as(Int, 1) << @intCast(bits)) - 1;
+        break :blk try frng.rangeInclusive(Int, 0, @min(cap, span));
+    };
+
+    return min + offset;
+}
+
 pub fn index(frng: *FRNG, slice: anytype) Error!usize {
     assert(slice.len > 0);
     return try frng.rangeInclusive(usize, 0, slice.len - 1);
