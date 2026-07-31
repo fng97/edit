@@ -294,8 +294,10 @@ pub fn render(editor: *const Editor) !void {
         digitCount(cursor_position.line_number + 1) +
         digitCount(cursor_position.line_offset + 1) +
         1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+    if (cursor_coordinates_col_count > col_count) return error.ViewportTooSmall;
     // TODO: Display the relative file path.
     // TODO: Minimise the file_name (path). For now, only print it if it fits.
+    // File name doesn't fit, hide it.
     if (file_name.len + cursor_coordinates_col_count + 1 < col_count) {
         const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
         try writer.writeAll(file_name);

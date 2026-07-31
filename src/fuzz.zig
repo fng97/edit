@@ -81,7 +81,10 @@ pub fn main(init: std.process.Init) !void {
         file_buffer,
         .{},
     ) catch |err| switch (err) {
-        error.FileNotAscii, error.FileTooManyLines => return,
+        error.FileNotAscii,
+        error.FileTooManyLines,
+        error.ViewportTooSmall,
+        => return,
         else => return err,
     };
     defer editor.deinit();
