@@ -4,37 +4,30 @@ const Editor = @import("Editor.zig");
 
 const assert = std.debug.assert;
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-
-    var stdin_reader = std.Io.File.stdin().reader(io, &.{});
-    const entropy = try stdin_reader.interface.allocRemaining(allocator, .unlimited);
-    defer allocator.free(entropy);
-
-    var frng: FRNG = .{ .entropy = entropy };
-
+fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
     // Generate file name.
     // TODO: Is this big enough? Make it look more like a path?
-    const file_name_size = frng.int(u8) catch return;
+    const file_name_size = try frng.int(u8);
     const file_name_buffer = try allocator.alloc(u8, file_name_size);
     defer allocator.free(file_name_buffer);
-    for (file_name_buffer) |*byte| byte.* = frng.rangeInclusive(u8, 0x20, 0x7E) catch return;
+    for (file_name_buffer) |*byte| byte.* = try frng.rangeInclusive(u8, 0x20, 0x7E);
 
-    // Generate file contents.
-    // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
+    // Generate file contents. 1 byte of entropy in != 1 random byte out. Keep max file size a small
+    // portion of remaining entropy so that it's likely we'll be able to fill the whole file without
+    // running out of entropy.
     const file_size_max: u32 = @intCast(frng.entropy.len / 4);
-    const file_size = frng.rangeInclusive(u32, 1, @max(file_size_max, 1)) catch return;
+    // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
+    const file_size = try frng.rangeInclusive(u32, 1, @max(file_size_max, 1));
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
-    // These weights are loosely based on the byte distribution of the TigerBeetle source code.
-    for (file_buffer) |*byte| byte.* = switch (frng.weighted(.{
-        .printable = 662,
-        .space = 252,
-        .newline = 24,
-        .tab = 62,
-    }) catch return) {
-        .printable => frng.rangeInclusive(u8, '!', '~') catch return,
+    const FileWeights = struct { printable: u32, space: u32, newline: u32, tab: u32 };
+    const file_weights: FileWeights = switch (try frng.weighted(.{ .code = 999, .random = 1 })) {
+        // These weights are loosely based on the byte distribution of the TigerBeetle source code.
+        .code => .{ .printable = 662, .space = 252, .newline = 24, .tab = 62 },
+        .random => try frng.randomWeights(FileWeights),
+    };
+    for (file_buffer) |*byte| byte.* = switch (try frng.weighted(file_weights)) {
+        .printable => try frng.rangeInclusive(u8, '!', '~'),
         .space => ' ',
         .tab => '\t',
         .newline => '\n',
@@ -42,29 +35,31 @@ pub fn main(init: std.process.Init) !void {
     file_buffer[file_buffer.len - 1] = '\n';
 
     // Generate viewport dimensions.
-    const row_count = viewportDimension(&frng) catch return;
-    const col_count = viewportDimension(&frng) catch return;
+    const row_count = try viewportDimension(frng);
+    const col_count = try viewportDimension(frng);
 
     // Use the remaining entropy to generate inputs.
     var input: std.Io.Writer.Allocating = .init(allocator);
     defer input.deinit();
     // First input must be resize (parsed during init below for dimensions).
     try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
-    while (true) switch (frng.weighted(.{ .move = 999, .resize = 1 }) catch break) {
-        .move => try input.writer.writeByte(switch (frng.weighted(.{
-            .h = 1,
-            .j = 1,
-            .k = 1,
-            .l = 1,
-        }) catch break) {
-            .h => 'h',
-            .j => 'j',
-            .k => 'k',
-            .l => 'l',
-        }),
+    const move_weights = try frng.randomWeights(struct { h: u32, j: u32, k: u32, l: u32 });
+    while (true) switch (try frng.weighted(.{ .move = 999, .resize = 1 })) {
+        .move => {
+            const repeat = try frng.boolean();
+            const byte: u8 = switch (try frng.weighted(move_weights)) {
+                .h => 'h',
+                .j => 'j',
+                .k => 'k',
+                .l => 'l',
+            };
+            if (repeat) {
+                try input.writer.splatByteAll(byte, try frng.int(u8));
+            } else try input.writer.writeByte(byte);
+        },
         .resize => try input.writer.print("\x1b[48;{d};{d};0;0t", .{
-            viewportDimension(&frng) catch break,
-            viewportDimension(&frng) catch break,
+            try viewportDimension(frng),
+            try viewportDimension(frng),
         }),
     };
     try input.writer.writeByte('q'); // guarantee a clean exit
@@ -91,6 +86,21 @@ pub fn main(init: std.process.Init) !void {
         error.ViewportTooSmall => return,
         else => return err,
     }) {}
+}
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+
+    var stdin_reader = std.Io.File.stdin().reader(io, &.{});
+    const entropy = try stdin_reader.interface.allocRemaining(allocator, .unlimited);
+    defer allocator.free(entropy);
+
+    var frng: FRNG = .{ .entropy = entropy };
+    run(allocator, &frng) catch |err| switch (err) {
+        error.OutOfEntropy => return,
+        else => return err,
+    };
 }
 
 fn viewportDimension(frng: *FRNG) FRNG.Error!u16 {
