@@ -17,7 +17,6 @@ const assert = std.debug.assert;
 const Editor = @This();
 
 const file_lines_max = 1024 * 10; // 10 MiB
-const file_line_size_max = 999;
 
 allocator: std.mem.Allocator,
 reader: *std.Io.Reader,

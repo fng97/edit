@@ -3,6 +3,8 @@ const Editor = @import("Editor.zig");
 
 const assert = std.debug.assert;
 
+// FIXME: zig build fuzz -- --replay=2097152:17060878784450675626
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
