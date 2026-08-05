@@ -72,18 +72,20 @@ fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
         &writer.writer,
         file_name_buffer,
         file_buffer,
-        .{},
     ) catch |err| switch (err) {
         error.FileNotAscii,
         error.FileTooManyLines,
         error.ViewportTooSmall,
+        error.ViewportTooLarge,
         => return,
         else => return err,
     };
     defer editor.deinit();
 
     while (editor.tick() catch |err| switch (err) {
-        error.ViewportTooSmall => return,
+        error.ViewportTooSmall,
+        error.ViewportTooLarge,
+        => return,
         else => return err,
     }) {}
 }

@@ -16,7 +16,18 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Editor = @This();
 
-const file_lines_max = 1024 * 10; // 10 MiB
+pub const line_count_max = 10_000;
+pub const line_offset_max = 1_000;
+pub const row_count_max = 2_000;
+pub const col_count_max = 500;
+
+// Calculating last visible line or offset should never overflow.
+comptime {
+    const line_number_max = line_count_max - 1;
+    // row_count-1 is the last visible row but that's for the status line so use row_count-2.
+    assert(line_number_max + row_count_max - 2 <= std.math.maxInt(u16));
+    assert(line_offset_max - 1 + row_count_max - 2 <= std.math.maxInt(u16));
+}
 
 allocator: std.mem.Allocator,
 reader: *std.Io.Reader,
@@ -37,6 +48,25 @@ lines: std.ArrayList(Line),
 cursor: struct {
     position: Position,
 },
+
+const Error = error{
+    ViewportTooSmall,
+    ViewportTooLarge,
+    LineTooLong,
+};
+
+const Line = struct {
+    head: u32, // line start offset
+    tail: u32, // line end offset (always a newline)
+
+    pub fn slice(line: Line, file_bytes: []const u8) []const u8 {
+        return file_bytes[line.head..line.tail];
+    }
+
+    pub fn size(line: Line) u16 {
+        return @intCast(line.tail - line.head);
+    }
+};
 
 /// Coordinate in the viewport.
 const Cell = struct {
@@ -60,19 +90,6 @@ const Position = struct {
 
     pub fn toFileOffset(position: Position, lines: []const Line) u32 {
         return lines[position.line_number].head + position.line_offset;
-    }
-};
-
-const Line = struct {
-    head: u32, // line start offset
-    tail: u32, // line end offset (always a newline)
-
-    pub fn slice(line: Line, file_bytes: []const u8) []const u8 {
-        return file_bytes[line.head..line.tail];
-    }
-
-    pub fn size(line: Line) u16 {
-        return @intCast(line.tail - line.head);
     }
 };
 
@@ -115,7 +132,6 @@ pub fn init(
     writer: *std.Io.Writer,
     file_name: []const u8,
     file_bytes: []const u8,
-    options: struct { file_lines_max: u16 = file_lines_max },
 ) !Editor {
     // File must not be empty, contain only ASCII, and end in newline.
     assert(file_bytes.len != 0);
@@ -127,7 +143,7 @@ pub fn init(
         else => @panic("First event must be resize"),
     };
 
-    var lines: std.ArrayList(Line) = try .initCapacity(allocator, options.file_lines_max);
+    var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
     errdefer lines.deinit(allocator);
     try indexLines(file_bytes, &lines);
 
@@ -192,11 +208,17 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     }
 }
 
-fn validate(editor: *const Editor) error{ViewportTooSmall}!void {
+fn validate(editor: *const Editor) Error!void {
     // Vertically, need room for at least one line and the status line.
-    if (editor.row_count < 2) return error.ViewportTooSmall;
+    if (editor.row_count < 2) return Error.ViewportTooSmall;
+    if (editor.row_count > row_count_max) return Error.ViewportTooLarge;
     // Horizontally, need room for the gutter and one character.
-    if (editor.col_count < editor.gutterWidth() + 1) return error.ViewportTooSmall;
+    if (editor.col_count < editor.gutterWidth() + 1) return Error.ViewportTooSmall;
+    if (editor.col_count > col_count_max) return Error.ViewportTooLarge;
+
+    for (editor.lines.items) |line| {
+        if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
+    }
 }
 
 pub fn tick(editor: *Editor) !bool {
@@ -362,7 +384,7 @@ fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileToo
     while (head < file_bytes.len) {
         var tail = head;
         while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
-        if (lines.items.len == file_lines_max) return error.FileTooManyLines;
+        if (lines.items.len == line_count_max) return error.FileTooManyLines;
         lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
         head = tail + 1;
     }
@@ -437,7 +459,6 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         &writer.writer,
         "main.zig",
         file_buffer,
-        .{ .file_lines_max = file_lines_max },
     ) catch |err| switch (err) {
         error.FileNotNewlineTerminated, error.FileNotAscii => return,
         else => return err,
@@ -509,7 +530,7 @@ test "rendering: hello_c" {
     var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t"); // 12 rows by 36 cols
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-    var editor: Editor = try .init(allocator, &reader, &writer.writer, "hello.c", hello_c, .{});
+    var editor: Editor = try .init(allocator, &reader, &writer.writer, "hello.c", hello_c);
     defer editor.deinit();
 
     try editor.render();
@@ -545,7 +566,7 @@ test "rendering: empty" {
     var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t"); // 12 rows by 36 cols
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
-    var editor: Editor = try .init(allocator, &reader, &writer.writer, "empty.zig", "\n", .{});
+    var editor: Editor = try .init(allocator, &reader, &writer.writer, "empty.zig", "\n");
     defer editor.deinit();
 
     try editor.render();

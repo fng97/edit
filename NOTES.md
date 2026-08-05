@@ -22,3 +22,8 @@
 - Loads of overflows in `tick()`. Ended up moving checks into a `validate()`
   function. Called in `init()` so that we know the first `render()` call will be
   safe then called at end of `tick()` to check state after input processed.
+- Interesting one. See `7170bd2a79b7418ce78ac649b3d0d2e834feecc2`. In cases
+  where we have a huge viewport we were overflowing when checking if the cursor
+  was within bounds. This was because the last visible line is the current line
+  plus `row_count`. Both are stored as u16. If `row_count` is huge we can
+  overflow.
