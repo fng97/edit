@@ -85,13 +85,57 @@ const Position = struct {
                 .line_number = @intCast(line_number),
                 .line_offset = @intCast(file_offset - line.head),
             };
-        } else @panic("Offset not within file bounds");
+        } else @panic("offset not within file bounds");
     }
 
     pub fn toFileOffset(position: Position, lines: []const Line) u32 {
         return lines[position.line_number].head + position.line_offset;
     }
 };
+
+pub fn init(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    file_name: []const u8,
+    file_bytes: []const u8,
+) !Editor {
+    // File must not be empty, contain only ASCII, and end in newline.
+    assert(file_bytes.len != 0);
+    for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
+    if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
+
+    const dimensions = switch (try parseOne(reader)) {
+        .resize => |resize| resize,
+        else => @panic("first event must be resize"),
+    };
+
+    var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
+    errdefer lines.deinit(allocator);
+    try indexLines(file_bytes, &lines);
+
+    const editor: Editor = .{
+        .allocator = allocator,
+        .reader = reader,
+        .writer = writer,
+        .row_count = dimensions.row_count,
+        .col_count = dimensions.col_count,
+        .first_line = 0,
+        .first_offset = 0,
+        .snap_offset = 0,
+        .name = file_name,
+        .bytes = file_bytes,
+        .lines = lines,
+        .cursor = .{ .position = .{ .line_number = 0, .line_offset = 0 } },
+    };
+    try editor.validate();
+
+    return editor;
+}
+
+pub fn deinit(editor: *Editor) void {
+    editor.lines.deinit(editor.allocator);
+}
 
 /// Kitty Keyboard Protocol modifiers:
 ///
@@ -126,85 +170,74 @@ const Modifiers = packed struct(u8) {
     }
 };
 
-pub fn init(
-    allocator: std.mem.Allocator,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-    file_name: []const u8,
-    file_bytes: []const u8,
-) !Editor {
-    // File must not be empty, contain only ASCII, and end in newline.
-    assert(file_bytes.len != 0);
-    for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
-    if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
-
-    const dimensions = switch (try parseOne(reader)) {
-        .resize => |resize| resize,
-        else => @panic("First event must be resize"),
-    };
-
-    var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
-    errdefer lines.deinit(allocator);
-    try indexLines(file_bytes, &lines);
-
-    const editor: Editor = .{
-        .allocator = allocator,
-        .reader = reader,
-        .writer = writer,
-        .row_count = dimensions.row_count,
-        .col_count = dimensions.col_count,
-        .first_line = 0,
-        .first_offset = 0,
-        .snap_offset = 0,
-        .name = file_name,
-        .bytes = file_bytes,
-        .lines = lines,
-        .cursor = .{ .position = .{ .line_number = 0, .line_offset = 0 } },
-    };
-    try editor.validate();
-
-    return editor;
-}
-
-pub fn deinit(editor: *Editor) void {
-    editor.lines.deinit(editor.allocator);
-}
-
 /// Handle input: parse Kitty Keyboard Protocol events.
 fn parseOne(reader: *std.Io.Reader) !union(enum) {
     resize: struct { row_count: u16, col_count: u16 },
-    ascii: u8,
+    keypress: union(enum) {
+        text: struct {
+            character: u8,
+            modifiers: Modifiers = .{
+                .shift = false,
+                .alt = false,
+                .ctrl = false,
+                .super = false,
+                .hyper = false,
+                .meta = false,
+                .caps_lock = false,
+                .num_lock = false,
+            },
+        },
+        enter,
+        tab,
+        backspace,
+    },
 } {
     switch (try reader.takeByte()) {
+        0x08, 0x7F => return .{ .keypress = .backspace },
+        0x09 => return .{ .keypress = .tab },
+        0x0D => return .{ .keypress = .enter },
         // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-        0x21...0x7E => |c| return .{ .ascii = c },
-        '\x1b' => { // escape sequence
-            assert(try reader.takeByte() == '['); // escape sequences must start with CSI
-            switch (try std.fmt.parseInt(i32, (try reader.takeDelimiter(';')).?, 10)) {
-                // TODO: Enforce that escape codes use lowercase codepoint:
-                // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#key-codes
+        0x21...0x7E => |c| return .{ .keypress = .{ .text = .{ .character = c } } },
+        // From https://en.wikipedia.org/wiki/ANSI_escape_code#Control_Sequence_Introducer_commands:
+        // Escape sequences: The Control Sequence Introducer, or CSI, is followed by any number
+        // (including none) of parameter bytes in the range 0x30-0x3F (ASCII 0-9:;<=>?), then by any
+        // number of "intermediate bytes" in the range 0x20-0x2F (ASCII space and !"#$%&'()*+,-./),
+        // then finally by a single "final byte" in the range 0x40-0x7E (ASCII @A-Z[\]^_`a-z{|}~).
+        '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
+            assert(try reader.takeByte() == '[');
 
-                // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
-                48 => {
-                    const row_count =
-                        try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-                    const col_count =
-                        try std.fmt.parseInt(u16, (try reader.takeDelimiter(';')).?, 10);
-                    _ = try reader.takeDelimiter(';'); // height_pix
-                    _ = try reader.takeDelimiter('t'); // width_pix
-                    return .{ .resize = .{ .row_count = row_count, .col_count = col_count } };
+            var params_buffer: [32]u8 = undefined;
+            var params_index: usize = 0;
+            const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
+                0x30...0x3F => |byte| {
+                    if (params_index == params_buffer.len) return error.CsiTooLong;
+                    params_buffer[params_index] = byte;
                 },
-                else => |c| std.debug.panic("Unrecognised KKP escape sequence: {x}{x}", .{
-                    c,
-                    reader.buffered(),
-                }),
+                0x40...0x7E => |byte| break byte,
+                else => @panic("escape sequence contains character outside 0x20-0x7E"),
+            };
+
+            const params = params_buffer[0..params_index];
+            var iter = std.mem.splitScalar(u8, params, ';');
+            const first = iter.next() orelse @panic("escape sequence has no parameters");
+            switch (final) {
+                'u' => {},
+                't' => switch (try std.fmt.parseInt(i32, first, 10)) {
+                    // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
+                    48 => return .{
+                        .resize = .{
+                            .row_count = try std.fmt.parseInt(u16, iter.next().?, 10),
+                            .col_count = try std.fmt.parseInt(u16, iter.next().?, 10),
+                        },
+                    },
+                    else => {}, // fall through to panic
+                },
+                else => {}, // fall through to panic
             }
+
+            std.debug.panic("unrecognised escape sequence: CSI {x} {c}", .{ params, final });
         },
-        else => |c| std.debug.panic("Unrecognised KKP escape sequence: {x}{x}{x}", .{
-            "\x1b[",
-            c,
-            reader.buffered(),
-        }),
+        else => |c| std.debug.panic("unable to parse bytes: {x} {x}", .{ c, reader.buffered() }),
     }
 }
 
@@ -226,28 +259,36 @@ pub fn tick(editor: *Editor) !bool {
 
     const lines = editor.lines.items;
     switch (try parseOne(editor.reader)) {
-        .ascii => |byte| switch (byte) {
-            'q' => return false, // quit
-            'h', 'l' => |c| { // left, right
-                const line_offset = editor.cursor.position.line_offset;
-                editor.cursor.position.line_offset = @min(
-                    if (c == 'h') line_offset -| 1 else line_offset +| 1,
-                    lines[editor.cursor.position.line_number].size() -| 1, // clamp to end of line
-                );
-                editor.snap_offset = editor.cursor.position.line_offset;
+        .keypress => |keypress| switch (keypress) {
+            .text => |text| switch (text.character) {
+                'q' => return false, // quit
+                'h', 'l' => |c| { // left, right
+                    const line_offset = editor.cursor.position.line_offset;
+                    editor.cursor.position.line_offset = @min(
+                        if (c == 'h') line_offset -| 1 else line_offset +| 1,
+                        // Clamp to end of line.
+                        lines[editor.cursor.position.line_number].size() -| 1,
+                    );
+                    editor.snap_offset = editor.cursor.position.line_offset;
+                },
+                'j', 'k' => |c| { // down, up
+                    const line_number = editor.cursor.position.line_number;
+                    editor.cursor.position.line_number = @min(
+                        if (c == 'j') line_number +| 1 else line_number -| 1,
+                        lines.len - 1, // clamp to last line in file
+                    );
+                    // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
+                    // offset, saturated so we don't underflow in the case of an empty line.
+                    editor.cursor.position.line_offset = @min(
+                        editor.snap_offset,
+                        lines[editor.cursor.position.line_number].size() -| 1,
+                    );
+                },
+                else => {},
             },
-            'j', 'k' => |c| { // down, up
-                const line_number = editor.cursor.position.line_number;
-                editor.cursor.position.line_number = @min(
-                    if (c == 'j') line_number +| 1 else line_number -| 1,
-                    lines.len - 1, // clamp to last line in file
-                );
-                // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
-                // offset, saturated so we don't underflow in the case of an empty line.
-                editor.cursor.position.line_offset =
-                    @min(editor.snap_offset, lines[editor.cursor.position.line_number].size() -| 1);
+            .backspace, .tab, .enter => {
+                // TODO
             },
-            else => {},
         },
         .resize => |resize| {
             editor.row_count = resize.row_count;
@@ -374,7 +415,7 @@ fn positionFrom(lines: []const Line, offset: u32) Position {
             .line_number = @intCast(line_number),
             .line_offset = @intCast(offset - line.head),
         };
-    } else @panic("Offset not within file bounds");
+    } else @panic("offset not within file bounds");
 }
 
 fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileTooManyLines}!void {

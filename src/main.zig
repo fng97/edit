@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     // Load and process buffer.
     var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
     assert(args_iterator.skip()); // first arg is executable path
-    const file_name = args_iterator.next() orelse @panic("Missing file path arg");
+    const file_name = args_iterator.next() orelse @panic("missing file path arg");
     const file_bytes = try std.Io.Dir.cwd().readFileAlloc(
         io,
         file_name,

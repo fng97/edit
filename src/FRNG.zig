@@ -215,15 +215,15 @@ pub fn main(init: std.process.Init) !u8 {
 
     var args = std.process.Args.Iterator.init(init.minimal.args);
     assert(args.skip()); // first arg is executable path
-    const sut = args.next() orelse @panic("Missing file path arg");
+    const sut = args.next() orelse @panic("missing file path arg");
     const mode: union(enum) {
         replay: struct { size: u32, seed: u64 },
         search: struct { attempts: u32, size_max: u32 },
     } = blk: {
-        const arg = args.next() orelse @panic("Missing mode arg");
+        const arg = args.next() orelse @panic("missing mode arg");
         const replay_prefix = "--replay="; // --replay={size}:{seed}
         const search_prefix = "--search="; // --search={attempts}:{size_max}
-        const colon_index = std.mem.indexOfScalar(u8, arg, ':') orelse @panic("Invalid arg");
+        const colon_index = std.mem.indexOfScalar(u8, arg, ':') orelse @panic("invalid arg");
 
         if (std.mem.startsWith(u8, arg, search_prefix)) break :blk .{
             .search = .{
@@ -235,7 +235,7 @@ pub fn main(init: std.process.Init) !u8 {
                 .size = try std.fmt.parseInt(u32, arg[replay_prefix.len..colon_index], 10),
                 .seed = try std.fmt.parseInt(u64, arg[colon_index + 1 ..], 10),
             },
-        } else @panic("Unrecognised arg");
+        } else @panic("unrecognised arg");
     };
 
     const size_max = switch (mode) {
