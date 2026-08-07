@@ -173,31 +173,30 @@ const Modifiers = packed struct(u8) {
 /// Handle input: parse Kitty Keyboard Protocol events.
 fn parseOne(reader: *std.Io.Reader) !union(enum) {
     resize: struct { row_count: u16, col_count: u16 },
-    keypress: union(enum) {
-        text: struct {
-            character: u8,
-            modifiers: Modifiers = .{
-                .shift = false,
-                .alt = false,
-                .ctrl = false,
-                .super = false,
-                .hyper = false,
-                .meta = false,
-                .caps_lock = false,
-                .num_lock = false,
-            },
+    ascii: struct {
+        character: u8,
+        modifiers: Modifiers = .{
+            .shift = false,
+            .alt = false,
+            .ctrl = false,
+            .super = false,
+            .hyper = false,
+            .meta = false,
+            .caps_lock = false,
+            .num_lock = false,
         },
-        enter,
-        tab,
-        backspace,
     },
+    backspace,
+    enter,
+    escape,
+    tab,
 } {
     switch (try reader.takeByte()) {
-        0x08, 0x7F => return .{ .keypress = .backspace },
-        0x09 => return .{ .keypress = .tab },
-        0x0D => return .{ .keypress = .enter },
+        0x08, 0x7F => return .backspace,
+        0x09 => return .tab,
+        0x0D => return .enter,
         // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-        0x21...0x7E => |c| return .{ .keypress = .{ .text = .{ .character = c } } },
+        0x21...0x7E => |c| return .{ .ascii = .{ .character = c } },
         // From https://en.wikipedia.org/wiki/ANSI_escape_code#Control_Sequence_Introducer_commands:
         // Escape sequences: The Control Sequence Introducer, or CSI, is followed by any number
         // (including none) of parameter bytes in the range 0x30-0x3F (ASCII 0-9:;<=>?), then by any
@@ -208,21 +207,38 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 
             var params_buffer: [32]u8 = undefined;
             var params_index: usize = 0;
+            // Read until the final byte so we have all that remains of the escape sequence.
             const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
                 0x30...0x3F => |byte| {
                     if (params_index == params_buffer.len) return error.CsiTooLong;
                     params_buffer[params_index] = byte;
                 },
-                0x40...0x7E => |byte| break byte,
+                0x40...0x7E => |final_byte| break final_byte,
                 else => @panic("escape sequence contains character outside 0x20-0x7E"),
             };
 
             const params = params_buffer[0..params_index];
             var iter = std.mem.splitScalar(u8, params, ';');
-            const first = iter.next() orelse @panic("escape sequence has no parameters");
+            const first = try std.fmt.parseInt(
+                i32,
+                iter.next() orelse @panic("escape sequence has no parameters"),
+                10,
+            );
             switch (final) {
-                'u' => {},
-                't' => switch (try std.fmt.parseInt(i32, first, 10)) {
+                'u' => switch (first) {
+                    0x1b => return .escape,
+                    // Printable ASCII with modifiers.
+                    0x20...0x7E => |c| return .{
+                        .ascii = .{
+                            .character = @intCast(c),
+                            .modifiers = try .decode(
+                                iter.next() orelse @panic("CSI u sequence missing modifiers"),
+                            ),
+                        },
+                    },
+                    else => {}, // fall through to panic
+                },
+                't' => switch (first) {
                     // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
                     48 => return .{
                         .resize = .{
@@ -259,36 +275,38 @@ pub fn tick(editor: *Editor) !bool {
 
     const lines = editor.lines.items;
     switch (try parseOne(editor.reader)) {
-        .keypress => |keypress| switch (keypress) {
-            .text => |text| switch (text.character) {
-                'q' => return false, // quit
-                'h', 'l' => |c| { // left, right
-                    const line_offset = editor.cursor.position.line_offset;
-                    editor.cursor.position.line_offset = @min(
-                        if (c == 'h') line_offset -| 1 else line_offset +| 1,
-                        // Clamp to end of line.
-                        lines[editor.cursor.position.line_number].size() -| 1,
-                    );
-                    editor.snap_offset = editor.cursor.position.line_offset;
-                },
-                'j', 'k' => |c| { // down, up
-                    const line_number = editor.cursor.position.line_number;
-                    editor.cursor.position.line_number = @min(
-                        if (c == 'j') line_number +| 1 else line_number -| 1,
-                        lines.len - 1, // clamp to last line in file
-                    );
-                    // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
-                    // offset, saturated so we don't underflow in the case of an empty line.
-                    editor.cursor.position.line_offset = @min(
-                        editor.snap_offset,
-                        lines[editor.cursor.position.line_number].size() -| 1,
-                    );
-                },
-                else => {},
+        .ascii => |ascii| switch (ascii.character) {
+            'q' => return false, // quit
+            'h', 'l' => |c| { // left, right
+                const line_offset = editor.cursor.position.line_offset;
+                editor.cursor.position.line_offset = @min(
+                    if (c == 'h') line_offset -| 1 else line_offset +| 1,
+                    // Clamp to end of line.
+                    lines[editor.cursor.position.line_number].size() -| 1,
+                );
+                editor.snap_offset = editor.cursor.position.line_offset;
             },
-            .backspace, .tab, .enter => {
-                // TODO
+            'j', 'k' => |c| { // down, up
+                const line_number = editor.cursor.position.line_number;
+                editor.cursor.position.line_number = @min(
+                    if (c == 'j') line_number +| 1 else line_number -| 1,
+                    lines.len - 1, // clamp to last line in file
+                );
+                // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
+                // offset, saturated so we don't underflow in the case of an empty line.
+                editor.cursor.position.line_offset = @min(
+                    editor.snap_offset,
+                    lines[editor.cursor.position.line_number].size() -| 1,
+                );
             },
+            else => {},
+        },
+        .backspace,
+        .enter,
+        .escape,
+        .tab,
+        => {
+            // TODO
         },
         .resize => |resize| {
             editor.row_count = resize.row_count;
