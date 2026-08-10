@@ -333,8 +333,7 @@ pub fn tick(editor: *Editor) !bool {
     return true;
 }
 
-// TODO: Make this private and only use `tick()`?
-pub fn render(editor: *const Editor) !void {
+fn render(editor: *const Editor) !void {
     const writer = editor.writer;
     const row_count = editor.row_count;
     const col_count = editor.col_count;
@@ -583,16 +582,19 @@ const hello_c =
     \\
 ;
 
+const test_input = "\x1b[48;12;36;0;0t" // dimensions: 12 rows by 36 cols
+    ++ "q"; // quit after first render
+
 test "rendering: hello_c" {
     const allocator = std.testing.allocator;
 
-    var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t"); // 12 rows by 36 cols
+    var reader = std.Io.Reader.fixed(test_input);
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
     var editor: Editor = try .init(allocator, &reader, &writer.writer, "hello.c", hello_c);
     defer editor.deinit();
 
-    try editor.render();
+    assert(try editor.tick() == false); // reports false on quit input
     const result = writer.written();
 
     // For the comparison below to work we need to strip the carriage returns ('\r').
@@ -622,13 +624,13 @@ test "rendering: hello_c" {
 test "rendering: empty" {
     const allocator = std.testing.allocator;
 
-    var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t"); // 12 rows by 36 cols
+    var reader = std.Io.Reader.fixed(test_input);
     var writer = std.Io.Writer.Allocating.init(allocator);
     defer writer.deinit();
     var editor: Editor = try .init(allocator, &reader, &writer.writer, "empty.zig", "\n");
     defer editor.deinit();
 
-    try editor.render();
+    assert(try editor.tick() == false);
     const result = writer.written();
 
     // For the comparison below to work we need to strip the carriage returns ('\r').
