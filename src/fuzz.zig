@@ -44,24 +44,12 @@ fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
     // First input must be resize (parsed during init below for dimensions).
     try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
     const move_weights = try frng.randomWeights(struct { h: u32, j: u32, k: u32, l: u32 });
-    while (true) switch (try frng.weighted(.{ .move = 999, .resize = 1 })) {
-        .move => {
-            const repeat = try frng.boolean();
-            const byte: u8 = switch (try frng.weighted(move_weights)) {
-                .h => 'h',
-                .j => 'j',
-                .k => 'k',
-                .l => 'l',
-            };
-            if (repeat) {
-                try input.writer.splatByteAll(byte, try frng.int(u8));
-            } else try input.writer.writeByte(byte);
-        },
-        .resize => try input.writer.print("\x1b[48;{d};{d};0;0t", .{
-            try viewportDimension(frng),
-            try viewportDimension(frng),
-        }),
+    // Fill the input buffer with inputs until we run out of entropy.
+    while (true) generateInput(&input.writer, frng, move_weights) catch |err| switch (err) {
+        error.OutOfEntropy => break,
+        else => return err,
     };
+
     try input.writer.writeByte('q'); // guarantee a clean exit
     var reader: std.Io.Reader = .fixed(input.written());
 
@@ -88,6 +76,27 @@ fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
         => return,
         else => return err,
     }) {}
+}
+
+fn generateInput(writer: *std.Io.Writer, frng: *FRNG, weights: anytype) !void {
+    return switch (try frng.weighted(.{ .move = 999, .resize = 1 })) {
+        .move => {
+            const repeat = try frng.boolean();
+            const byte: u8 = switch (try frng.weighted(weights)) {
+                .h => 'h',
+                .j => 'j',
+                .k => 'k',
+                .l => 'l',
+            };
+            if (repeat) {
+                try writer.splatByteAll(byte, try frng.int(u8));
+            } else try writer.writeByte(byte);
+        },
+        .resize => try writer.print("\x1b[48;{d};{d};0;0t", .{
+            try viewportDimension(frng),
+            try viewportDimension(frng),
+        }),
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
