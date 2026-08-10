@@ -61,12 +61,14 @@ const Cursor = struct {
         switch (direction) {
             .left, .right => {
                 const line_offset = cursor.head.line_offset;
+                const line_offset_next =
+                    if (direction == .left) line_offset -| count else line_offset +| count;
+                // Clamp to end of line.
                 cursor.head.line_offset = @min(
-                    if (direction == .left) line_offset -| count else line_offset +| count,
-                    // Clamp to end of line.
+                    line_offset_next,
                     lines[cursor.head.line_number].size() -| 1,
                 );
-                cursor.snap_offset = cursor.head.line_offset;
+                cursor.snap_offset = line_offset_next;
             },
             .up, .down => {
                 const line_number = cursor.head.line_number;
@@ -186,14 +188,14 @@ pub fn deinit(editor: *Editor) void {
 /// caps_lock 0b1000000   (64)
 /// num_lock  0b10000000  (128)
 const Modifiers = packed struct(u8) {
-    shift: bool,
-    alt: bool,
-    ctrl: bool,
-    super: bool,
-    hyper: bool,
-    meta: bool,
-    caps_lock: bool,
-    num_lock: bool,
+    shift: bool = false,
+    alt: bool = false,
+    ctrl: bool = false,
+    super: bool = false,
+    hyper: bool = false,
+    meta: bool = false,
+    caps_lock: bool = false,
+    num_lock: bool = false,
 
     /// Decode modifiers from ASCII value passed in escape sequence: "In the escape code, the
     /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
@@ -211,19 +213,7 @@ const Modifiers = packed struct(u8) {
 /// Handle input: parse Kitty Keyboard Protocol events.
 fn parseOne(reader: *std.Io.Reader) !union(enum) {
     resize: struct { row_count: u16, col_count: u16 },
-    ascii: struct {
-        character: u8,
-        modifiers: Modifiers = .{
-            .shift = false,
-            .alt = false,
-            .ctrl = false,
-            .super = false,
-            .hyper = false,
-            .meta = false,
-            .caps_lock = false,
-            .num_lock = false,
-        },
-    },
+    ascii: struct { character: u8, modifiers: ?Modifiers = null },
     backspace,
     enter,
     escape,
@@ -333,7 +323,16 @@ pub fn tick(editor: *Editor) !bool {
         }
         editor.pending = null;
     } else switch (event) { // in the middle of handling a user input sequence
-        .ascii => |ascii| switch (ascii.character) {
+        .ascii => |ascii| if (ascii.modifiers) |modifiers| { // chord
+            const lines = editor.lines.items;
+            const scroll = editor.row_count / 2;
+            const ctrl: Modifiers = .{ .ctrl = true };
+            switch (ascii.character) {
+                'u' => if (modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
+                'd' => if (modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
+                else => {},
+            }
+        } else switch (ascii.character) {
             'q' => return false, // quit
             'h' => editor.cursor.move(.left, 1, editor.lines.items),
             'l' => editor.cursor.move(.right, 1, editor.lines.items),
