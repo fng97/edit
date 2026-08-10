@@ -16,6 +16,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Editor = @This();
 
+pub const file_size_max = 1 * 1024 * 1024;
 pub const line_count_max = 10_000;
 pub const line_offset_max = 1_000;
 pub const row_count_max = 2_000;
@@ -33,21 +34,56 @@ allocator: std.mem.Allocator,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
+cursor: Cursor,
+pending: ?enum { go } = null,
+
 // Viewport state:
 row_count: u16,
 col_count: u16,
 first_line: u16, // line number of the top line
 first_offset: u16, // viewport offset into lines (for horizontal scroll)
-snap_offset: u16,
 
 // File state:
 name: []const u8,
 bytes: []const u8,
 lines: std.ArrayList(Line),
 
-cursor: struct {
-    position: Position,
-},
+const Cursor = struct {
+    head: Position,
+    snap_offset: u16,
+
+    fn move(
+        cursor: *Cursor,
+        direction: enum { up, down, left, right },
+        count: u16,
+        lines: []Line,
+    ) void {
+        switch (direction) {
+            .left, .right => {
+                const line_offset = cursor.head.line_offset;
+                cursor.head.line_offset = @min(
+                    if (direction == .left) line_offset -| count else line_offset +| count,
+                    // Clamp to end of line.
+                    lines[cursor.head.line_number].size() -| 1,
+                );
+                cursor.snap_offset = cursor.head.line_offset;
+            },
+            .up, .down => {
+                const line_number = cursor.head.line_number;
+                cursor.head.line_number = @min(
+                    if (direction == .down) line_number +| count else line_number -| count,
+                    lines.len - 1, // clamp to last line in file
+                );
+                // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
+                // offset, saturated so we don't underflow in the case of an empty line.
+                cursor.head.line_offset = @min(
+                    cursor.snap_offset,
+                    lines[cursor.head.line_number].size() -| 1,
+                );
+            },
+        }
+    }
+};
 
 const Error = error{
     ViewportTooSmall,
@@ -122,11 +158,13 @@ pub fn init(
         .col_count = dimensions.col_count,
         .first_line = 0,
         .first_offset = 0,
-        .snap_offset = 0,
         .name = file_name,
         .bytes = file_bytes,
         .lines = lines,
-        .cursor = .{ .position = .{ .line_number = 0, .line_offset = 0 } },
+        .cursor = .{
+            .head = .{ .line_number = 0, .line_offset = 0 },
+            .snap_offset = 0,
+        },
     };
     try editor.validate();
 
@@ -219,11 +257,8 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 
             const params = params_buffer[0..params_index];
             var iter = std.mem.splitScalar(u8, params, ';');
-            const first = try std.fmt.parseInt(
-                i32,
-                iter.next() orelse @panic("escape sequence has no parameters"),
-                10,
-            );
+            const first_str = iter.next() orelse @panic("escape sequence has no parameters");
+            const first = try std.fmt.parseInt(i32, first_str, 10);
             switch (final) {
                 'u' => switch (first) {
                     0x1b => return .escape,
@@ -273,32 +308,39 @@ fn validate(editor: *const Editor) Error!void {
 pub fn tick(editor: *Editor) !bool {
     try editor.render();
 
-    const lines = editor.lines.items;
-    switch (try parseOne(editor.reader)) {
+    const event = try parseOne(editor.reader);
+
+    // Handle terminal events separately from user events.
+    if (event == .resize) {
+        editor.row_count = event.resize.row_count;
+        editor.col_count = event.resize.col_count;
+    } else if (editor.pending) |pending| {
+        switch (pending) {
+            .go => {
+                const max = std.math.maxInt(u16);
+                switch (event) {
+                    .ascii => |ascii| switch (ascii.character) {
+                        'h' => editor.cursor.move(.left, max, editor.lines.items),
+                        'j' => editor.cursor.move(.down, max, editor.lines.items),
+                        'k' => editor.cursor.move(.up, max, editor.lines.items),
+                        'l' => editor.cursor.move(.right, max, editor.lines.items),
+                        else => {},
+                    },
+                    .resize => unreachable,
+                    else => {}, // do nothing
+                }
+            },
+        }
+        editor.pending = null;
+    } else switch (event) { // in the middle of handling a user input sequence
         .ascii => |ascii| switch (ascii.character) {
             'q' => return false, // quit
-            'h', 'l' => |c| { // left, right
-                const line_offset = editor.cursor.position.line_offset;
-                editor.cursor.position.line_offset = @min(
-                    if (c == 'h') line_offset -| 1 else line_offset +| 1,
-                    // Clamp to end of line.
-                    lines[editor.cursor.position.line_number].size() -| 1,
-                );
-                editor.snap_offset = editor.cursor.position.line_offset;
-            },
-            'j', 'k' => |c| { // down, up
-                const line_number = editor.cursor.position.line_number;
-                editor.cursor.position.line_number = @min(
-                    if (c == 'j') line_number +| 1 else line_number -| 1,
-                    lines.len - 1, // clamp to last line in file
-                );
-                // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
-                // offset, saturated so we don't underflow in the case of an empty line.
-                editor.cursor.position.line_offset = @min(
-                    editor.snap_offset,
-                    lines[editor.cursor.position.line_number].size() -| 1,
-                );
-            },
+            'h' => editor.cursor.move(.left, 1, editor.lines.items),
+            'l' => editor.cursor.move(.right, 1, editor.lines.items),
+            'j' => editor.cursor.move(.down, 1, editor.lines.items),
+            'k' => editor.cursor.move(.up, 1, editor.lines.items),
+            // "Go" event. Next event describes where.
+            'g' => editor.pending = .go,
             else => {},
         },
         .backspace,
@@ -308,26 +350,23 @@ pub fn tick(editor: *Editor) !bool {
         => {
             // TODO
         },
-        .resize => |resize| {
-            editor.row_count = resize.row_count;
-            editor.col_count = resize.col_count;
-        },
+        .resize => unreachable,
     }
 
     try editor.validate();
 
     // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
-    if (editor.cursor.position.line_number < editor.first_line) {
-        editor.first_line = editor.cursor.position.line_number;
-    } else if (editor.cursor.position.line_number > last_line) {
-        editor.first_line += editor.cursor.position.line_number - last_line;
+    if (editor.cursor.head.line_number < editor.first_line) {
+        editor.first_line = editor.cursor.head.line_number;
+    } else if (editor.cursor.head.line_number > last_line) {
+        editor.first_line += editor.cursor.head.line_number - last_line;
     }
     const last_offset = editor.lastOffset();
-    if (editor.cursor.position.line_offset < editor.first_offset) {
-        editor.first_offset = editor.cursor.position.line_offset;
-    } else if (editor.cursor.position.line_offset > last_offset) {
-        editor.first_offset += editor.cursor.position.line_offset - last_offset;
+    if (editor.cursor.head.line_offset < editor.first_offset) {
+        editor.first_offset = editor.cursor.head.line_offset;
+    } else if (editor.cursor.head.line_offset > last_offset) {
+        editor.first_offset += editor.cursor.head.line_offset - last_offset;
     }
 
     return true;
@@ -342,7 +381,7 @@ fn render(editor: *const Editor) !void {
     const file_bytes = editor.bytes;
     const file_name = editor.name;
     const lines = editor.lines.items;
-    const cursor_position = editor.cursor.position;
+    const cursor_head = editor.cursor.head;
 
     const gutter_width = editor.gutterWidth();
 
@@ -370,8 +409,8 @@ fn render(editor: *const Editor) !void {
 
     // Draw status line. Displayed line number and offset should be indexed from 1.
     const cursor_coordinates_col_count =
-        digitCount(cursor_position.line_number + 1) +
-        digitCount(cursor_position.line_offset + 1) +
+        digitCount(cursor_head.line_number + 1) +
+        digitCount(cursor_head.line_offset + 1) +
         1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
     if (cursor_coordinates_col_count > col_count) return error.ViewportTooSmall;
     // TODO: Display the relative file path.
@@ -383,18 +422,18 @@ fn render(editor: *const Editor) !void {
         try writer.splatByteAll(' ', padding_col_count);
     } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count);
     try writer.print("{d},{d}", .{
-        cursor_position.line_number + 1,
-        cursor_position.line_offset + 1,
+        cursor_head.line_number + 1,
+        cursor_head.line_offset + 1,
     });
 
     // Make sure cursor is within the viewport's bounds.
-    assert(cursor_position.line_number >= first_line);
-    assert(cursor_position.line_number <= editor.lastLine());
-    assert(cursor_position.line_offset >= first_offset);
-    assert(cursor_position.line_offset <= editor.lastOffset());
+    assert(cursor_head.line_number >= first_line);
+    assert(cursor_head.line_number <= editor.lastLine());
+    assert(cursor_head.line_offset >= first_offset);
+    assert(cursor_head.line_offset <= editor.lastOffset());
     const cursor_cell: Cell = .{
-        .row = cursor_position.line_number - first_line,
-        .col = cursor_position.line_offset - first_offset + gutter_width,
+        .row = cursor_head.line_number - first_line,
+        .col = cursor_head.line_offset - first_offset + gutter_width,
     };
     assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
@@ -458,7 +497,6 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
 
     // TODO: I think instead of generating a file size then allocating we could just allocate a max
     // buffer and use the Smith slice functions.
-    const file_size_max = 1 * 1024 * 1024;
     // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
     const file_size = smith.valueRangeAtMost(u32, 1, file_size_max);
     const file_buffer = try allocator.alloc(u8, file_size);

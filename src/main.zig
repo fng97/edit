@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         file_name,
         allocator,
-        .limited(1 * 1024 * 1024), // 1 MiB
+        .limited(Editor.file_size_max),
     );
     defer allocator.free(file_bytes);
 
@@ -24,12 +24,12 @@ pub fn main(init: std.process.Init) !void {
     var stdin_reader = stdin.reader(io, &stdin_buffer);
     const reader: *std.Io.Reader = &stdin_reader.interface;
 
-    // TODO: Later, we'll want to buffer the whole screen and flush in one go. Will need to work out
-    // the maximum buffer size based on resolution and rendering (have to account for escape
-    // sequences).
+    // Ideally this buffer is big enough to buffer everything rendered so that flush is only ever
+    // called once per render.
+    const stdout_buffer = try allocator.alloc(u8, Editor.file_size_max);
+    defer allocator.free(stdout_buffer);
     const stdout = std.Io.File.stdout();
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = stdout.writer(io, &stdout_buffer);
+    var stdout_writer = stdout.writer(io, stdout_buffer);
     const writer: *std.Io.Writer = &stdout_writer.interface;
 
     // Put terminal in raw mode. Restore original termios on exit.
