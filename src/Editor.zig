@@ -35,7 +35,6 @@ reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
 cursor: Cursor,
-pending: ?enum { go } = null,
 
 // Viewport state:
 row_count: u16,
@@ -298,38 +297,20 @@ fn validate(editor: *const Editor) Error!void {
 pub fn tick(editor: *Editor) !bool {
     try editor.render();
 
-    const event = try parseOne(editor.reader);
-
     // Handle terminal events separately from user events.
-    if (event == .resize) {
-        editor.row_count = event.resize.row_count;
-        editor.col_count = event.resize.col_count;
-    } else if (editor.pending) |pending| {
-        switch (pending) {
-            .go => {
-                const max = std.math.maxInt(u16);
-                switch (event) {
-                    .ascii => |ascii| switch (ascii.character) {
-                        'h' => editor.cursor.move(.left, max, editor.lines.items),
-                        'j' => editor.cursor.move(.down, max, editor.lines.items),
-                        'k' => editor.cursor.move(.up, max, editor.lines.items),
-                        'l' => editor.cursor.move(.right, max, editor.lines.items),
-                        else => {},
-                    },
-                    .resize => unreachable,
-                    else => {}, // do nothing
-                }
-            },
-        }
-        editor.pending = null;
-    } else switch (event) { // in the middle of handling a user input sequence
+    switch (try parseOne(editor.reader)) {
         .ascii => |ascii| if (ascii.modifiers) |modifiers| { // chord
             const lines = editor.lines.items;
             const scroll = editor.row_count / 2;
             const ctrl: Modifiers = .{ .ctrl = true };
+            const max = std.math.maxInt(u16);
             switch (ascii.character) {
                 'u' => if (modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
                 'd' => if (modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
+                'h' => if (modifiers == ctrl) editor.cursor.move(.left, max, lines),
+                'j' => if (modifiers == ctrl) editor.cursor.move(.down, max, lines),
+                'k' => if (modifiers == ctrl) editor.cursor.move(.up, max, lines),
+                'l' => if (modifiers == ctrl) editor.cursor.move(.right, max, lines),
                 else => {},
             }
         } else switch (ascii.character) {
@@ -338,8 +319,6 @@ pub fn tick(editor: *Editor) !bool {
             'l' => editor.cursor.move(.right, 1, editor.lines.items),
             'j' => editor.cursor.move(.down, 1, editor.lines.items),
             'k' => editor.cursor.move(.up, 1, editor.lines.items),
-            // "Go" event. Next event describes where.
-            'g' => editor.pending = .go,
             else => {},
         },
         .backspace,
@@ -349,7 +328,10 @@ pub fn tick(editor: *Editor) !bool {
         => {
             // TODO
         },
-        .resize => unreachable,
+        .resize => |resize| {
+            editor.row_count = resize.row_count;
+            editor.col_count = resize.col_count;
+        },
     }
 
     try editor.validate();
