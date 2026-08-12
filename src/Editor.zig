@@ -223,7 +223,7 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
         0x09 => return .tab,
         0x0D => return .enter,
         // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-        0x21...0x7E => |c| return .{ .ascii = .{ .character = c } },
+        0x20...0x7E => |c| return .{ .ascii = .{ .character = c } },
         // From https://en.wikipedia.org/wiki/ANSI_escape_code#Control_Sequence_Introducer_commands:
         // Escape sequences: The Control Sequence Introducer, or CSI, is followed by any number
         // (including none) of parameter bytes in the range 0x30-0x3F (ASCII 0-9:;<=>?), then by any
