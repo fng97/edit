@@ -3,6 +3,15 @@ const Editor = @import("Editor.zig");
 
 const assert = std.debug.assert;
 
+const terminal_init =
+    "\x1b[?1049h" ++ // use alt screen: stores screen and cursor state and has no scrollback
+    "\x1b[>1u" ++ // initialise Kitty Keyboard Protocol (KKP) mode 1 (disambiguate escape codes)
+    "\x1b[?2048h"; // enable in-band resize notifications
+const terminal_deinit =
+    "\x1b[?2048l" ++ // disable in-band resize notifications
+    "\x1b[<u" ++ // pop KKP flags
+    "\x1b[?1049l"; // exit alt screen
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
@@ -51,29 +60,11 @@ pub fn main(init: std.process.Init) !void {
     termios_raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
 
-    defer { // clean up terminal on exit -- safe to send even if KKP disabled or not in alt mode
-        writer.writeAll("\x1b[<u") catch {}; // pop KKP flags
-        writer.writeAll("\x1b[?2048l") catch {}; // disable in-band resize notifications
-        writer.writeAll("\x1b[?1049l") catch {}; // exit alt screen
-        writer.flush() catch {};
-    }
+    // Always restore, even if init fails.
+    defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
+    try stdout.writeStreamingAll(io, terminal_init);
 
-    // Use alt screen: It stores screen and cursor state separately and has no scrollback. This is
-    // the convention for fullscreen TUIs like vim, tmux, etc.
-    try writer.writeAll("\x1b[?1049h");
-    // Initialise Kitty Keyboard Protocol (KKP) with mode 1 (disambiguate escape codes).
-    try writer.writeAll("\x1b[>1u");
-    // Enable in-band resize notifications.
-    try writer.writeAll("\x1b[?2048h");
-    try writer.flush();
-
-    var editor: Editor = try .init(
-        allocator,
-        reader,
-        writer,
-        file_name,
-        file_bytes,
-    );
+    var editor: Editor = try .init(allocator, reader, writer, file_name, file_bytes);
     defer editor.deinit();
 
     while (try editor.tick()) {}
@@ -91,10 +82,7 @@ pub const panic = std.debug.FullPanic(struct {
             termios_original = null; // so we only do this once
             var threaded: std.Io.Threaded = .init_single_threaded;
             // Disable KKP (CSI < u) and resize (CSI ? 2048 l) then exit alt screen (CSI ? 1049 l).
-            std.Io.File.stdout().writeStreamingAll(
-                threaded.io(),
-                "\x1b[<u\x1b[?2048l\x1b[?1049l",
-            ) catch {};
+            std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
             std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
         }
         std.debug.defaultPanic(msg, first_trace_addr);
