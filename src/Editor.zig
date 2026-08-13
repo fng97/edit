@@ -258,10 +258,13 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
             switch (final) {
                 'u' => switch (first) {
                     0x1b => return .escape,
-                    // Printable ASCII with modifiers.
+                    // Printable ASCII with modifiers. Codepoints must be the lowercase variant.
                     0x20...0x7E => |c| return .{
                         .ascii = .{
-                            .character = @intCast(c),
+                            .character = @intCast(switch (c) {
+                                'A'...'Z' => @panic("CSI u unicode-key-code must be unshifted"),
+                                else => c,
+                            }),
                             .modifiers = try .decode(
                                 iter.next() orelse @panic("CSI u sequence missing modifiers"),
                             ),
