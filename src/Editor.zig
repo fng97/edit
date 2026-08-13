@@ -39,8 +39,8 @@ cursor: Cursor,
 // Viewport state:
 row_count: u16,
 col_count: u16,
-first_line: u16, // line number of the top line
-first_offset: u16, // viewport offset into lines (for horizontal scroll)
+line_number_start: u16, // line number of the top line
+line_offset_start: u16, // viewport offset into lines (for horizontal scroll)
 
 // File state:
 name: []const u8,
@@ -113,8 +113,8 @@ const Cell = struct {
 
 fn cellFromPosition(editor: *const Editor, position: Position) Cell {
     return .{
-        .row = position.line_number - editor.first_line,
-        .col = position.line_offset - editor.first_offset + editor.gutterWidth(),
+        .row = position.line_number - editor.line_number_start,
+        .col = position.line_offset - editor.line_offset_start + editor.gutterWidth(),
     };
 }
 
@@ -164,8 +164,8 @@ pub fn init(
         .writer = writer,
         .row_count = dimensions.row_count,
         .col_count = dimensions.col_count,
-        .first_line = 0,
-        .first_offset = 0,
+        .line_number_start = 0,
+        .line_offset_start = 0,
         .name = file_name,
         .bytes = file_bytes,
         .lines = lines,
@@ -301,9 +301,9 @@ fn validate(editor: *const Editor) Error!void {
     }
 
     // Make sure cursor is within the viewport's bounds.
-    assert(editor.cursor.head.line_number >= editor.first_line);
+    assert(editor.cursor.head.line_number >= editor.line_number_start);
     assert(editor.cursor.head.line_number <= editor.lastLine());
-    assert(editor.cursor.head.line_offset >= editor.first_offset);
+    assert(editor.cursor.head.line_offset >= editor.line_offset_start);
     assert(editor.cursor.head.line_offset <= editor.lastOffset());
     const cursor_cell = editor.cellFromPosition(editor.cursor.head);
     assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
@@ -354,16 +354,16 @@ pub fn tick(editor: *Editor) !bool {
 
     // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
-    if (editor.cursor.head.line_number < editor.first_line) {
-        editor.first_line = editor.cursor.head.line_number;
+    if (editor.cursor.head.line_number < editor.line_number_start) {
+        editor.line_number_start = editor.cursor.head.line_number;
     } else if (editor.cursor.head.line_number > last_line) {
-        editor.first_line += editor.cursor.head.line_number - last_line;
+        editor.line_number_start += editor.cursor.head.line_number - last_line;
     }
     const last_offset = editor.lastOffset();
-    if (editor.cursor.head.line_offset < editor.first_offset) {
-        editor.first_offset = editor.cursor.head.line_offset;
+    if (editor.cursor.head.line_offset < editor.line_offset_start) {
+        editor.line_offset_start = editor.cursor.head.line_offset;
     } else if (editor.cursor.head.line_offset > last_offset) {
-        editor.first_offset += editor.cursor.head.line_offset - last_offset;
+        editor.line_offset_start += editor.cursor.head.line_offset - last_offset;
     }
 
     return true;
@@ -373,8 +373,8 @@ fn render(editor: *const Editor) !void {
     const writer = editor.writer;
     const row_count = editor.row_count;
     const col_count = editor.col_count;
-    const first_line = editor.first_line;
-    const first_offset = editor.first_offset;
+    const line_number_start = editor.line_number_start;
+    const line_offset_start = editor.line_offset_start;
     const file_bytes = editor.bytes;
     const file_name = editor.name;
     const lines = editor.lines.items;
@@ -386,13 +386,13 @@ fn render(editor: *const Editor) !void {
     try writer.writeAll("\x1b[H"); // place cursor at top left
 
     // The -1 below is to leave room for the status line.
-    for (first_line..first_line + row_count - 1) |line_number| {
+    for (line_number_start..line_number_start + row_count - 1) |line_number| {
         const line = if (line_number < lines.len) blk: {
             const line_full = lines[line_number].slice(file_bytes);
-            if (first_offset > line_full.len) break :blk "";
-            const line = line_full[first_offset..];
+            if (line_offset_start > line_full.len) break :blk "";
+            const line = line_full[line_offset_start..];
             const line_size = @min(line.len, col_count - gutter_width);
-            break :blk line_full[first_offset .. first_offset + line_size];
+            break :blk line_full[line_offset_start .. line_offset_start + line_size];
         } else "~";
         try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
@@ -431,13 +431,13 @@ fn render(editor: *const Editor) !void {
 
 /// Last line number visible in the viewport.
 fn lastLine(editor: *const Editor) u16 {
-    return editor.first_line + editor.row_count - 2; // extra -1 for status line
+    return editor.line_number_start + editor.row_count - 2; // extra -1 for status line
 }
 
 /// Last line offset (col) visible in the viewport.
 fn lastOffset(editor: *const Editor) u16 {
     const text_width = editor.col_count - editor.gutterWidth();
-    return editor.first_offset + text_width - 1;
+    return editor.line_offset_start + text_width - 1;
 }
 
 fn gutterWidth(editor: *const Editor) u8 {
