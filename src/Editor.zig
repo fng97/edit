@@ -34,13 +34,14 @@ allocator: std.mem.Allocator,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
-cursor: Cursor,
-
 // Viewport state:
-row_count: u16,
-col_count: u16,
-line_number_start: u16, // line number of the top line
-line_offset_start: u16, // viewport offset into lines (for horizontal scroll)
+viewport: struct {
+    row_count: u16,
+    col_count: u16,
+    line_number_start: u16, // line number of the top line
+    line_offset_start: u16, // viewport offset into lines (for horizontal scroll)
+},
+cursor: Cursor,
 
 // File state:
 name: []const u8,
@@ -113,8 +114,8 @@ const Cell = struct {
 
 fn cellFromPosition(editor: *const Editor, position: Position) Cell {
     return .{
-        .row = position.line_number - editor.line_number_start,
-        .col = position.line_offset - editor.line_offset_start + editor.gutterWidth(),
+        .row = position.line_number - editor.viewport.line_number_start,
+        .col = position.line_offset - editor.viewport.line_offset_start + editor.gutterWidth(),
     };
 }
 
@@ -162,10 +163,12 @@ pub fn init(
         .allocator = allocator,
         .reader = reader,
         .writer = writer,
-        .row_count = dimensions.row_count,
-        .col_count = dimensions.col_count,
-        .line_number_start = 0,
-        .line_offset_start = 0,
+        .viewport = .{
+            .row_count = dimensions.row_count,
+            .col_count = dimensions.col_count,
+            .line_number_start = 0,
+            .line_offset_start = 0,
+        },
         .name = file_name,
         .bytes = file_bytes,
         .lines = lines,
@@ -294,26 +297,29 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 }
 
 fn validate(editor: *const Editor) Error!void {
-    // Vertically, need room for at least one line and the status line.
-    if (editor.row_count < 2) return Error.ViewportTooSmall;
-    if (editor.row_count > row_count_max) return Error.ViewportTooLarge;
-    // Horizontally, need room for the gutter and one character.
-    if (editor.col_count < editor.gutterWidth() + 1) return Error.ViewportTooSmall;
-    if (editor.col_count > col_count_max) return Error.ViewportTooLarge;
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+    const line_number_start = editor.viewport.line_number_start;
+    const line_offset_start = editor.viewport.line_offset_start;
+    const lines = editor.lines.items;
 
-    for (editor.lines.items) |line| {
-        if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
-    }
+    for (lines) |line| if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
+
+    // Check viewport dimensions.
+    if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
+    if (row_count > row_count_max) return Error.ViewportTooLarge;
+    if (col_count < editor.gutterWidth() + 1) return Error.ViewportTooSmall; // at least one char
+    if (col_count > col_count_max) return Error.ViewportTooLarge;
 
     // Make sure cursor is within the viewport's bounds.
-    assert(editor.cursor.head.line_number >= editor.line_number_start);
+    assert(editor.cursor.head.line_number >= line_number_start);
     assert(editor.cursor.head.line_number <= editor.lastLine());
-    assert(editor.cursor.head.line_offset >= editor.line_offset_start);
+    assert(editor.cursor.head.line_offset >= line_offset_start);
     assert(editor.cursor.head.line_offset <= editor.lastOffset());
     const cursor_cell = editor.cellFromPosition(editor.cursor.head);
     assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
-    assert(cursor_cell.col < editor.col_count); // does not exceed screen bounds horizontally
-    assert(cursor_cell.row < editor.row_count); // does not exceed screen bounds vertically
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
 }
 
 pub fn tick(editor: *Editor) !bool {
@@ -321,7 +327,7 @@ pub fn tick(editor: *Editor) !bool {
     switch (try parseOne(editor.reader)) {
         .ascii => |ascii| if (ascii.modifiers) |modifiers| {
             const lines = editor.lines.items;
-            const scroll = editor.row_count / 2;
+            const scroll = editor.viewport.row_count / 2;
             const ctrl: Modifiers = .{ .ctrl = true };
             const max = std.math.maxInt(u16);
             switch (ascii.character) {
@@ -349,23 +355,23 @@ pub fn tick(editor: *Editor) !bool {
             // TODO
         },
         .resize => |resize| {
-            editor.row_count = resize.row_count;
-            editor.col_count = resize.col_count;
+            editor.viewport.row_count = resize.row_count;
+            editor.viewport.col_count = resize.col_count;
         },
     }
 
     // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
-    if (editor.cursor.head.line_number < editor.line_number_start) {
-        editor.line_number_start = editor.cursor.head.line_number;
+    if (editor.cursor.head.line_number < editor.viewport.line_number_start) {
+        editor.viewport.line_number_start = editor.cursor.head.line_number;
     } else if (editor.cursor.head.line_number > last_line) {
-        editor.line_number_start += editor.cursor.head.line_number - last_line;
+        editor.viewport.line_number_start += editor.cursor.head.line_number - last_line;
     }
     const last_offset = editor.lastOffset();
-    if (editor.cursor.head.line_offset < editor.line_offset_start) {
-        editor.line_offset_start = editor.cursor.head.line_offset;
+    if (editor.cursor.head.line_offset < editor.viewport.line_offset_start) {
+        editor.viewport.line_offset_start = editor.cursor.head.line_offset;
     } else if (editor.cursor.head.line_offset > last_offset) {
-        editor.line_offset_start += editor.cursor.head.line_offset - last_offset;
+        editor.viewport.line_offset_start += editor.cursor.head.line_offset - last_offset;
     }
 
     try editor.validate();
@@ -376,10 +382,10 @@ pub fn tick(editor: *Editor) !bool {
 
 fn render(editor: *const Editor) !void {
     const writer = editor.writer;
-    const row_count = editor.row_count;
-    const col_count = editor.col_count;
-    const line_number_start = editor.line_number_start;
-    const line_offset_start = editor.line_offset_start;
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+    const line_number_start = editor.viewport.line_number_start;
+    const line_offset_start = editor.viewport.line_offset_start;
     const file_bytes = editor.bytes;
     const file_name = editor.name;
     const lines = editor.lines.items;
@@ -436,18 +442,19 @@ fn render(editor: *const Editor) !void {
 
 /// Last line number visible in the viewport.
 fn lastLine(editor: *const Editor) u16 {
-    return editor.line_number_start + editor.row_count - 2; // extra -1 for status line
+    // The extra -1 is for the status line.
+    return editor.viewport.line_number_start + editor.viewport.row_count - 2;
 }
 
 /// Last line offset (col) visible in the viewport.
 fn lastOffset(editor: *const Editor) u16 {
-    const text_width = editor.col_count - editor.gutterWidth();
-    return editor.line_offset_start + text_width - 1;
+    const text_width = editor.viewport.col_count - editor.gutterWidth();
+    return editor.viewport.line_offset_start + text_width - 1;
 }
 
 fn gutterWidth(editor: *const Editor) u8 {
     // Determine gutter width, enough digits for the greatest line number plus one for padding.
-    return digitCount(@intCast(@max(editor.row_count, editor.lines.items.len))) + 1;
+    return digitCount(@intCast(@max(editor.viewport.row_count, editor.lines.items.len))) + 1;
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
