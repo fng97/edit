@@ -174,7 +174,9 @@ pub fn init(
             .snap_offset = 0,
         },
     };
+
     try editor.validate();
+    try editor.render();
 
     return editor;
 }
@@ -315,12 +317,9 @@ fn validate(editor: *const Editor) Error!void {
 }
 
 pub fn tick(editor: *Editor) !bool {
-    try editor.validate();
-    try editor.render();
-
-    // Handle terminal events separately from user events.
+    // Handle input: user input or resize events.
     switch (try parseOne(editor.reader)) {
-        .ascii => |ascii| if (ascii.modifiers) |modifiers| { // chord
+        .ascii => |ascii| if (ascii.modifiers) |modifiers| {
             const lines = editor.lines.items;
             const scroll = editor.row_count / 2;
             const ctrl: Modifiers = .{ .ctrl = true };
@@ -368,6 +367,9 @@ pub fn tick(editor: *Editor) !bool {
     } else if (editor.cursor.head.line_offset > last_offset) {
         editor.line_offset_start += editor.cursor.head.line_offset - last_offset;
     }
+
+    try editor.validate();
+    try editor.render();
 
     return true;
 }
