@@ -111,6 +111,13 @@ const Cell = struct {
     col: u16,
 };
 
+fn cellFromPosition(editor: *const Editor, position: Position) Cell {
+    return .{
+        .row = position.line_number - editor.first_line,
+        .col = position.line_offset - editor.first_offset + editor.gutterWidth(),
+    };
+}
+
 /// Coordinate in the file.
 const Position = struct {
     line_number: u16,
@@ -292,9 +299,20 @@ fn validate(editor: *const Editor) Error!void {
     for (editor.lines.items) |line| {
         if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
     }
+
+    // Make sure cursor is within the viewport's bounds.
+    assert(editor.cursor.head.line_number >= editor.first_line);
+    assert(editor.cursor.head.line_number <= editor.lastLine());
+    assert(editor.cursor.head.line_offset >= editor.first_offset);
+    assert(editor.cursor.head.line_offset <= editor.lastOffset());
+    const cursor_cell = editor.cellFromPosition(editor.cursor.head);
+    assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
+    assert(cursor_cell.col < editor.col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < editor.row_count); // does not exceed screen bounds vertically
 }
 
 pub fn tick(editor: *Editor) !bool {
+    try editor.validate();
     try editor.render();
 
     // Handle terminal events separately from user events.
@@ -333,8 +351,6 @@ pub fn tick(editor: *Editor) !bool {
             editor.col_count = resize.col_count;
         },
     }
-
-    try editor.validate();
 
     // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
@@ -407,20 +423,8 @@ fn render(editor: *const Editor) !void {
         cursor_head.line_offset + 1,
     });
 
-    // Make sure cursor is within the viewport's bounds.
-    assert(cursor_head.line_number >= first_line);
-    assert(cursor_head.line_number <= editor.lastLine());
-    assert(cursor_head.line_offset >= first_offset);
-    assert(cursor_head.line_offset <= editor.lastOffset());
-    const cursor_cell: Cell = .{
-        .row = cursor_head.line_number - first_line,
-        .col = cursor_head.line_offset - first_offset + gutter_width,
-    };
-    assert(cursor_cell.col >= gutter_width); // right of line numbers
-    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
-
     // Place the cursor (escape code indexes from 1): CSI rows ; cols H.
+    const cursor_cell = editor.cellFromPosition(cursor_head);
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
     try writer.flush();
 }
