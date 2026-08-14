@@ -633,24 +633,56 @@ const hello_c =
 const test_input = "\x1b[48;12;36;0;0t" // dimensions: 12 rows by 36 cols
     ++ "q"; // quit after first render
 
+const StrippingWriter = struct {
+    out: std.Io.Writer.Allocating,
+    interface: std.Io.Writer,
+
+    fn init(allocator: std.mem.Allocator) !StrippingWriter {
+        return .{
+            .out = .init(allocator),
+            .interface = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+        };
+    }
+
+    fn deinit(stripping: *StrippingWriter) void {
+        stripping.out.deinit();
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const stripping: *StrippingWriter = @alignCast(@fieldParentPtr("interface", w));
+
+        var write_size: usize = 0;
+        for (data[0 .. data.len - 1]) |slice| {
+            for (slice) |byte| if (byte != '\r') try stripping.out.writer.writeByte(byte);
+            write_size += slice.len;
+        }
+
+        const splat_slice = data[data.len - 1];
+        for (0..splat) |_| {
+            for (splat_slice) |byte| if (byte != '\r') try stripping.out.writer.writeByte(byte);
+        }
+        return write_size + splat_slice.len * splat;
+    }
+
+    pub fn writer(stripping: *StrippingWriter) *std.Io.Writer {
+        return &stripping.interface;
+    }
+
+    pub fn written(stripping: *StrippingWriter) []const u8 {
+        return stripping.out.written();
+    }
+};
+
 test "rendering: hello_c" {
     const allocator = std.testing.allocator;
 
-    var reader = std.Io.Reader.fixed(test_input);
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
-    var editor: Editor = try .init(allocator, &reader, &writer.writer, "hello.c", hello_c);
+    var reader: std.Io.Reader = .fixed(test_input);
+    var stripping: StrippingWriter = try .init(allocator);
+    defer stripping.deinit();
+    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
     defer editor.deinit();
 
-    try std.testing.expect(try editor.tick() == false); // reports false on quit input
-    const result = writer.written();
-
-    // For the comparison below to work we need to strip the carriage returns ('\r').
-    var stripped_buffer = try allocator.alloc(u8, result.len);
-    defer allocator.free(stripped_buffer);
-    const stripped_count = std.mem.replace(u8, result, "\r", "", stripped_buffer);
-    const stripped = stripped_buffer[0 .. result.len - stripped_count];
-
+    try std.testing.expect(try editor.tick() == false); // last tick: reports false on quit
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 #include <stdio.h>
@@ -666,26 +698,19 @@ test "rendering: hello_c" {
         \\11 ~
         \\hello.c                          1,1
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
-    , stripped);
+    , stripping.written());
 }
 
 test "rendering: empty" {
     const allocator = std.testing.allocator;
 
-    var reader = std.Io.Reader.fixed(test_input);
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
-    var editor: Editor = try .init(allocator, &reader, &writer.writer, "empty.zig", "\n");
+    var reader: std.Io.Reader = .fixed(test_input);
+    var stripping: StrippingWriter = try .init(allocator);
+    defer stripping.deinit();
+    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "empty.zig", "\n");
     defer editor.deinit();
 
     try std.testing.expect(try editor.tick() == false);
-    const result = writer.written();
-
-    // For the comparison below to work we need to strip the carriage returns ('\r').
-    var stripped_buffer = try allocator.alloc(u8, result.len);
-    defer allocator.free(stripped_buffer);
-    const stripped_count = std.mem.replace(u8, result, "\r", "", stripped_buffer);
-    const stripped = stripped_buffer[0 .. result.len - stripped_count];
 
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
@@ -702,7 +727,7 @@ test "rendering: empty" {
         \\11 ~
         \\empty.zig                        1,1
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
-    , stripped);
+    , stripping.written());
 }
 
 // The editor should not render the same screen twice. If an input doesn't affect the viewport or
