@@ -1,2 +1,0 @@
-zig build fuzz -- --replay=369120:5374201212843847137
-zig build fuzz -- --replay=369024:6060005230960287842

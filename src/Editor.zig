@@ -150,22 +150,17 @@ pub fn init(
     for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
     if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
 
-    const dimensions = switch (try parseOne(reader)) {
-        .resize => |resize| resize,
-        else => @panic("first event must be resize"),
-    };
-
     var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
     errdefer lines.deinit(allocator);
     try indexLines(file_bytes, &lines);
 
-    const editor: Editor = .{
+    var editor: Editor = .{
         .allocator = allocator,
         .reader = reader,
         .writer = writer,
         .viewport = .{
-            .row_count = dimensions.row_count,
-            .col_count = dimensions.col_count,
+            .row_count = 0,
+            .col_count = 0,
             .line_number_start = 0,
             .line_offset_start = 0,
         },
@@ -178,8 +173,10 @@ pub fn init(
         },
     };
 
-    try editor.validate();
-    try editor.render(.full);
+    // First input must be viewport dimensions.
+    assert(try editor.tick());
+    assert(editor.viewport.row_count != 0);
+    assert(editor.viewport.col_count != 0);
 
     return editor;
 }
@@ -293,32 +290,6 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     }
 }
 
-fn validate(editor: *const Editor) Error!void {
-    const row_count = editor.viewport.row_count;
-    const col_count = editor.viewport.col_count;
-    const line_number_start = editor.viewport.line_number_start;
-    const line_offset_start = editor.viewport.line_offset_start;
-    const lines = editor.lines.items;
-
-    for (lines) |line| if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
-
-    // Check viewport dimensions.
-    if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
-    if (row_count > row_count_max) return Error.ViewportTooLarge;
-    if (col_count < editor.gutterWidth() + 1) return Error.ViewportTooSmall; // at least one char
-    if (col_count > col_count_max) return Error.ViewportTooLarge;
-
-    // Make sure cursor is within the viewport's bounds.
-    assert(editor.cursor.head.line_number >= line_number_start);
-    assert(editor.cursor.head.line_number <= editor.lastLine());
-    assert(editor.cursor.head.line_offset >= line_offset_start);
-    assert(editor.cursor.head.line_offset <= editor.lastOffset());
-    const cursor_cell = editor.cellFromPosition(editor.cursor.head);
-    assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
-    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
-}
-
 pub fn tick(editor: *Editor) !bool {
     const viewport_prev = editor.viewport;
     const cursor_prev = editor.cursor;
@@ -360,6 +331,18 @@ pub fn tick(editor: *Editor) !bool {
         },
     }
 
+    // Check line length.
+    const lines = editor.lines.items;
+    for (lines) |line| if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
+
+    // Check viewport dimensions.
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+    if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
+    if (row_count > row_count_max) return Error.ViewportTooLarge;
+    if (col_count < editor.gutterWidth() + 1) return Error.ViewportTooSmall; // at least one char
+    if (col_count > col_count_max) return Error.ViewportTooLarge;
+
     // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
     if (editor.cursor.head.line_number < editor.viewport.line_number_start) {
@@ -374,7 +357,17 @@ pub fn tick(editor: *Editor) !bool {
         editor.viewport.line_offset_start += editor.cursor.head.line_offset - last_offset;
     }
 
-    try editor.validate(); // check invariants before rendering
+    // Make sure cursor is within the viewport's bounds.
+    const line_number_start = editor.viewport.line_number_start;
+    const line_offset_start = editor.viewport.line_offset_start;
+    assert(editor.cursor.head.line_number >= line_number_start);
+    assert(editor.cursor.head.line_number <= editor.lastLine());
+    assert(editor.cursor.head.line_offset >= line_offset_start);
+    assert(editor.cursor.head.line_offset <= editor.lastOffset());
+    const cursor_cell = editor.cellFromPosition(editor.cursor.head);
+    assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
 
     // Optimisation: Don't render the same thing twice. Only render the status line if only the
     // cursor changed.
