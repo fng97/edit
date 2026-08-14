@@ -437,7 +437,7 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
     // TODO: Display the relative file path.
     // TODO: Minimise the file_name (path). For now, only print it if it fits.
     // File name doesn't fit, hide it.
-    if (file_name.len + cursor_coordinates_col_count + 1 < col_count) {
+    if (file_name.len + cursor_coordinates_col_count <= col_count) {
         const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
         try writer.writeAll(file_name);
         try writer.splatByteAll(' ', padding_col_count);
@@ -728,6 +728,125 @@ test "rendering: empty" {
         \\empty.zig                        1,1
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
     , stripping.written());
+}
+
+test "go to start/end of file" {
+    const allocator = std.testing.allocator;
+
+    var reader = std.Io.Reader.fixed("\x1b[48;5;36;0;0t" ++ // dimensions: 5 rows by 36 cols
+        "\x1b[106;5u" ++ // CTRL + j (go to end of file)
+        "\x1b[107;5u" ++ // CTRL + k (go to start of file)
+        "q"); // quit
+    var stripping: StrippingWriter = try .init(allocator);
+    defer stripping.deinit();
+    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
+    defer editor.deinit();
+
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\1 #include <stdio.h>
+        \\2 
+        \\3 int main() {
+        \\4   printf("Hello, world!\n");
+        \\hello.c                          1,1
+    ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    , stripping.written());
+
+    stripping.out.clearRetainingCapacity(); // clear what we've written
+    try std.testing.expect(try editor.tick() == true); // process the CTRL + j, editor still 'live'
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\3 int main() {
+        \\4   printf("Hello, world!\n");
+        \\5   return 0;
+        \\6 }
+        \\hello.c                          6,1
+    ++ "\x1b[4;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    , stripping.written());
+
+    stripping.out.clearRetainingCapacity(); // clear what we've written
+    try std.testing.expect(try editor.tick() == true); // process the CTRL + k, editor still 'live'
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\1 #include <stdio.h>
+        \\2 
+        \\3 int main() {
+        \\4   printf("Hello, world!\n");
+        \\hello.c                          1,1
+    ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == false); // process the q, exited
+}
+
+test "go to start/end of line" {
+    const allocator = std.testing.allocator;
+
+    var reader = std.Io.Reader.fixed("\x1b[48;12;12;0;0t" ++ // dimensions: 12 rows by 12 cols
+        "\x1b[108;5u" ++ // CTRL + l (go to end of line)
+        "\x1b[104;5u" ++ // CTRL + h (go to start of line)
+        "q"); // quit
+    var stripping: StrippingWriter = try .init(allocator);
+    defer stripping.deinit();
+    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
+    defer editor.deinit();
+
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 #include 
+        \\ 2 
+        \\ 3 int main(
+        \\ 4   printf(
+        \\ 5   return 
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c  1,1
+    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    , stripping.written());
+
+    stripping.out.clearRetainingCapacity(); // clear what we've written
+    try std.testing.expect(try editor.tick() == true); // process the CTRL + l, editor still 'live'
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 <stdio.h>
+        \\ 2 
+        \\ 3 ) {
+        \\ 4 "Hello, w
+        \\ 5 0;
+        \\ 6 
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c 1,18
+    ++ "\x1b[1;12H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    , stripping.written());
+
+    stripping.out.clearRetainingCapacity(); // clear what we've written
+    try std.testing.expect(try editor.tick() == true); // process the CTRL + k, editor still 'live'
+    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 #include 
+        \\ 2 
+        \\ 3 int main(
+        \\ 4   printf(
+        \\ 5   return 
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c  1,1
+    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == false); // process the q, exited
 }
 
 // The editor should not render the same screen twice. If an input doesn't affect the viewport or
