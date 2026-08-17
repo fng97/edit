@@ -224,7 +224,8 @@ const Modifiers = packed struct(u8) {
 /// Handle input: parse Kitty Keyboard Protocol events.
 fn parseOne(reader: *std.Io.Reader) !union(enum) {
     resize: struct { row_count: u16, col_count: u16 },
-    ascii: struct { character: u8, modifiers: ?Modifiers = null },
+    ascii: u8,
+    chord: struct { ascii: u8, modifiers: Modifiers },
     backspace,
     enter,
     escape,
@@ -235,7 +236,7 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
         0x09 => return .tab,
         0x0D => return .enter,
         // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-        0x20...0x7E => |c| return .{ .ascii = .{ .character = c } },
+        0x20...0x7E => |c| return .{ .ascii = c },
         // Control sequences start with CSI (0x1b 0x5b) and end with a character in the range,
         // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences.
         '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
@@ -261,17 +262,15 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
                 'u' => switch (first) {
                     0x1b => return .escape,
                     // Printable ASCII with modifiers. Codepoints must be the lowercase variant.
-                    0x20...0x7E => |c| return .{
-                        .ascii = .{
-                            .character = @intCast(switch (c) {
-                                'A'...'Z' => @panic("CSI u unicode-key-code must be unshifted"),
-                                else => c,
-                            }),
-                            .modifiers = try .decode(
-                                iter.next() orelse @panic("CSI u sequence missing modifiers"),
-                            ),
-                        },
-                    },
+                    0x20...0x7E => |c| return .{ .chord = .{
+                        .ascii = @intCast(switch (c) {
+                            'A'...'Z' => @panic("CSI u unicode-key-code must be unshifted"),
+                            else => c,
+                        }),
+                        .modifiers = try .decode(
+                            iter.next() orelse @panic("CSI u sequence missing modifiers"),
+                        ),
+                    } },
                     else => {}, // fall through to panic
                 },
                 't' => switch (first) {
@@ -299,27 +298,28 @@ pub fn tick(editor: *Editor) !bool {
 
     // Handle input: user input or resize events.
     switch (try parseOne(editor.reader)) {
-        .ascii => |ascii| if (ascii.modifiers) |modifiers| {
-            const lines = editor.lines.items;
-            const scroll = editor.viewport.row_count / 2;
-            const ctrl: Modifiers = .{ .ctrl = true };
-            const max = std.math.maxInt(u16);
-            switch (ascii.character) {
-                'u' => if (modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
-                'd' => if (modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
-                'h' => if (modifiers == ctrl) editor.cursor.move(.left, max, lines),
-                'j' => if (modifiers == ctrl) editor.cursor.move(.down, max, lines),
-                'k' => if (modifiers == ctrl) editor.cursor.move(.up, max, lines),
-                'l' => if (modifiers == ctrl) editor.cursor.move(.right, max, lines),
-                else => {},
-            }
-        } else switch (ascii.character) {
+        .ascii => |c| switch (c) {
             'q' => return false, // quit
             'h' => editor.cursor.move(.left, 1, editor.lines.items),
             'l' => editor.cursor.move(.right, 1, editor.lines.items),
             'j' => editor.cursor.move(.down, 1, editor.lines.items),
             'k' => editor.cursor.move(.up, 1, editor.lines.items),
             else => {},
+        },
+        .chord => |chord| {
+            const lines = editor.lines.items;
+            const scroll = editor.viewport.row_count / 2;
+            const ctrl: Modifiers = .{ .ctrl = true };
+            const max = std.math.maxInt(u16);
+            switch (chord.ascii) {
+                'u' => if (chord.modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
+                'd' => if (chord.modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
+                'h' => if (chord.modifiers == ctrl) editor.cursor.move(.left, max, lines),
+                'j' => if (chord.modifiers == ctrl) editor.cursor.move(.down, max, lines),
+                'k' => if (chord.modifiers == ctrl) editor.cursor.move(.up, max, lines),
+                'l' => if (chord.modifiers == ctrl) editor.cursor.move(.right, max, lines),
+                else => {},
+            }
         },
         .backspace,
         .enter,
