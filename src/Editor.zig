@@ -124,7 +124,7 @@ const Position = struct {
     line_number: u16,
     line_offset: u16,
 
-    pub fn fromFileOffset(file_offset: u32, lines: []const Line) Position {
+    pub fn fromOffset(file_offset: u32, lines: []const Line) Position {
         for (lines, 0..) |line, line_number| {
             if (file_offset <= line.tail) return .{
                 .line_number = @intCast(line_number),
@@ -133,7 +133,7 @@ const Position = struct {
         } else @panic("offset not within file bounds");
     }
 
-    pub fn toFileOffset(position: Position, lines: []const Line) u32 {
+    pub fn toOffset(position: Position, lines: []const Line) u32 {
         return lines[position.line_number].head + position.line_offset;
     }
 };
