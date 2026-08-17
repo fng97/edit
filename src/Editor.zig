@@ -62,10 +62,10 @@ const Cursor = struct {
                 const line_offset = cursor.head.line_offset;
                 const line_offset_next =
                     if (direction == .left) line_offset -| count else line_offset +| count;
-                // Clamp to end of line.
+                // Clamp to end of line (the newline).
                 cursor.head.line_offset = @min(
                     line_offset_next,
-                    lines[cursor.head.line_number].size() -| 1,
+                    lines[cursor.head.line_number].size() - 1,
                 );
                 cursor.snap_offset = line_offset_next;
             },
@@ -79,7 +79,7 @@ const Cursor = struct {
                 // offset, saturated so we don't underflow in the case of an empty line.
                 cursor.head.line_offset = @min(
                     cursor.snap_offset,
-                    lines[cursor.head.line_number].size() -| 1,
+                    lines[cursor.head.line_number].size() - 1,
                 );
             },
         }
@@ -96,12 +96,15 @@ const Line = struct {
     head: u32, // line start offset
     tail: u32, // line end offset (always a newline)
 
-    pub fn slice(line: Line, file_bytes: []const u8) []const u8 {
+    pub fn bytes(line: Line, file_bytes: []const u8) []const u8 {
+        assert(file_bytes[line.tail] == '\n');
         return file_bytes[line.head..line.tail];
     }
 
     pub fn size(line: Line) u16 {
-        return @intCast(line.tail - line.head);
+        const result: u16 = @intCast(line.tail - line.head + 1); // +1 for index -> count
+        assert(result > 0);
+        return result;
     }
 };
 
@@ -336,7 +339,7 @@ pub fn tick(editor: *Editor) !bool {
 
     // Check line length.
     const lines = editor.lines.items;
-    for (lines) |line| if (line.size() -| 1 > line_offset_max) return Error.LineTooLong;
+    for (lines) |line| if (line.size() - 1 > line_offset_max) return Error.LineTooLong;
 
     // Check viewport dimensions.
     const row_count = editor.viewport.row_count;
@@ -407,7 +410,7 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
             // The -1 below is to leave room for the status line.
             for (line_number_start..line_number_start + row_count - 1) |line_number| {
                 const line = if (line_number < lines.len) blk: {
-                    const line_full = lines[line_number].slice(file_bytes);
+                    const line_full = lines[line_number].bytes(file_bytes);
                     if (line_offset_start > line_full.len) break :blk "";
                     const line = line_full[line_offset_start..];
                     const line_size = @min(line.len, col_count - gutter_width);
@@ -815,18 +818,18 @@ test "go to start/end of line" {
     try std.testing.expect(try editor.tick() == true); // process the $
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
-        \\ 1 <stdio.h>
+        \\ 1 stdio.h>
         \\ 2 
-        \\ 3 ) {
-        \\ 4 "Hello, w
-        \\ 5 0;
+        \\ 3  {
+        \\ 4 Hello, wo
+        \\ 5 ;
         \\ 6 
         \\ 7 ~
         \\ 8 ~
         \\ 9 ~
         \\10 ~
         \\11 ~
-        \\hello.c 1,18
+        \\hello.c 1,19
     ++ "\x1b[1;12H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -926,6 +929,7 @@ test indexLines {
     try std.testing.expect(lines.items.len == 6);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 18);
+    try std.testing.expect(lines.items[0].size() == 19);
     try std.testing.expect(lines.getLast().tail == hello_c.len - 1);
 
     // This function should never be called with an empty slice. Empty files are handled by
@@ -935,4 +939,5 @@ test indexLines {
     try std.testing.expect(lines.items.len == 1);
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 0);
+    try std.testing.expect(lines.items[0].size() == 1);
 }
