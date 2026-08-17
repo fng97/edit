@@ -402,9 +402,9 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
         .full => {
             const gutter_width = editor.gutterWidth();
 
-            // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
+            // Clear screen (ED). See https://ghostty.org/docs/vt/csi/ed.
             try writer.writeAll("\x1b[2J");
-            // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
+            // Place cursor (CUP) at top left. See https://ghostty.org/docs/vt/csi/cup.
             try writer.writeAll("\x1b[H");
 
             // The -1 below is to leave room for the status line.
@@ -429,7 +429,7 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
         .status_only => {
             // Move cursor to status line.
             try writer.print("\x1b[{d};{d}H", .{ row_count, 1 }); // indexed from 1
-            // Clear the line. See https://ghostty.org/docs/vt/csi/el.
+            // Clear the line (EL). See https://ghostty.org/docs/vt/csi/el.
             try writer.writeAll("\x1b[2K");
         },
     }
@@ -453,6 +453,7 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
         cursor_head.line_offset + 1,
     });
 
+    // Restore cursor (CUP).
     const cursor_cell = editor.cellFromPosition(cursor_head);
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
 
@@ -679,6 +680,23 @@ const StrippingWriter = struct {
     }
 };
 
+fn expectRender(
+    comptime expected: struct {
+        screen: []const u8,
+        cursor: struct { row: u16, col: u16 },
+    },
+    actual: []const u8,
+) !void {
+    try std.testing.expectEqualSlices(u8,
+        // Clear screen (ED). See https://ghostty.org/docs/vt/csi/ed.
+        "\x1b[2J" ++
+            // Place cursor (CUP) at top left. See https://ghostty.org/docs/vt/csi/cup.
+            "\x1b[H" ++
+            expected.screen ++
+            // Place cursor (CUP) back where it should be.
+            std.fmt.comptimePrint("\x1b[{d};{d}H", .{ expected.cursor.row, expected.cursor.col }), actual);
+}
+
 test "rendering: hello_c" {
     const allocator = std.testing.allocator;
 
@@ -689,8 +707,8 @@ test "rendering: hello_c" {
     defer editor.deinit(allocator);
 
     try std.testing.expect(try editor.tick() == false); // last tick: reports false on quit
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try expectRender(.{
+        .screen =
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -703,8 +721,9 @@ test "rendering: hello_c" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
-    , stripping.written());
+        ,
+        .cursor = .{ .row = 1, .col = 4 },
+    }, stripping.written());
 }
 
 test "rendering: empty" {
@@ -718,8 +737,8 @@ test "rendering: empty" {
 
     try std.testing.expect(try editor.tick() == false);
 
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try expectRender(.{
+        .screen =
         \\ 1 
         \\ 2 ~
         \\ 3 ~
@@ -732,8 +751,9 @@ test "rendering: empty" {
         \\10 ~
         \\11 ~
         \\empty.zig                        1,1
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
-    , stripping.written());
+        ,
+        .cursor = .{ .row = 1, .col = 4 },
+    }, stripped.written());
 }
 
 test "go to start/end of file" {
