@@ -1,5 +1,19 @@
 # Notes
 
+- Any benefit to saving (DECSC) and restoring (DECRC) cursor rather than placing
+  it back manually?
+- Rendering optimisation ideas:
+  - Use repeat (REP) when implementing splat?
+  - Move cursor instead of sending multiple spaces (splat special case)?
+
+## TODO
+
+- Replace FRNG fuzzer with non-stop in-process fuzzer.
+- Add AFL++ fuzzer.
+- Add metrics to fuzzer: show live metrics and optionally includein
+  `trace.json`.
+- Add timing instrumentation. Is 2ms max reasonable per-tick?
+
 ## Bugs caught by fuzzer
 
 - Didn't handle empty files. When indexing lines,
