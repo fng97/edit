@@ -30,7 +30,6 @@ comptime {
     assert(line_offset_max - 1 + row_count_max - 2 <= std.math.maxInt(u16));
 }
 
-allocator: std.mem.Allocator,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
@@ -45,7 +44,7 @@ cursor: Cursor,
 
 // File state:
 name: []const u8,
-bytes: []const u8,
+buffer: std.ArrayList(u8),
 lines: std.ArrayList(Line),
 
 const Cursor = struct {
@@ -154,8 +153,11 @@ pub fn init(
     errdefer lines.deinit(allocator);
     try indexLines(file_bytes, &lines);
 
+    assert(file_bytes.len <= file_size_max);
+    var buffer: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
+    buffer.appendSliceAssumeCapacity(file_bytes);
+
     var editor: Editor = .{
-        .allocator = allocator,
         .reader = reader,
         .writer = writer,
         .viewport = .{
@@ -165,7 +167,7 @@ pub fn init(
             .line_offset_start = 0,
         },
         .name = file_name,
-        .bytes = file_bytes,
+        .buffer = buffer,
         .lines = lines,
         .cursor = .{
             .head = .{ .line_number = 0, .line_offset = 0 },
@@ -181,8 +183,9 @@ pub fn init(
     return editor;
 }
 
-pub fn deinit(editor: *Editor) void {
-    editor.lines.deinit(editor.allocator);
+pub fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
+    editor.lines.deinit(allocator);
+    editor.buffer.deinit(allocator);
 }
 
 /// Kitty Keyboard Protocol modifiers:
@@ -387,7 +390,7 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
     const col_count = editor.viewport.col_count;
     const line_number_start = editor.viewport.line_number_start;
     const line_offset_start = editor.viewport.line_offset_start;
-    const file_bytes = editor.bytes;
+    const file_bytes = editor.buffer.items;
     const file_name = editor.name;
     const lines = editor.lines.items;
     const cursor_head = editor.cursor.head;
@@ -569,7 +572,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         error.FileNotNewlineTerminated, error.FileNotAscii => return,
         else => return err,
     };
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     try editor.render(.full);
 }
@@ -680,7 +683,7 @@ test "rendering: hello_c" {
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     try std.testing.expect(try editor.tick() == false); // last tick: reports false on quit
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
@@ -708,7 +711,7 @@ test "rendering: empty" {
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, &reader, stripping.writer(), "empty.zig", "\n");
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     try std.testing.expect(try editor.tick() == false);
 
@@ -740,7 +743,7 @@ test "go to start/end of file" {
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
@@ -789,7 +792,7 @@ test "go to start/end of line" {
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
@@ -869,7 +872,7 @@ test "skip render if nothing changes" {
         "hello.c",
         hello_c,
     );
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     editor.writer = &allocating_writer.writer; // swap the writer to something we can check
     try std.testing.expect(try editor.tick() == true); // process the 'h', editor still 'live'
@@ -897,7 +900,7 @@ test "partial render if only cursor changed" {
         "hello.c",
         hello_c,
     );
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     editor.writer = &allocating_writer.writer; // swap the writer to something we can check
     try std.testing.expect(try editor.tick() == true); // process the 'l', editor still 'live'

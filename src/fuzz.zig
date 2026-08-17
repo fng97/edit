@@ -68,7 +68,7 @@ fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
         => return,
         else => return err,
     };
-    defer editor.deinit();
+    defer editor.deinit(allocator);
 
     while (editor.tick() catch |err| switch (err) {
         error.ViewportTooSmall,
