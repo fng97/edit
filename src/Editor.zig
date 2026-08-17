@@ -298,26 +298,28 @@ pub fn tick(editor: *Editor) !bool {
 
     // Handle input: user input or resize events.
     switch (try parseOne(editor.reader)) {
-        .ascii => |c| switch (c) {
-            'q' => return false, // quit
-            'h' => editor.cursor.move(.left, 1, editor.lines.items),
-            'l' => editor.cursor.move(.right, 1, editor.lines.items),
-            'j' => editor.cursor.move(.down, 1, editor.lines.items),
-            'k' => editor.cursor.move(.up, 1, editor.lines.items),
-            else => {},
+        .ascii => |c| {
+            const max = std.math.maxInt(u16);
+            switch (c) {
+                'q' => return false, // quit
+                'h' => editor.cursor.move(.left, 1, editor.lines.items),
+                'l' => editor.cursor.move(.right, 1, editor.lines.items),
+                'j' => editor.cursor.move(.down, 1, editor.lines.items),
+                'k' => editor.cursor.move(.up, 1, editor.lines.items),
+                '0' => editor.cursor.move(.left, max, editor.lines.items),
+                '$' => editor.cursor.move(.right, max, editor.lines.items),
+                'G' => editor.cursor.move(.down, max, editor.lines.items),
+                'g' => editor.cursor.move(.up, max, editor.lines.items),
+                else => {},
+            }
         },
         .chord => |chord| {
             const lines = editor.lines.items;
             const scroll = editor.viewport.row_count / 2;
             const ctrl: Modifiers = .{ .ctrl = true };
-            const max = std.math.maxInt(u16);
             switch (chord.ascii) {
                 'u' => if (chord.modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
                 'd' => if (chord.modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
-                'h' => if (chord.modifiers == ctrl) editor.cursor.move(.left, max, lines),
-                'j' => if (chord.modifiers == ctrl) editor.cursor.move(.down, max, lines),
-                'k' => if (chord.modifiers == ctrl) editor.cursor.move(.up, max, lines),
-                'l' => if (chord.modifiers == ctrl) editor.cursor.move(.right, max, lines),
                 else => {},
             }
         },
@@ -325,9 +327,7 @@ pub fn tick(editor: *Editor) !bool {
         .enter,
         .escape,
         .tab,
-        => {
-            // TODO
-        },
+        => {}, // nothing
         .resize => |resize| {
             editor.viewport.row_count = resize.row_count;
             editor.viewport.col_count = resize.col_count;
@@ -737,8 +737,8 @@ test "go to start/end of file" {
     const allocator = std.testing.allocator;
 
     var reader = std.Io.Reader.fixed("\x1b[48;5;36;0;0t" ++ // dimensions: 5 rows by 36 cols
-        "\x1b[106;5u" ++ // CTRL + j (go to end of file)
-        "\x1b[107;5u" ++ // CTRL + k (go to start of file)
+        "G" ++ // go to end of file
+        "g" ++ // go to start of file
         "q"); // quit
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -756,7 +756,7 @@ test "go to start/end of file" {
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the CTRL + j, editor still 'live'
+    try std.testing.expect(try editor.tick() == true); // process the G
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\3 int main() {
@@ -768,7 +768,7 @@ test "go to start/end of file" {
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the CTRL + k, editor still 'live'
+    try std.testing.expect(try editor.tick() == true); // process the g
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\1 #include <stdio.h>
@@ -786,8 +786,8 @@ test "go to start/end of line" {
     const allocator = std.testing.allocator;
 
     var reader = std.Io.Reader.fixed("\x1b[48;12;12;0;0t" ++ // dimensions: 12 rows by 12 cols
-        "\x1b[108;5u" ++ // CTRL + l (go to end of line)
-        "\x1b[104;5u" ++ // CTRL + h (go to start of line)
+        "$" ++ // go to end of line
+        "0" ++ // go to start of line
         "q"); // quit
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -812,7 +812,7 @@ test "go to start/end of line" {
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the CTRL + l, editor still 'live'
+    try std.testing.expect(try editor.tick() == true); // process the $
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 <stdio.h>
@@ -831,7 +831,7 @@ test "go to start/end of line" {
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the CTRL + k, editor still 'live'
+    try std.testing.expect(try editor.tick() == true); // process the 0
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 #include 
