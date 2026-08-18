@@ -33,6 +33,8 @@ comptime {
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
+mode: enum { normal, insert, select },
+
 // Viewport state:
 viewport: struct {
     row_count: u16,
@@ -163,6 +165,7 @@ pub fn init(
     var editor: Editor = .{
         .reader = reader,
         .writer = writer,
+        .mode = .normal,
         .viewport = .{
             .row_count = 0,
             .col_count = 0,
@@ -298,43 +301,71 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 pub fn tick(editor: *Editor) !bool {
     const viewport_prev = editor.viewport;
     const cursor_prev = editor.cursor;
+    const mode_prev = editor.mode;
+    var buffer_changed = false;
 
     // Handle input: user input or resize events.
-    switch (try parseOne(editor.reader)) {
-        .ascii => |c| {
-            const max = std.math.maxInt(u16);
-            switch (c) {
-                'q' => return false, // quit
-                'h' => editor.cursor.move(.left, 1, editor.lines.items),
-                'l' => editor.cursor.move(.right, 1, editor.lines.items),
-                'j' => editor.cursor.move(.down, 1, editor.lines.items),
-                'k' => editor.cursor.move(.up, 1, editor.lines.items),
-                '0' => editor.cursor.move(.left, max, editor.lines.items),
-                '$' => editor.cursor.move(.right, max, editor.lines.items),
-                'G' => editor.cursor.move(.down, max, editor.lines.items),
-                'g' => editor.cursor.move(.up, max, editor.lines.items),
-                else => {},
-            }
+    const input = try parseOne(editor.reader);
+    if (input == .resize) {
+        editor.viewport.row_count = input.resize.row_count;
+        editor.viewport.col_count = input.resize.col_count;
+    } else switch (editor.mode) {
+        .normal => switch (input) {
+            .ascii => |c| {
+                const max = std.math.maxInt(u16);
+                switch (c) {
+                    'q' => return false, // quit
+                    'h' => editor.cursor.move(.left, 1, editor.lines.items),
+                    'l' => editor.cursor.move(.right, 1, editor.lines.items),
+                    'j' => editor.cursor.move(.down, 1, editor.lines.items),
+                    'k' => editor.cursor.move(.up, 1, editor.lines.items),
+                    '0' => editor.cursor.move(.left, max, editor.lines.items),
+                    '$' => editor.cursor.move(.right, max, editor.lines.items),
+                    'G' => editor.cursor.move(.down, max, editor.lines.items),
+                    'g' => editor.cursor.move(.up, max, editor.lines.items),
+                    'i' => editor.mode = .insert,
+                    else => {},
+                }
+            },
+            .chord => |chord| {
+                const lines = editor.lines.items;
+                const scroll = editor.viewport.row_count / 2;
+                const ctrl: Modifiers = .{ .ctrl = true };
+                switch (chord.ascii) {
+                    'u' => if (chord.modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
+                    'd' => if (chord.modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
+                    else => {},
+                }
+            },
+            .backspace,
+            .enter,
+            .escape,
+            .tab,
+            => {}, // do nothing
+            .resize => unreachable,
         },
-        .chord => |chord| {
-            const lines = editor.lines.items;
-            const scroll = editor.viewport.row_count / 2;
-            const ctrl: Modifiers = .{ .ctrl = true };
-            switch (chord.ascii) {
-                'u' => if (chord.modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
-                'd' => if (chord.modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
-                else => {},
-            }
+        .insert => switch (input) {
+            .ascii => |c| {
+                const offset = editor.cursor.head.toOffset(editor.lines.items);
+                try editor.buffer.insertBounded(offset, c);
+                try indexLines(editor.buffer.items, &editor.lines);
+                editor.cursor.move(.right, 1, editor.lines.items);
+                buffer_changed = true;
+            },
+            .escape => {
+                editor.mode = .normal;
+                editor.cursor.move(.left, 1, editor.lines.items);
+            },
+            .chord => {}, // do nothing
+            .backspace,
+            .enter,
+            .tab,
+            => {
+                // TODO
+            },
+            .resize => unreachable,
         },
-        .backspace,
-        .enter,
-        .escape,
-        .tab,
-        => {}, // nothing
-        .resize => |resize| {
-            editor.viewport.row_count = resize.row_count;
-            editor.viewport.col_count = resize.col_count;
-        },
+        .select => {},
     }
 
     // Check line length.
@@ -379,8 +410,9 @@ pub fn tick(editor: *Editor) !bool {
     // cursor changed.
     const viewport_changed = !std.meta.eql(editor.viewport, viewport_prev);
     const cursor_changed = !std.meta.eql(editor.cursor, cursor_prev);
-    if (viewport_changed or cursor_changed) {
-        try editor.render(if (viewport_changed) .full else .status_only);
+    const mode_changed = editor.mode != mode_prev;
+    if (viewport_changed or cursor_changed or mode_changed or buffer_changed) {
+        try editor.render(if (viewport_changed or buffer_changed) .full else .status_only);
     }
 
     return true;
@@ -453,7 +485,15 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
         cursor_head.line_offset + 1,
     });
 
+    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     const cursor_cell = editor.cellFromPosition(cursor_head);
+    const cursor_style: u8 = switch (editor.mode) {
+        .normal,
+        .select,
+        => 2, // steady block
+        .insert => 6, // steady vertical bar
+    };
+    try writer.print("\x1b[{d}\x20q", .{cursor_style});
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
 
     try writer.flush();
@@ -703,6 +743,7 @@ test "rendering: hello_c" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
     , stripping.written());
 }
@@ -732,6 +773,7 @@ test "rendering: empty" {
         \\10 ~
         \\11 ~
         \\empty.zig                        1,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
     , stripping.written());
 }
@@ -755,6 +797,7 @@ test "go to start/end of file" {
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\hello.c                          1,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -767,6 +810,7 @@ test "go to start/end of file" {
         \\5   return 0;
         \\6 }
         \\hello.c                          6,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[4;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -779,6 +823,7 @@ test "go to start/end of file" {
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\hello.c                          1,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -811,6 +856,7 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c  1,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -830,6 +876,7 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c 1,19
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;12H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -849,6 +896,7 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c  1,1
+    ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
     , stripping.written());
 
@@ -913,6 +961,7 @@ test "partial render if only cursor changed" {
         "\x1b[12;1H" ++ // move cursor to status line
         "\x1b[2K" ++ // clear status line
         "hello.c                          1,2" ++ // new status line
+        "\x1b[2\x20q" ++ // set cursor style (steady block)
         "\x1b[1;5H"; // place cursor (right of starting point)
     try std.testing.expectEqualSlices(u8, allocating_writer.written(), expected);
 }
