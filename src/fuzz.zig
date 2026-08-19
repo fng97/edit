@@ -89,7 +89,7 @@ fn generateInput(writer: *std.Io.Writer, frng: *FRNG, weights: anytype) !void {
                 .l => 'l',
             };
             if (repeat) {
-                try writer.splatByteAll(byte, try frng.int(u8));
+                try writer.splatByteAll(byte, try frng.int(u8)); // TODO: skewed too big?
             } else try writer.writeByte(byte);
         },
         .resize => try writer.print("\x1b[48;{d};{d};0;0t", .{

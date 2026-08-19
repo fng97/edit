@@ -50,35 +50,28 @@ buffer: std.ArrayList(u8),
 lines: std.ArrayList(Line),
 
 const Cursor = struct {
+    // TODO: Maybe we should actually store the offset instead of the Position.
     head: Position,
     snap_offset: u16,
 
-    fn move(
-        cursor: *Cursor,
-        direction: enum { up, down, left, right },
-        count: u16,
-        lines: []Line,
-    ) void {
+    fn move(cursor: *Cursor, direction: enum { up, down, left, right }, lines: []const Line) void {
         switch (direction) {
             .left, .right => {
-                const line_offset = cursor.head.line_offset;
-                const line_offset_next =
-                    if (direction == .left) line_offset -| count else line_offset +| count;
-                // Clamp to end of line (the newline).
-                cursor.head.line_offset = @min(
-                    line_offset_next,
-                    lines[cursor.head.line_number].size() - 1,
+                const offset = cursor.head.toOffset(lines);
+                const offset_new = @min(
+                    if (direction == .left) offset -| 1 else offset +| 1,
+                    lines[lines.len - 1].tail, // clamp to end of file
                 );
-                cursor.snap_offset = line_offset_next;
+                cursor.head = .fromOffset(offset_new, lines);
+                cursor.snap_offset = cursor.head.line_offset;
             },
             .up, .down => {
                 const line_number = cursor.head.line_number;
                 cursor.head.line_number = @min(
-                    if (direction == .down) line_number +| count else line_number -| count,
+                    if (direction == .up) line_number -| 1 else line_number +| 1,
                     lines.len - 1, // clamp to last line in file
                 );
-                // Clamp the offset if previous line is shorter. Subtract 1 to go from size to
-                // offset, saturated so we don't underflow in the case of an empty line.
+                // Clamp to line end if less than snap offset. Subtract 1 to go from size to offset.
                 cursor.head.line_offset = @min(
                     cursor.snap_offset,
                     lines[cursor.head.line_number].size() - 1,
@@ -129,6 +122,7 @@ const Position = struct {
     line_offset: u16,
 
     pub fn fromOffset(file_offset: u32, lines: []const Line) Position {
+        // TODO: How much faster would binary search be?
         for (lines, 0..) |line, line_number| {
             if (file_offset <= line.tail) return .{
                 .line_number = @intCast(line_number),
@@ -312,17 +306,22 @@ pub fn tick(editor: *Editor) !bool {
     } else switch (editor.mode) {
         .normal => switch (input) {
             .ascii => |c| {
-                const max = std.math.maxInt(u16);
+                const lines = editor.lines.items;
+                const line_number = editor.cursor.head.line_number;
+                const line_offset = editor.cursor.head.line_offset;
+                const line = lines[line_number];
                 switch (c) {
                     'q' => return false, // quit
-                    'h' => editor.cursor.move(.left, 1, editor.lines.items),
-                    'l' => editor.cursor.move(.right, 1, editor.lines.items),
-                    'j' => editor.cursor.move(.down, 1, editor.lines.items),
-                    'k' => editor.cursor.move(.up, 1, editor.lines.items),
-                    '0' => editor.cursor.move(.left, max, editor.lines.items),
-                    '$' => editor.cursor.move(.right, max, editor.lines.items),
-                    'G' => editor.cursor.move(.down, max, editor.lines.items),
-                    'g' => editor.cursor.move(.up, max, editor.lines.items),
+                    'h' => editor.cursor.move(.left, lines),
+                    'l' => editor.cursor.move(.right, lines),
+                    'j' => editor.cursor.move(.down, lines),
+                    'k' => editor.cursor.move(.up, lines),
+                    // TODO: Should move() take a count?
+                    '0' => for (0..line_offset) |_| editor.cursor.move(.left, lines),
+                    '$' => for (0..line.size() - 1 - line_offset) |_|
+                        editor.cursor.move(.right, lines),
+                    'G' => for (0..lines.len - line_number) |_| editor.cursor.move(.down, lines),
+                    'g' => for (0..line_number) |_| editor.cursor.move(.up, lines),
                     'i' => editor.mode = .insert,
                     else => {},
                 }
@@ -332,8 +331,10 @@ pub fn tick(editor: *Editor) !bool {
                 const scroll = editor.viewport.row_count / 2;
                 const ctrl: Modifiers = .{ .ctrl = true };
                 switch (chord.ascii) {
-                    'u' => if (chord.modifiers == ctrl) editor.cursor.move(.up, scroll, lines),
-                    'd' => if (chord.modifiers == ctrl) editor.cursor.move(.down, scroll, lines),
+                    'u' => if (chord.modifiers == ctrl)
+                        for (0..scroll) |_| editor.cursor.move(.up, lines),
+                    'd' => if (chord.modifiers == ctrl)
+                        for (0..scroll) |_| editor.cursor.move(.down, lines),
                     else => {},
                 }
             },
@@ -345,19 +346,25 @@ pub fn tick(editor: *Editor) !bool {
             .resize => unreachable,
         },
         .insert => switch (input) {
+            .escape => {
+                editor.mode = .normal;
+                editor.cursor.move(.left, editor.lines.items);
+            },
             .ascii => |c| {
                 const offset = editor.cursor.head.toOffset(editor.lines.items);
                 try editor.buffer.insertBounded(offset, c);
                 try indexLines(editor.buffer.items, &editor.lines);
-                editor.cursor.move(.right, 1, editor.lines.items);
+                editor.cursor.move(.right, editor.lines.items);
                 buffer_changed = true;
             },
-            .escape => {
-                editor.mode = .normal;
-                editor.cursor.move(.left, 1, editor.lines.items);
+            .backspace => {
+                editor.cursor.move(.left, editor.lines.items);
+                const offset = editor.cursor.head.toOffset(editor.lines.items);
+                _ = editor.buffer.orderedRemove(offset);
+                try indexLines(editor.buffer.items, &editor.lines);
+                buffer_changed = true;
             },
             .chord => {}, // do nothing
-            .backspace,
             .enter,
             .tab,
             => {
