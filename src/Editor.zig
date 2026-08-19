@@ -30,6 +30,7 @@ comptime {
     assert(line_offset_max - 1 + row_count_max - 2 <= std.math.maxInt(u16));
 }
 
+io: std.Io,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
@@ -154,6 +155,7 @@ const Position = struct {
 
 pub fn init(
     allocator: std.mem.Allocator,
+    io: std.Io,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
     file_name: []const u8,
@@ -173,6 +175,7 @@ pub fn init(
     buffer.appendSliceAssumeCapacity(file_bytes);
 
     var editor: Editor = .{
+        .io = io,
         .reader = reader,
         .writer = writer,
         .mode = .normal,
@@ -367,11 +370,14 @@ pub fn tick(editor: *Editor) !bool {
                 const lines = editor.lines.items;
                 const scroll = editor.viewport.row_count / 2;
                 const ctrl: Modifiers = .{ .ctrl = true };
+                const mod = chord.modifiers;
                 switch (chord.ascii) {
-                    'u' => if (chord.modifiers == ctrl)
-                        for (0..scroll) |_| editor.cursor.move(.up, lines),
-                    'd' => if (chord.modifiers == ctrl)
-                        for (0..scroll) |_| editor.cursor.move(.down, lines),
+                    'u' => if (mod == ctrl) for (0..scroll) |_| editor.cursor.move(.up, lines),
+                    'd' => if (mod == ctrl) for (0..scroll) |_| editor.cursor.move(.down, lines),
+                    'w' => if (mod == ctrl) try std.Io.Dir.cwd().writeFile(editor.io, .{
+                        .data = editor.buffer.items,
+                        .sub_path = editor.name,
+                    }),
                     else => {},
                 }
             },
@@ -588,6 +594,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     // TODO: I think instead of generating a file size then allocating we could just allocate a max
     // buffer and use the Smith slice functions.
@@ -645,6 +652,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
 
     var editor = Editor.init(
         std.testing.allocator,
+        io,
         &reader,
         &writer.writer,
         "main.zig",
@@ -759,11 +767,12 @@ const StrippingWriter = struct {
 
 test "rendering: hello_c" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var reader: std.Io.Reader = .fixed(test_input);
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
-    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
+    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
     defer editor.deinit(allocator);
 
     try std.testing.expect(try editor.tick() == false); // last tick: reports false on quit
@@ -788,11 +797,12 @@ test "rendering: hello_c" {
 
 test "rendering: empty" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var reader: std.Io.Reader = .fixed(test_input);
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
-    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "empty.zig", "\n");
+    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "empty.zig", "\n");
     defer editor.deinit(allocator);
 
     try std.testing.expect(try editor.tick() == false);
@@ -818,6 +828,7 @@ test "rendering: empty" {
 
 test "go to start/end of file" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var reader = std.Io.Reader.fixed("\x1b[48;5;36;0;0t" ++ // dimensions: 5 rows by 36 cols
         "G" ++ // go to end of file
@@ -825,7 +836,7 @@ test "go to start/end of file" {
         "q"); // quit
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
-    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
+    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
     defer editor.deinit(allocator);
 
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
@@ -870,6 +881,7 @@ test "go to start/end of file" {
 
 test "go to start/end of line" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var reader = std.Io.Reader.fixed("\x1b[48;12;12;0;0t" ++ // dimensions: 12 rows by 12 cols
         "$" ++ // go to end of line
@@ -877,7 +889,7 @@ test "go to start/end of line" {
         "q"); // quit
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
-    var editor: Editor = try .init(allocator, &reader, stripping.writer(), "hello.c", hello_c);
+    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
     defer editor.deinit(allocator);
 
     try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
@@ -945,6 +957,7 @@ test "go to start/end of line" {
 // the cursor position, `tick()` should not call `render()`.
 test "skip render if nothing changes" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
         "h" ++ // move left (going left doesn't move cursor when at line start)
@@ -956,6 +969,7 @@ test "skip render if nothing changes" {
     // Initialise with discarding writer so we can ignore the initial render.
     var editor: Editor = try .init(
         allocator,
+        io,
         &reader,
         &discarding_writer.writer,
         "hello.c",
@@ -973,6 +987,7 @@ test "skip render if nothing changes" {
 // If all that changed was the cursor position, render only the status line.
 test "partial render if only cursor changed" {
     const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
     var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
         "l" ++ // move right
@@ -984,6 +999,7 @@ test "partial render if only cursor changed" {
     // Initialise with discarding writer so we can ignore the initial render.
     var editor: Editor = try .init(
         allocator,
+        io,
         &reader,
         &discarding_writer.writer,
         "hello.c",
@@ -1006,6 +1022,7 @@ test "partial render if only cursor changed" {
 
 test indexLines {
     const allocator = std.testing.allocator;
+
     var lines: std.ArrayList(Line) = try .initCapacity(
         allocator,
         std.mem.countScalar(u8, hello_c, '\n'),

@@ -4,7 +4,7 @@ const Editor = @import("Editor.zig");
 
 const assert = std.debug.assert;
 
-fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
+fn run(allocator: std.mem.Allocator, io: std.Io, frng: *FRNG) !void {
     // Generate file name.
     // TODO: Is this big enough? Make it look more like a path?
     const file_name_size = try frng.int(u8);
@@ -56,6 +56,7 @@ fn run(allocator: std.mem.Allocator, frng: *FRNG) !void {
     var writer: std.Io.Writer.Discarding = .init(&.{});
     var editor = Editor.init(
         allocator,
+        io,
         &reader,
         &writer.writer,
         file_name_buffer,
@@ -108,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(entropy);
 
     var frng: FRNG = .{ .entropy = entropy };
-    run(allocator, &frng) catch |err| switch (err) {
+    run(allocator, io, &frng) catch |err| switch (err) {
         error.OutOfEntropy => return,
         else => return err,
     };

@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
     try stdout.writeStreamingAll(io, terminal_init);
 
-    var editor: Editor = try .init(allocator, reader, writer, file_name, file_bytes);
+    var editor: Editor = try .init(allocator, io, reader, writer, file_name, file_bytes);
     defer editor.deinit(allocator);
 
     while (try editor.tick()) {}
