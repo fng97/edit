@@ -36,6 +36,7 @@ writer: *std.Io.Writer,
 
 mode: enum { normal, insert, select },
 buffer_changed: bool = false,
+dirty: bool = false,
 
 // Viewport state:
 viewport: struct {
@@ -317,12 +318,14 @@ fn insert(editor: *Editor, character: u8) !void {
     try indexLines(editor.buffer.items, &editor.lines);
     editor.cursor.move(.right, editor.lines.items);
     editor.buffer_changed = true;
+    editor.dirty = true;
 }
 
 pub fn tick(editor: *Editor) !bool {
     const viewport_prev = editor.viewport;
     const cursor_prev = editor.cursor;
     const mode_prev = editor.mode;
+    const dirty_prev = editor.dirty;
     editor.buffer_changed = false;
 
     // Handle input: user input or resize events.
@@ -374,10 +377,13 @@ pub fn tick(editor: *Editor) !bool {
                 switch (chord.ascii) {
                     'u' => if (mod == ctrl) for (0..scroll) |_| editor.cursor.move(.up, lines),
                     'd' => if (mod == ctrl) for (0..scroll) |_| editor.cursor.move(.down, lines),
-                    'w' => if (mod == ctrl) try std.Io.Dir.cwd().writeFile(editor.io, .{
-                        .data = editor.buffer.items,
-                        .sub_path = editor.name,
-                    }),
+                    'w' => if (mod == ctrl) {
+                        try std.Io.Dir.cwd().writeFile(editor.io, .{
+                            .data = editor.buffer.items,
+                            .sub_path = editor.name,
+                        });
+                        editor.dirty = false;
+                    },
                     else => {},
                 }
             },
@@ -397,6 +403,7 @@ pub fn tick(editor: *Editor) !bool {
                 _ = editor.buffer.orderedRemove(offset);
                 try indexLines(editor.buffer.items, &editor.lines);
                 editor.buffer_changed = true;
+                editor.dirty = true;
             },
             .tab => for (0..4) |_| try editor.insert(' '),
             .enter => try editor.insert('\n'),
@@ -451,7 +458,13 @@ pub fn tick(editor: *Editor) !bool {
     const viewport_changed = !std.meta.eql(editor.viewport, viewport_prev);
     const cursor_changed = !std.meta.eql(editor.cursor, cursor_prev);
     const mode_changed = editor.mode != mode_prev;
-    if (viewport_changed or cursor_changed or mode_changed or editor.buffer_changed) {
+    const dirty_changed = editor.dirty != dirty_prev;
+    if (viewport_changed or
+        cursor_changed or
+        mode_changed or
+        dirty_changed or
+        editor.buffer_changed)
+    {
         try editor.render(if (viewport_changed or editor.buffer_changed) .full else .status_only);
     }
 
@@ -511,19 +524,16 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
         digitCount(cursor_head.line_number + 1) +
         digitCount(cursor_head.line_offset + 1) +
         1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-    if (cursor_coordinates_col_count > col_count) return error.ViewportTooSmall;
-    // TODO: Display the relative file path.
-    // TODO: Minimise the file_name (path). For now, only print it if it fits.
-    // File name doesn't fit, hide it.
-    if (file_name.len + cursor_coordinates_col_count <= col_count) {
-        const padding_col_count = col_count - file_name.len - cursor_coordinates_col_count;
-        try writer.writeAll(file_name);
-        try writer.splatByteAll(' ', padding_col_count);
-    } else try writer.splatByteAll(' ', col_count - cursor_coordinates_col_count);
-    try writer.print("{d},{d}", .{
-        cursor_head.line_number + 1,
-        cursor_head.line_offset + 1,
-    });
+    var min_size = file_name.len;
+    const dirty_indicator = " [+]";
+    if (editor.dirty) min_size += dirty_indicator.len;
+    min_size += cursor_coordinates_col_count + 1; // 1 for padding
+    if (min_size > col_count) return error.ViewportTooSmall;
+
+    try writer.writeAll(file_name);
+    if (editor.dirty) try writer.writeAll(dirty_indicator);
+    try writer.splatByteAll(' ', col_count - min_size);
+    try writer.print(" {d},{d}", .{ cursor_head.line_number + 1, cursor_head.line_offset + 1 });
 
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     const cursor_cell = editor.cellFromPosition(cursor_head);
