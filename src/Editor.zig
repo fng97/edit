@@ -59,7 +59,7 @@ const Cursor = struct {
 
     const Direction = enum { up, down, left, right };
 
-    fn move(cursor: *Cursor, direction: Direction, lines: []const Line) void {
+    fn moveOne(cursor: *Cursor, direction: Direction, lines: []const Line) void {
         switch (direction) {
             .left, .right => {
                 const offset = cursor.head.toOffset(lines);
@@ -90,11 +90,16 @@ const Cursor = struct {
         const line_offset = cursor.head.line_offset;
         const line = lines[line_number];
         switch (direction) {
-            .left => for (0..line_offset) |_| cursor.move(.left, lines),
-            .right => for (0..line.size() - 1 - line_offset) |_| cursor.move(.right, lines),
-            .down => for (0..lines.len - line_number) |_| cursor.move(.down, lines),
-            .up => for (0..line_number) |_| cursor.move(.up, lines),
+            .left => cursor.move(.left, line_offset, lines),
+            .right => cursor.move(.right, line.size() - 1 - line_offset, lines),
+            .down => cursor.move(.down, @intCast(lines.len - line_number), lines),
+            .up => cursor.move(.up, line_number, lines),
         }
+    }
+
+    // TODO: Build count back into move.
+    fn move(cursor: *Cursor, direction: Direction, count: u32, lines: []const Line) void {
+        for (0..count) |_| cursor.moveOne(direction, lines);
     }
 };
 
@@ -312,13 +317,22 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     }
 }
 
+// TODO: Add function for inserting slices so we don't have to do:
+// `for (count) |_| try editor.insert(c);`.
 fn insert(editor: *Editor, character: u8) !void {
     const offset = editor.cursor.head.toOffset(editor.lines.items);
     try editor.buffer.insertBounded(offset, character);
     try indexLines(editor.buffer.items, &editor.lines);
-    editor.cursor.move(.right, editor.lines.items);
+    editor.cursor.moveOne(.right, editor.lines.items);
     editor.buffer_changed = true;
     editor.dirty = true;
+}
+
+fn indentCount(editor: *const Editor) u16 {
+    const line = editor.lines.items[editor.cursor.head.line_number];
+    var i = line.head;
+    while (editor.buffer.items[i] == ' ') i += 1;
+    return @intCast(i - line.head);
 }
 
 pub fn tick(editor: *Editor) !bool {
@@ -337,35 +351,43 @@ pub fn tick(editor: *Editor) !bool {
         .normal => switch (input) {
             .ascii => |c| switch (c) {
                 'q' => return false, // quit
-                'h' => editor.cursor.move(.left, editor.lines.items),
-                'l' => editor.cursor.move(.right, editor.lines.items),
-                'j' => editor.cursor.move(.down, editor.lines.items),
-                'k' => editor.cursor.move(.up, editor.lines.items),
-                // TODO: Should move() take a count?
+                'h' => editor.cursor.moveOne(.left, editor.lines.items),
+                'l' => editor.cursor.moveOne(.right, editor.lines.items),
+                'j' => editor.cursor.moveOne(.down, editor.lines.items),
+                'k' => editor.cursor.moveOne(.up, editor.lines.items),
                 '0' => editor.cursor.moveMax(.left, editor.lines.items),
                 '$' => editor.cursor.moveMax(.right, editor.lines.items),
                 'G' => editor.cursor.moveMax(.down, editor.lines.items),
                 'g' => editor.cursor.moveMax(.up, editor.lines.items),
                 'i' => editor.mode = .insert,
+                'I' => {
+                    const indent_count = editor.indentCount();
+                    editor.cursor.moveMax(.left, editor.lines.items);
+                    editor.cursor.move(.right, indent_count, editor.lines.items);
+                    editor.mode = .insert;
+                },
                 'a' => {
-                    editor.cursor.move(.right, editor.lines.items);
+                    editor.cursor.moveOne(.right, editor.lines.items);
                     editor.mode = .insert;
                 },
                 'A' => {
                     editor.cursor.moveMax(.right, editor.lines.items);
                     editor.mode = .insert;
                 },
-                // TODO: Auto-indent the new line.
                 'o' => {
+                    const indent_count = editor.indentCount();
                     editor.cursor.moveMax(.right, editor.lines.items);
                     editor.mode = .insert;
                     try editor.insert('\n');
+                    for (0..indent_count) |_| try editor.insert(' ');
                 },
                 'O' => {
+                    const indent_count = editor.indentCount();
                     editor.cursor.moveMax(.left, editor.lines.items);
                     editor.mode = .insert;
                     try editor.insert('\n');
-                    editor.cursor.move(.up, editor.lines.items);
+                    editor.cursor.moveOne(.up, editor.lines.items);
+                    for (0..indent_count) |_| try editor.insert(' ');
                 },
                 else => {},
             },
@@ -375,8 +397,8 @@ pub fn tick(editor: *Editor) !bool {
                 const ctrl: Modifiers = .{ .ctrl = true };
                 const mod = chord.modifiers;
                 switch (chord.ascii) {
-                    'u' => if (mod == ctrl) for (0..scroll) |_| editor.cursor.move(.up, lines),
-                    'd' => if (mod == ctrl) for (0..scroll) |_| editor.cursor.move(.down, lines),
+                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, lines),
+                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, lines),
                     'w' => if (mod == ctrl) {
                         try std.Io.Dir.cwd().writeFile(editor.io, .{
                             .data = editor.buffer.items,
@@ -398,7 +420,7 @@ pub fn tick(editor: *Editor) !bool {
             .escape => editor.mode = .normal,
             .ascii => |c| try editor.insert(c),
             .backspace => if (editor.cursor.head.toOffset(editor.lines.items) != 0) {
-                editor.cursor.move(.left, editor.lines.items);
+                editor.cursor.moveOne(.left, editor.lines.items);
                 const offset = editor.cursor.head.toOffset(editor.lines.items);
                 _ = editor.buffer.orderedRemove(offset);
                 try indexLines(editor.buffer.items, &editor.lines);
@@ -406,7 +428,11 @@ pub fn tick(editor: *Editor) !bool {
                 editor.dirty = true;
             },
             .tab => for (0..4) |_| try editor.insert(' '),
-            .enter => try editor.insert('\n'),
+            .enter => {
+                const indent_count = editor.indentCount();
+                try editor.insert('\n');
+                for (0..indent_count) |_| try editor.insert(' ');
+            },
             .chord => {}, // do nothing
             .resize => unreachable,
         },
