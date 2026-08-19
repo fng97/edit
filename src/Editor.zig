@@ -147,6 +147,7 @@ const Position = struct {
     }
 
     pub fn toOffset(position: Position, lines: []const Line) u32 {
+        assert(position.line_offset < lines[position.line_number].size());
         return lines[position.line_number].head + position.line_offset;
     }
 };
@@ -348,6 +349,7 @@ pub fn tick(editor: *Editor) !bool {
                     editor.cursor.moveMax(.right, editor.lines.items);
                     editor.mode = .insert;
                 },
+                // TODO: Auto-indent the new line.
                 'o' => {
                     editor.cursor.moveMax(.right, editor.lines.items);
                     editor.mode = .insert;
@@ -423,6 +425,8 @@ pub fn tick(editor: *Editor) !bool {
     } else if (editor.cursor.head.line_offset > last_offset) {
         editor.viewport.line_offset_start += editor.cursor.head.line_offset - last_offset;
     }
+
+    assert(editor.cursor.head.line_offset <= editor.cursor.snap_offset);
 
     // Make sure cursor is within the viewport's bounds.
     const line_number_start = editor.viewport.line_number_start;
@@ -561,8 +565,9 @@ fn positionFrom(lines: []const Line, offset: u32) Position {
 }
 
 fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileTooManyLines}!void {
-    lines.clearRetainingCapacity();
     assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
+
+    lines.clearRetainingCapacity();
     var head: u32 = 0;
     while (head < file_bytes.len) {
         var tail = head;
@@ -571,6 +576,9 @@ fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileToo
         lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
         head = tail + 1;
     }
+
+    assert(lines.items[0].head == 0);
+    assert(lines.getLast().tail == file_bytes.len - 1);
 }
 
 test fuzzer {
@@ -841,7 +849,7 @@ test "go to start/end of file" {
         \\6 }
         \\hello.c                          6,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[4;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[4;3H" // cursor coordinates at end of file: 3, 2 (but indexed from 1)
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
@@ -907,7 +915,7 @@ test "go to start/end of line" {
         \\11 ~
         \\hello.c 1,19
     ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;12H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[1;12H" // cursor coordinates at end of line: 0, 11 (but indexed from 1)
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
@@ -993,7 +1001,7 @@ test "partial render if only cursor changed" {
         "hello.c                          1,2" ++ // new status line
         "\x1b[2\x20q" ++ // set cursor style (steady block)
         "\x1b[1;5H"; // place cursor (right of starting point)
-    try std.testing.expectEqualSlices(u8, allocating_writer.written(), expected);
+    try std.testing.expectEqualSlices(u8, expected, allocating_writer.written());
 }
 
 test indexLines {
