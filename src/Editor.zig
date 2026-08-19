@@ -34,6 +34,7 @@ reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
 mode: enum { normal, insert, select },
+buffer_changed: bool = false,
 
 // Viewport state:
 viewport: struct {
@@ -54,7 +55,9 @@ const Cursor = struct {
     head: Position,
     snap_offset: u16,
 
-    fn move(cursor: *Cursor, direction: enum { up, down, left, right }, lines: []const Line) void {
+    const Direction = enum { up, down, left, right };
+
+    fn move(cursor: *Cursor, direction: Direction, lines: []const Line) void {
         switch (direction) {
             .left, .right => {
                 const offset = cursor.head.toOffset(lines);
@@ -77,6 +80,18 @@ const Cursor = struct {
                     lines[cursor.head.line_number].size() - 1,
                 );
             },
+        }
+    }
+
+    fn moveMax(cursor: *Cursor, direction: Direction, lines: []const Line) void {
+        const line_number = cursor.head.line_number;
+        const line_offset = cursor.head.line_offset;
+        const line = lines[line_number];
+        switch (direction) {
+            .left => for (0..line_offset) |_| cursor.move(.left, lines),
+            .right => for (0..line.size() - 1 - line_offset) |_| cursor.move(.right, lines),
+            .down => for (0..lines.len - line_number) |_| cursor.move(.down, lines),
+            .up => for (0..line_number) |_| cursor.move(.up, lines),
         }
     }
 };
@@ -292,11 +307,19 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     }
 }
 
+fn insert(editor: *Editor, character: u8) !void {
+    const offset = editor.cursor.head.toOffset(editor.lines.items);
+    try editor.buffer.insertBounded(offset, character);
+    try indexLines(editor.buffer.items, &editor.lines);
+    editor.cursor.move(.right, editor.lines.items);
+    editor.buffer_changed = true;
+}
+
 pub fn tick(editor: *Editor) !bool {
     const viewport_prev = editor.viewport;
     const cursor_prev = editor.cursor;
     const mode_prev = editor.mode;
-    var buffer_changed = false;
+    editor.buffer_changed = false;
 
     // Handle input: user input or resize events.
     const input = try parseOne(editor.reader);
@@ -305,26 +328,38 @@ pub fn tick(editor: *Editor) !bool {
         editor.viewport.col_count = input.resize.col_count;
     } else switch (editor.mode) {
         .normal => switch (input) {
-            .ascii => |c| {
-                const lines = editor.lines.items;
-                const line_number = editor.cursor.head.line_number;
-                const line_offset = editor.cursor.head.line_offset;
-                const line = lines[line_number];
-                switch (c) {
-                    'q' => return false, // quit
-                    'h' => editor.cursor.move(.left, lines),
-                    'l' => editor.cursor.move(.right, lines),
-                    'j' => editor.cursor.move(.down, lines),
-                    'k' => editor.cursor.move(.up, lines),
-                    // TODO: Should move() take a count?
-                    '0' => for (0..line_offset) |_| editor.cursor.move(.left, lines),
-                    '$' => for (0..line.size() - 1 - line_offset) |_|
-                        editor.cursor.move(.right, lines),
-                    'G' => for (0..lines.len - line_number) |_| editor.cursor.move(.down, lines),
-                    'g' => for (0..line_number) |_| editor.cursor.move(.up, lines),
-                    'i' => editor.mode = .insert,
-                    else => {},
-                }
+            .ascii => |c| switch (c) {
+                'q' => return false, // quit
+                'h' => editor.cursor.move(.left, editor.lines.items),
+                'l' => editor.cursor.move(.right, editor.lines.items),
+                'j' => editor.cursor.move(.down, editor.lines.items),
+                'k' => editor.cursor.move(.up, editor.lines.items),
+                // TODO: Should move() take a count?
+                '0' => editor.cursor.moveMax(.left, editor.lines.items),
+                '$' => editor.cursor.moveMax(.right, editor.lines.items),
+                'G' => editor.cursor.moveMax(.down, editor.lines.items),
+                'g' => editor.cursor.moveMax(.up, editor.lines.items),
+                'i' => editor.mode = .insert,
+                'a' => {
+                    editor.cursor.move(.right, editor.lines.items);
+                    editor.mode = .insert;
+                },
+                'A' => {
+                    editor.cursor.moveMax(.right, editor.lines.items);
+                    editor.mode = .insert;
+                },
+                'o' => {
+                    editor.cursor.moveMax(.right, editor.lines.items);
+                    editor.mode = .insert;
+                    try editor.insert('\n');
+                },
+                'O' => {
+                    editor.cursor.moveMax(.left, editor.lines.items);
+                    editor.mode = .insert;
+                    try editor.insert('\n');
+                    editor.cursor.move(.up, editor.lines.items);
+                },
+                else => {},
             },
             .chord => |chord| {
                 const lines = editor.lines.items;
@@ -346,30 +381,18 @@ pub fn tick(editor: *Editor) !bool {
             .resize => unreachable,
         },
         .insert => switch (input) {
-            .escape => {
-                editor.mode = .normal;
-                editor.cursor.move(.left, editor.lines.items);
-            },
-            .ascii => |c| {
-                const offset = editor.cursor.head.toOffset(editor.lines.items);
-                try editor.buffer.insertBounded(offset, c);
-                try indexLines(editor.buffer.items, &editor.lines);
-                editor.cursor.move(.right, editor.lines.items);
-                buffer_changed = true;
-            },
-            .backspace => {
+            .escape => editor.mode = .normal,
+            .ascii => |c| try editor.insert(c),
+            .backspace => if (editor.cursor.head.toOffset(editor.lines.items) != 0) {
                 editor.cursor.move(.left, editor.lines.items);
                 const offset = editor.cursor.head.toOffset(editor.lines.items);
                 _ = editor.buffer.orderedRemove(offset);
                 try indexLines(editor.buffer.items, &editor.lines);
-                buffer_changed = true;
+                editor.buffer_changed = true;
             },
+            .tab => for (0..4) |_| try editor.insert(' '),
+            .enter => try editor.insert('\n'),
             .chord => {}, // do nothing
-            .enter,
-            .tab,
-            => {
-                // TODO
-            },
             .resize => unreachable,
         },
         .select => {},
@@ -418,8 +441,8 @@ pub fn tick(editor: *Editor) !bool {
     const viewport_changed = !std.meta.eql(editor.viewport, viewport_prev);
     const cursor_changed = !std.meta.eql(editor.cursor, cursor_prev);
     const mode_changed = editor.mode != mode_prev;
-    if (viewport_changed or cursor_changed or mode_changed or buffer_changed) {
-        try editor.render(if (viewport_changed or buffer_changed) .full else .status_only);
+    if (viewport_changed or cursor_changed or mode_changed or editor.buffer_changed) {
+        try editor.render(if (viewport_changed or editor.buffer_changed) .full else .status_only);
     }
 
     return true;
