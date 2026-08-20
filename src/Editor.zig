@@ -333,6 +333,33 @@ fn indentCount(editor: *const Editor) u16 {
     return @intCast(i - line.head);
 }
 
+fn textFamily(c: u8) enum { whitespace, symbols, word } {
+    return switch (c) {
+        '\n' => .whitespace,
+        0x20...0x7E => switch (c) { // printable ASCII range
+            ' ' => .whitespace,
+            '_' => .word,
+            '0'...'9' => .word,
+            'a'...'z' => .word,
+            'A'...'Z' => .word,
+            else => .symbols,
+        },
+        else => unreachable,
+    };
+}
+
+fn wordTail(editor: *const Editor) u32 {
+    const buffer = editor.buffer.items;
+    const offset = editor.cursor.head.toOffset(editor.lines.items);
+
+    var i: u32 = offset;
+    // If cursor in whitespace, advance to start of word.
+    while (i < buffer.len and textFamily(buffer[i]) == .whitespace) i += 1;
+    const word_family = textFamily(buffer[i]);
+    while (i < buffer.len and textFamily(buffer[i]) == word_family) i += 1;
+    return i - 1;
+}
+
 pub fn tick(editor: *Editor) !bool {
     const input = try parseOne(editor.reader);
     if (input == .resize) {
@@ -350,6 +377,12 @@ pub fn tick(editor: *Editor) !bool {
                 '$' => editor.cursor.moveMax(.right, editor.lines.items),
                 'G' => editor.cursor.moveMax(.down, editor.lines.items),
                 'g' => editor.cursor.moveMax(.up, editor.lines.items),
+                'e' => {
+                    editor.cursor.moveOne(.right, editor.lines.items);
+                    const offset = editor.cursor.head.toOffset(editor.lines.items);
+                    const word_tail = editor.wordTail();
+                    editor.cursor.move(.right, word_tail - offset, editor.lines.items);
+                },
                 'i' => editor.mode = .insert,
                 'I' => {
                     const indent_count = editor.indentCount();
