@@ -54,7 +54,7 @@ lines: std.ArrayList(Line),
 const Cursor = struct {
     // TODO: Maybe we should actually store the offset instead of the Position.
     head: Position,
-    snap_offset: u16,
+    line_offset_snap: u16,
 
     const Direction = enum { up, down, left, right };
 
@@ -67,7 +67,7 @@ const Cursor = struct {
                     lines[lines.len - 1].tail, // clamp to end of file
                 );
                 cursor.head = .fromOffset(offset_new, lines);
-                cursor.snap_offset = cursor.head.line_offset;
+                cursor.line_offset_snap = cursor.head.line_offset;
             },
             .up, .down => {
                 const line_number = cursor.head.line_number;
@@ -77,7 +77,7 @@ const Cursor = struct {
                 );
                 // Clamp to line end if less than snap offset. Subtract 1 to go from size to offset.
                 cursor.head.line_offset = @min(
-                    cursor.snap_offset,
+                    cursor.line_offset_snap,
                     lines[cursor.head.line_number].size() - 1,
                 );
             },
@@ -195,7 +195,7 @@ pub fn init(
         .lines = lines,
         .cursor = .{
             .head = .{ .line_number = 0, .line_offset = 0 },
-            .snap_offset = 0,
+            .line_offset_snap = 0,
         },
     };
 
@@ -455,7 +455,7 @@ pub fn tick(editor: *Editor) !bool {
         editor.viewport.line_offset_start += editor.cursor.head.line_offset - last_offset;
     }
 
-    assert(editor.cursor.head.line_offset <= editor.cursor.snap_offset);
+    assert(editor.cursor.head.line_offset <= editor.cursor.line_offset_snap);
 
     // Make sure cursor is within the viewport's bounds.
     const line_number_start = editor.viewport.line_number_start;
