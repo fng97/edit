@@ -35,7 +35,6 @@ reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
 mode: enum { normal, insert, select },
-buffer_changed: bool = false,
 dirty: bool = false,
 
 // Viewport state:
@@ -324,7 +323,6 @@ fn insert(editor: *Editor, character: u8) !void {
     try editor.buffer.insertBounded(offset, character);
     try indexLines(editor.buffer.items, &editor.lines);
     editor.cursor.moveOne(.right, editor.lines.items);
-    editor.buffer_changed = true;
     editor.dirty = true;
 }
 
@@ -336,13 +334,6 @@ fn indentCount(editor: *const Editor) u16 {
 }
 
 pub fn tick(editor: *Editor) !bool {
-    const viewport_prev = editor.viewport;
-    const cursor_prev = editor.cursor;
-    const mode_prev = editor.mode;
-    const dirty_prev = editor.dirty;
-    editor.buffer_changed = false;
-
-    // Handle input: user input or resize events.
     const input = try parseOne(editor.reader);
     if (input == .resize) {
         editor.viewport.row_count = input.resize.row_count;
@@ -424,7 +415,6 @@ pub fn tick(editor: *Editor) !bool {
                 const offset = editor.cursor.head.toOffset(editor.lines.items);
                 _ = editor.buffer.orderedRemove(offset);
                 try indexLines(editor.buffer.items, &editor.lines);
-                editor.buffer_changed = true;
                 editor.dirty = true;
             },
             .tab => for (0..4) |_| try editor.insert(' '),
@@ -479,26 +469,12 @@ pub fn tick(editor: *Editor) !bool {
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
 
-    // Optimisation: Don't render the same thing twice. Only render the status line if only the
-    // cursor changed.
-    const viewport_changed = !std.meta.eql(editor.viewport, viewport_prev);
-    const cursor_changed = !std.meta.eql(editor.cursor, cursor_prev);
-    const mode_changed = editor.mode != mode_prev;
-    const dirty_changed = editor.dirty != dirty_prev;
-    if (viewport_changed or
-        cursor_changed or
-        mode_changed or
-        dirty_changed or
-        editor.buffer_changed)
-    {
-        try editor.render(if (viewport_changed or editor.buffer_changed) .full else .status_only);
-    }
+    try editor.render();
 
     return true;
 }
 
-/// Render the viewport. Either a full render or just the status line (e.g. only cursor changed).
-fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
+fn render(editor: *const Editor) !void {
     const writer = editor.writer;
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
@@ -509,40 +485,30 @@ fn render(editor: *const Editor, mode: enum { full, status_only }) !void {
     const lines = editor.lines.items;
     const cursor_head = editor.cursor.head;
 
-    switch (mode) {
-        .full => {
-            const gutter_width = editor.gutterWidth();
+    const gutter_width = editor.gutterWidth();
 
-            // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
-            try writer.writeAll("\x1b[2J");
-            // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
-            try writer.writeAll("\x1b[H");
+    // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
+    try writer.writeAll("\x1b[2J");
+    // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
+    try writer.writeAll("\x1b[H");
 
-            // The -1 below is to leave room for the status line.
-            for (line_number_start..line_number_start + row_count - 1) |line_number| {
-                const line = if (line_number < lines.len) blk: {
-                    const line_full = lines[line_number].bytes(file_bytes);
-                    if (line_offset_start > line_full.len) break :blk "";
-                    const line = line_full[line_offset_start..];
-                    const line_size = @min(line.len, col_count - gutter_width);
-                    break :blk line_full[line_offset_start .. line_offset_start + line_size];
-                } else "~";
-                try writer.print(
-                    "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
-                    .{
-                        .line_number = line_number + 1, // displayed line number indexed from 1
-                        .gutter_width = gutter_width - 1, // extra space already in format string
-                        .line = line,
-                    },
-                );
-            }
-        },
-        .status_only => {
-            // Move cursor to status line.
-            try writer.print("\x1b[{d};{d}H", .{ row_count, 1 }); // indexed from 1
-            // Clear the line. See https://ghostty.org/docs/vt/csi/el.
-            try writer.writeAll("\x1b[2K");
-        },
+    // The -1 below is to leave room for the status line.
+    for (line_number_start..line_number_start + row_count - 1) |line_number| {
+        const line = if (line_number < lines.len) blk: {
+            const line_full = lines[line_number].bytes(file_bytes);
+            if (line_offset_start > line_full.len) break :blk "";
+            const line = line_full[line_offset_start..];
+            const line_size = @min(line.len, col_count - gutter_width);
+            break :blk line_full[line_offset_start .. line_offset_start + line_size];
+        } else "~";
+        try writer.print(
+            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
+            .{
+                .line_number = line_number + 1, // displayed line number indexed from 1
+                .gutter_width = gutter_width - 1, // extra space already in format string
+                .line = line,
+            },
+        );
     }
 
     // Draw status line. Displayed line number and offset should be indexed from 1.
@@ -699,7 +665,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     };
     defer editor.deinit(allocator);
 
-    try editor.render(.full);
+    try editor.render();
 }
 
 test Modifiers {
@@ -987,73 +953,6 @@ test "go to start/end of line" {
     , stripping.written());
 
     try std.testing.expect(try editor.tick() == false); // process the q, exited
-}
-
-// The editor should not render the same screen twice. If an input doesn't affect the viewport or
-// the cursor position, `tick()` should not call `render()`.
-test "skip render if nothing changes" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "h" ++ // move left (going left doesn't move cursor when at line start)
-        "q"); // quit
-    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
-    var allocating_writer: std.Io.Writer.Allocating = .init(allocator);
-    defer allocating_writer.deinit();
-
-    // Initialise with discarding writer so we can ignore the initial render.
-    var editor: Editor = try .init(
-        allocator,
-        io,
-        &reader,
-        &discarding_writer.writer,
-        "hello.c",
-        hello_c,
-    );
-    defer editor.deinit(allocator);
-
-    editor.writer = &allocating_writer.writer; // swap the writer to something we can check
-    try std.testing.expect(try editor.tick() == true); // process the 'h', editor still 'live'
-    try std.testing.expect(try editor.tick() == false); // process the 'q'
-
-    try std.testing.expect(allocating_writer.written().len == 0);
-}
-
-// If all that changed was the cursor position, render only the status line.
-test "partial render if only cursor changed" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    var reader = std.Io.Reader.fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "l" ++ // move right
-        "q"); // quit
-    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
-    var allocating_writer: std.Io.Writer.Allocating = .init(allocator);
-    defer allocating_writer.deinit();
-
-    // Initialise with discarding writer so we can ignore the initial render.
-    var editor: Editor = try .init(
-        allocator,
-        io,
-        &reader,
-        &discarding_writer.writer,
-        "hello.c",
-        hello_c,
-    );
-    defer editor.deinit(allocator);
-
-    editor.writer = &allocating_writer.writer; // swap the writer to something we can check
-    try std.testing.expect(try editor.tick() == true); // process the 'l', editor still 'live'
-    try std.testing.expect(try editor.tick() == false); // process the 'q'
-
-    const expected =
-        "\x1b[12;1H" ++ // move cursor to status line
-        "\x1b[2K" ++ // clear status line
-        "hello.c                          1,2" ++ // new status line
-        "\x1b[2\x20q" ++ // set cursor style (steady block)
-        "\x1b[1;5H"; // place cursor (right of starting point)
-    try std.testing.expectEqualSlices(u8, expected, allocating_writer.written());
 }
 
 test indexLines {
