@@ -348,16 +348,22 @@ fn textFamily(c: u8) enum { whitespace, symbols, word } {
     };
 }
 
-fn wordTail(editor: *const Editor) u32 {
-    const buffer = editor.buffer.items;
-    const offset = editor.cursor.head.toOffset(editor.lines.items);
+/// Find the end of the current word. Along with normal words, sequences of whitespace count as a
+/// word, as do sequences of symbols.
+fn anyWordTail(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    const family = textFamily(buffer[offset]);
+    for (buffer[offset..], offset..) |c, i| {
+        if (textFamily(c) != family) return @intCast(i - 1);
+    } else return @intCast(buffer.len);
+}
 
-    var i: u32 = offset;
-    // If cursor in whitespace, advance to start of word.
-    while (i < buffer.len and textFamily(buffer[i]) == .whitespace) i += 1;
-    const word_family = textFamily(buffer[i]);
-    while (i < buffer.len and textFamily(buffer[i]) == word_family) i += 1;
-    return i - 1;
+fn wordTail(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    const tail = anyWordTail(buffer, offset);
+    if (tail >= buffer.len - 1) return @intCast(buffer.len - 1); // end of file
+    const family = textFamily(buffer[tail]);
+    if (family == .whitespace) return anyWordTail(buffer, tail + 1) else return tail;
 }
 
 pub fn tick(editor: *Editor) !bool {
@@ -380,7 +386,7 @@ pub fn tick(editor: *Editor) !bool {
                 'e' => {
                     editor.cursor.moveOne(.right, editor.lines.items);
                     const offset = editor.cursor.head.toOffset(editor.lines.items);
-                    const word_tail = editor.wordTail();
+                    const word_tail = wordTail(editor.buffer.items, offset);
                     editor.cursor.move(.right, word_tail - offset, editor.lines.items);
                 },
                 'i' => editor.mode = .insert,
