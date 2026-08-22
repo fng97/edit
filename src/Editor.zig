@@ -625,7 +625,7 @@ fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileToo
     }
 
     assert(lines.items[0].head == 0);
-    assert(lines.getLast().tail == file_bytes.len - 1);
+    assert(lines.last().?.tail == file_bytes.len - 1);
 }
 
 test fuzzer {
@@ -1008,7 +1008,7 @@ test indexLines {
     try std.testing.expect(lines.items[0].head == 0);
     try std.testing.expect(lines.items[0].tail == 18);
     try std.testing.expect(lines.items[0].size() == 19);
-    try std.testing.expect(lines.getLast().tail == hello_c.len - 1);
+    try std.testing.expect(lines.last().?.tail == hello_c.len - 1);
 
     // This function should never be called with an empty slice. Empty files are handled by
     // inserting a single newline.

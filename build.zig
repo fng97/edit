@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(main);
         const run = b.addRunArtifact(main);
         run.step.dependOn(install_step); // run from prefix
-        if (b.args) |args| run.addArgs(args); // pass args: e.g. zig build run -- arg1
+        run.addPassthruArgs(); // pass args: e.g. zig build run -- arg1
         break :blk &run.step;
     });
     test_step.dependOn(install_step); // make sure main executable gets built as part of tests
@@ -62,11 +62,9 @@ pub fn build(b: *std.Build) void {
         // Pass fuzz test executable path to fuzz harness.
         run.addArtifactArg(fuzz_test);
         // By default, run fuzzing search (find failure then minimise).
-        if (b.args) |args| run.addArgs(args) else {
-            const attempts = 100; // test attempts per fuzzing input size
-            const size_max = 8 * 1024 * 1024; // max entropy size per test
-            run.addArg(b.fmt("--search={}:{}", .{ attempts, size_max }));
-        }
+        const attempts = 100; // test attempts per fuzzing input size
+        const size_max = 8 * 1024 * 1024; // max entropy size per test
+        run.addArg(b.fmt("--search={}:{}", .{ attempts, size_max }));
         break :blk &run.step;
     });
 
