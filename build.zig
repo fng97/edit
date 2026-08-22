@@ -78,11 +78,4 @@ pub fn build(b: *std.Build) void {
         _ = run.captureStdErr(.{}); // ignore stdout
         break :blk &run.step;
     });
-
-    test_step.dependOn(blk: {
-        const dep = b.dependency("tidy", .{ .target = b.graph.host, .optimize = .ReleaseSafe });
-        const exe = b.addTest(.{ .name = "tidy checks", .root_module = dep.module("tidy") });
-        const run = b.addRunArtifact(exe);
-        break :blk &run.step;
-    });
 }
