@@ -276,7 +276,7 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
         // Control sequences start with CSI (0x1b 0x5b) and end with a character in the range,
         // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences.
         '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
-            assert(try reader.takeByte() == '[');
+            if (try reader.takeByte() != '[') return Error.InvalidEscapeSequence;
 
             var params_buffer: [32]u8 = undefined;
             var params_index: usize = 0;
