@@ -672,6 +672,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         error.FileEmpty,
         error.FileNotAscii,
         error.FileTooManyLines,
+        error.FileNotNewlineTerminated,
         error.ViewportTooSmall,
         error.ViewportTooLarge,
         => return,
