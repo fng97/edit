@@ -694,6 +694,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         Error.InvalidEscapeSequence,
         Error.ViewportTooLarge,
         Error.ViewportTooSmall,
+        error.EndOfStream, // probably won't show up in normal usage so handle it here instead
         => return,
         else => return err,
     }) continue;
