@@ -167,7 +167,7 @@ pub fn init(
     file_bytes: []const u8,
 ) !Editor {
     // File must not be empty, contain only ASCII, and end in newline.
-    assert(file_bytes.len != 0);
+    if (file_bytes.len == 0) return error.FileEmpty;
     for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
     if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
 
@@ -637,74 +637,54 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    // TODO: I think instead of generating a file size then allocating we could just allocate a max
-    // buffer and use the Smith slice functions.
-    // TODO: Handle opening empty files: add a single newline rather than supporting empty files.
-    const file_size = smith.valueRangeAtMost(u32, 1, file_size_max);
+    const file_size = smith.valueRangeAtMost(u32, 0, file_size_max);
     const file_buffer = try allocator.alloc(u8, file_size);
     defer allocator.free(file_buffer);
+    smith.bytes(file_buffer);
 
-    const Strategy = enum { all, ascii, printable, code };
-    smith.bytesWeighted(file_buffer, switch (smith.valueWeighted(Strategy, &.{
-        .value(Strategy, .all, 1),
-        .value(Strategy, .ascii, 1),
-        .value(Strategy, .printable, 1),
-        .value(Strategy, .code, 27),
-    })) {
-        .all => std.testing.Smith.baselineWeights(u8),
-        .ascii => &.{.rangeAtMost(u8, 0, 127, 1)},
-        .printable => &.{.rangeAtMost(u8, 0x20, 0x7E, 1)},
-        .code => &.{
-            .value(u8, ' ', 30),
-            .rangeAtMost(u8, '!', '/', 5), // ! " # $ % & ' ( ) * + , - . /
-            .rangeAtMost(u8, '0', '9', 10),
-            .rangeAtMost(u8, ':', '@', 5), // : ; < = > ? @
-            .rangeAtMost(u8, 'A', 'Z', 15),
-            .rangeAtMost(u8, '[', '`', 5), // [ \ ] ^ _ `
-            .rangeAtMost(u8, 'a', 'z', 30),
-            .rangeAtMost(u8, '{', '~', 5), // { | } ~
-            .value(u8, '\n', 15),
-            // TODO: Handle tabs.
-            // .value(u8, '\t', 5),
-        },
-    });
+    // TODO: Is this big enough? Make it look more like a path?
+    const file_name_size = smith.value(u8);
+    const file_name_buffer = try allocator.alloc(u8, file_name_size);
+    defer allocator.free(file_name_buffer);
+    smith.bytes(file_name_buffer);
 
-    // TODO: Generate these too.
-    const row_count = 12;
-    const col_count = 36;
+    const row_count = smith.valueRangeAtMost(u16, 0, row_count_max);
+    const col_count = smith.valueRangeAtMost(u16, 0, col_count_max);
 
-    // TODO: Handle file path not fitting in status bar. For now just use fixed name.
-    // const file_name_size = smith.valueRangeAtMost(u8, 0, col_count);
-    // const file_name_buffer = try allocator.alloc(u8, file_name_size);
-    // defer allocator.free(file_name_buffer);
-    // smith.bytes(file_name_buffer);
-
-    // On init STDIN must start with resize:
-    // CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t
-    const resize = try std.fmt.allocPrint(
-        allocator,
-        "\x1b[48;{d};{d};0;0t", // pix values ignored
-        .{ row_count, col_count },
-    );
-    defer allocator.free(resize);
-    var reader = std.Io.Reader.fixed(resize);
-    var writer = std.Io.Writer.Allocating.init(allocator);
-    defer writer.deinit();
+    var input: std.Io.Writer.Allocating = .init(allocator);
+    defer input.deinit();
+    // First input must be resize (parsed during init below for dimensions).
+    try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
+    const input_size = smith.valueRangeAtMost(u16, 0, 4 * 1024); // 4 KiB input max
+    for (0..input_size) |_| try input.writer.writeByte(smith.value(u8));
+    try input.writer.writeByte('q'); // clean exit
+    var reader: std.Io.Reader = .fixed(input.written());
+    var writer: std.Io.Writer.Discarding = .init(&.{});
 
     var editor = Editor.init(
-        std.testing.allocator,
+        allocator,
         io,
         &reader,
         &writer.writer,
-        "main.zig",
+        file_name_buffer,
         file_buffer,
     ) catch |err| switch (err) {
-        error.FileNotNewlineTerminated, error.FileNotAscii => return,
+        error.FileEmpty,
+        error.FileNotAscii,
+        error.FileTooManyLines,
+        error.ViewportTooSmall,
+        error.ViewportTooLarge,
+        => return,
         else => return err,
     };
     defer editor.deinit(allocator);
 
-    try editor.render();
+    while (editor.tick() catch |err| switch (err) {
+        error.ViewportTooSmall,
+        error.ViewportTooLarge,
+        => return,
+        else => return err,
+    }) continue;
 }
 
 test Modifiers {
