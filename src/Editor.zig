@@ -104,8 +104,8 @@ const Cursor = struct {
 
 const Error = error{
     CsiTooLong,
+    FileContainsInvalidCharacter,
     FileEmpty,
-    FileNotAscii,
     FileNotNewlineTerminated,
     FileTooManyLines,
     InvalidEscapeSequence,
@@ -174,7 +174,12 @@ pub fn init(
 ) !Editor {
     // File must not be empty, contain only ASCII, and end in newline.
     if (file_bytes.len == 0) return Error.FileEmpty;
-    for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return Error.FileNotAscii;
+    for (file_bytes) |byte| switch (byte) {
+        0x0A => {}, // newline
+        0x20...0x7E => {}, // printable
+        // TODO: Handle tabs.
+        else => return Error.FileContainsInvalidCharacter,
+    };
     if (file_bytes[file_bytes.len - 1] != '\n') return Error.FileNotNewlineTerminated;
 
     var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
@@ -674,7 +679,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         file_buffer,
     ) catch |err| switch (err) {
         Error.FileEmpty,
-        Error.FileNotAscii,
+        Error.FileContainsInvalidCharacter,
         Error.FileNotNewlineTerminated,
         Error.FileTooManyLines,
         Error.LineTooLong,
