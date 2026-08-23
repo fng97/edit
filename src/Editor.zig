@@ -103,9 +103,14 @@ const Cursor = struct {
 };
 
 const Error = error{
-    ViewportTooSmall,
-    ViewportTooLarge,
+    CsiTooLong,
+    FileEmpty,
+    FileNotAscii,
+    FileNotNewlineTerminated,
+    FileTooManyLines,
     LineTooLong,
+    ViewportTooLarge,
+    ViewportTooSmall,
 };
 
 const Line = struct {
@@ -167,9 +172,9 @@ pub fn init(
     file_bytes: []const u8,
 ) !Editor {
     // File must not be empty, contain only ASCII, and end in newline.
-    if (file_bytes.len == 0) return error.FileEmpty;
-    for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return error.FileNotAscii;
-    if (file_bytes[file_bytes.len - 1] != '\n') return error.FileNotNewlineTerminated;
+    if (file_bytes.len == 0) return Error.FileEmpty;
+    for (file_bytes) |byte| if (!std.ascii.isAscii(byte)) return Error.FileNotAscii;
+    if (file_bytes[file_bytes.len - 1] != '\n') return Error.FileNotNewlineTerminated;
 
     var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
     errdefer lines.deinit(allocator);
@@ -271,7 +276,7 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
             // Read until the final byte so we have all that remains of the escape sequence.
             const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
                 0x30...0x3F => |byte| {
-                    if (params_index == params_buffer.len) return error.CsiTooLong;
+                    if (params_index == params_buffer.len) return Error.CsiTooLong;
                     params_buffer[params_index] = byte;
                 },
                 0x40...0x7E => |final_byte| break final_byte,
@@ -468,10 +473,6 @@ pub fn tick(editor: *Editor) !bool {
         .select => {},
     }
 
-    // Check line length.
-    const lines = editor.lines.items;
-    for (lines) |line| if (line.size() - 1 > line_offset_max) return Error.LineTooLong;
-
     // Check viewport dimensions.
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
@@ -559,7 +560,7 @@ fn render(editor: *const Editor) !void {
     const dirty_indicator = " [+]";
     if (editor.dirty) min_size += dirty_indicator.len;
     min_size += cursor_coordinates_col_count + 1; // 1 for padding
-    if (min_size > col_count) return error.ViewportTooSmall;
+    if (min_size > col_count) return Error.ViewportTooSmall;
 
     try writer.writeAll(file_name);
     if (editor.dirty) try writer.writeAll(dirty_indicator);
@@ -611,7 +612,7 @@ fn positionFrom(lines: []const Line, offset: u32) Position {
     } else @panic("offset not within file bounds");
 }
 
-fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileTooManyLines}!void {
+fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) !void {
     assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
 
     lines.clearRetainingCapacity();
@@ -619,7 +620,8 @@ fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) error{FileToo
     while (head < file_bytes.len) {
         var tail = head;
         while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
-        if (lines.items.len == line_count_max) return error.FileTooManyLines;
+        if (tail - head > line_offset_max) return Error.LineTooLong;
+        if (lines.items.len == line_count_max) return Error.FileTooManyLines;
         lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
         head = tail + 1;
     }
@@ -669,20 +671,21 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         file_name_buffer,
         file_buffer,
     ) catch |err| switch (err) {
-        error.FileEmpty,
-        error.FileNotAscii,
-        error.FileTooManyLines,
-        error.FileNotNewlineTerminated,
-        error.ViewportTooSmall,
-        error.ViewportTooLarge,
+        Error.FileEmpty,
+        Error.FileNotAscii,
+        Error.FileTooManyLines,
+        Error.FileNotNewlineTerminated,
+        Error.ViewportTooSmall,
+        Error.ViewportTooLarge,
+        Error.LineTooLong,
         => return,
         else => return err,
     };
     defer editor.deinit(allocator);
 
     while (editor.tick() catch |err| switch (err) {
-        error.ViewportTooSmall,
-        error.ViewportTooLarge,
+        Error.ViewportTooSmall,
+        Error.ViewportTooLarge,
         => return,
         else => return err,
     }) continue;
