@@ -104,6 +104,7 @@ const Cursor = struct {
 
 const Error = error{
     CsiSequenceInvalid,
+    CsiSequenceNotRecognised,
     CsiSequenceTooLong,
     FileContainsInvalidCharacter,
     FileEmpty,
@@ -281,7 +282,8 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
         // Key events that produce text are sent directly as UTF-8 encyoded bytes.
         0x20...0x7E => |c| return .{ .ascii = c },
         // Control sequences start with CSI (0x1b 0x5b) and end with a character in the range,
-        // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences.
+        // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences and
+        // https://en.wikipedia.org/wiki/ANSI_escape_code.
         '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
             if (try reader.takeByte() != '[') return Error.CsiSequenceInvalid;
 
@@ -289,48 +291,57 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
             var params_index: usize = 0;
             // Read until the final byte so we have all that remains of the escape sequence.
             const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
+                // Since we don't yet support a sequence that uses intermediates, just reject them.
+                0x20...0x2F => return Error.CsiSequenceNotRecognised, // intermediates
                 0x30...0x3F => |byte| {
                     if (params_index == params_buffer.len) return Error.CsiSequenceTooLong;
                     params_buffer[params_index] = byte;
                 },
                 0x40...0x7E => |final_byte| break final_byte,
-                else => @panic("escape sequence contains character outside 0x20-0x7E"),
+                else => return Error.CsiSequenceInvalid,
             };
 
             const params = params_buffer[0..params_index];
             var iter = std.mem.splitScalar(u8, params, ';');
-            const first_str = iter.next() orelse @panic("escape sequence has no parameters");
+            // The escape sequences we support
+            const first_str = iter.next() orelse return Error.CsiSequenceNotRecognised;
             const first = try parseCsiInt(first_str);
             switch (final) {
                 'u' => switch (first) {
                     0x1b => return .escape,
                     // Printable ASCII with modifiers. Codepoints must be the lowercase variant.
-                    0x20...0x7E => |c| return .{ .chord = .{
-                        .ascii = @intCast(switch (c) {
-                            'A'...'Z' => @panic("CSI u unicode-key-code must be unshifted"),
-                            else => c,
-                        }),
-                        .modifiers = try .decode(
-                            iter.next() orelse @panic("CSI u sequence missing modifiers"),
-                        ),
-                    } },
-                    else => {}, // fall through to panic
+                    0x20...0x7E => |c| return .{
+                        .chord = .{
+                            .ascii = @intCast(switch (c) {
+                                // CSI u unicode-key-code must be unshifted (e.g. a not A).
+                                'A'...'Z' => return Error.CsiSequenceInvalid,
+                                else => c,
+                            }),
+                            // Modifiers may not be present. It defaults to 1 (no modifiers). For
+                            // now return an error if these are missing.
+                            .modifiers = try .decode(
+                                iter.next() orelse return Error.CsiSequenceNotRecognised,
+                            ),
+                        },
+                    },
+                    else => return Error.CsiSequenceNotRecognised,
                 },
                 't' => switch (first) {
-                    // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
+                    // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t. See
+                    // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
                     48 => return .{
                         .resize = .{
                             .row_count = @intCast(try parseCsiInt(iter.next().?)),
                             .col_count = @intCast(try parseCsiInt(iter.next().?)),
                         },
                     },
-                    else => return Error.CsiSequenceInvalid,
+                    else => return Error.CsiSequenceNotRecognised,
                 },
-                else => return Error.CsiSequenceInvalid,
+                else => return Error.CsiSequenceNotRecognised,
             }
             unreachable;
         },
-        else => return Error.CsiSequenceInvalid,
+        else => return Error.CsiSequenceNotRecognised,
     }
 }
 
@@ -699,6 +710,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
 
     while (editor.tick() catch |err| switch (err) {
         Error.CsiSequenceInvalid,
+        Error.CsiSequenceNotRecognised,
         Error.ViewportTooLarge,
         Error.ViewportTooSmall,
         error.EndOfStream, // probably won't show up in normal usage so handle it here instead
