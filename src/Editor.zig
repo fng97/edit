@@ -182,6 +182,7 @@ pub fn init(
 
     assert(file_bytes.len <= file_size_max);
     var buffer: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
+    errdefer buffer.deinit(allocator);
     buffer.appendSliceAssumeCapacity(file_bytes);
 
     var editor: Editor = .{
