@@ -108,6 +108,7 @@ const Error = error{
     FileNotAscii,
     FileNotNewlineTerminated,
     FileTooManyLines,
+    InvalidEscapeSequence,
     LineTooLong,
     ViewportTooLarge,
     ViewportTooSmall,
@@ -311,14 +312,13 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
                             .col_count = try std.fmt.parseInt(u16, iter.next().?, 10),
                         },
                     },
-                    else => {}, // fall through to panic
+                    else => return Error.InvalidEscapeSequence,
                 },
-                else => {}, // fall through to panic
+                else => return Error.InvalidEscapeSequence,
             }
-
-            std.debug.panic("unrecognised escape sequence: CSI {x} {c}", .{ params, final });
+            unreachable;
         },
-        else => |c| std.debug.panic("unable to parse bytes: {x} {x}", .{ c, reader.buffered() }),
+        else => return Error.InvalidEscapeSequence,
     }
 }
 
@@ -656,6 +656,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
 
     var input: std.Io.Writer.Allocating = .init(allocator);
     defer input.deinit();
+    // TODO: Sometimes don't generate resize?
     // First input must be resize (parsed during init below for dimensions).
     try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
     const input_size = smith.valueRangeAtMost(u16, 0, 4 * 1024); // 4 KiB input max
@@ -674,19 +675,20 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     ) catch |err| switch (err) {
         Error.FileEmpty,
         Error.FileNotAscii,
-        Error.FileTooManyLines,
         Error.FileNotNewlineTerminated,
-        Error.ViewportTooSmall,
-        Error.ViewportTooLarge,
+        Error.FileTooManyLines,
         Error.LineTooLong,
+        Error.ViewportTooLarge,
+        Error.ViewportTooSmall,
         => return,
         else => return err,
     };
     defer editor.deinit(allocator);
 
     while (editor.tick() catch |err| switch (err) {
-        Error.ViewportTooSmall,
+        Error.InvalidEscapeSequence,
         Error.ViewportTooLarge,
+        Error.ViewportTooSmall,
         => return,
         else => return err,
     }) continue;
