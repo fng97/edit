@@ -691,6 +691,10 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     }) continue;
 }
 
+// test "fuzz repro" {
+//     try std.testing.fuzz({}, fuzzer, .{ .corpus = &.{@embedFile("crash")} });
+// }
+
 test Modifiers {
     try std.testing.expect(try Modifiers.decode("1") == Modifiers{
         .shift = false,
