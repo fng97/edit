@@ -103,12 +103,12 @@ const Cursor = struct {
 };
 
 const Error = error{
-    CsiTooLong,
+    CsiSequenceInvalid,
+    CsiSequenceTooLong,
     FileContainsInvalidCharacter,
     FileEmpty,
     FileNotNewlineTerminated,
     FileTooManyLines,
-    InvalidEscapeSequence,
     LineTooLong,
     ViewportTooLarge,
     ViewportTooSmall,
@@ -257,6 +257,13 @@ const Modifiers = packed struct(u8) {
     }
 };
 
+fn parseCsiInt(text: []const u8) !u32 {
+    return std.fmt.parseInt(u32, text, 10) catch |err| switch (err) {
+        error.InvalidCharacter => return Error.CsiSequenceInvalid,
+        else => return err,
+    };
+}
+
 /// Handle input: parse Kitty Keyboard Protocol events.
 fn parseOne(reader: *std.Io.Reader) !union(enum) {
     resize: struct { row_count: u16, col_count: u16 },
@@ -276,14 +283,14 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
         // Control sequences start with CSI (0x1b 0x5b) and end with a character in the range,
         // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences.
         '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
-            if (try reader.takeByte() != '[') return Error.InvalidEscapeSequence;
+            if (try reader.takeByte() != '[') return Error.CsiSequenceInvalid;
 
             var params_buffer: [32]u8 = undefined;
             var params_index: usize = 0;
             // Read until the final byte so we have all that remains of the escape sequence.
             const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
                 0x30...0x3F => |byte| {
-                    if (params_index == params_buffer.len) return Error.CsiTooLong;
+                    if (params_index == params_buffer.len) return Error.CsiSequenceTooLong;
                     params_buffer[params_index] = byte;
                 },
                 0x40...0x7E => |final_byte| break final_byte,
@@ -293,7 +300,7 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
             const params = params_buffer[0..params_index];
             var iter = std.mem.splitScalar(u8, params, ';');
             const first_str = iter.next() orelse @panic("escape sequence has no parameters");
-            const first = try std.fmt.parseInt(i32, first_str, 10);
+            const first = try parseCsiInt(first_str);
             switch (final) {
                 'u' => switch (first) {
                     0x1b => return .escape,
@@ -313,17 +320,17 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
                     // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t.
                     48 => return .{
                         .resize = .{
-                            .row_count = try std.fmt.parseInt(u16, iter.next().?, 10),
-                            .col_count = try std.fmt.parseInt(u16, iter.next().?, 10),
+                            .row_count = @intCast(try parseCsiInt(iter.next().?)),
+                            .col_count = @intCast(try parseCsiInt(iter.next().?)),
                         },
                     },
-                    else => return Error.InvalidEscapeSequence,
+                    else => return Error.CsiSequenceInvalid,
                 },
-                else => return Error.InvalidEscapeSequence,
+                else => return Error.CsiSequenceInvalid,
             }
             unreachable;
         },
-        else => return Error.InvalidEscapeSequence,
+        else => return Error.CsiSequenceInvalid,
     }
 }
 
@@ -678,8 +685,8 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
         file_name_buffer,
         file_buffer,
     ) catch |err| switch (err) {
-        Error.FileEmpty,
         Error.FileContainsInvalidCharacter,
+        Error.FileEmpty,
         Error.FileNotNewlineTerminated,
         Error.FileTooManyLines,
         Error.LineTooLong,
@@ -691,7 +698,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     defer editor.deinit(allocator);
 
     while (editor.tick() catch |err| switch (err) {
-        Error.InvalidEscapeSequence,
+        Error.CsiSequenceInvalid,
         Error.ViewportTooLarge,
         Error.ViewportTooSmall,
         error.EndOfStream, // probably won't show up in normal usage so handle it here instead
