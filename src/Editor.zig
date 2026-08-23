@@ -384,7 +384,19 @@ fn anyWordTail(buffer: []const u8, offset: u32) u32 {
     const family = textFamily(buffer[offset]);
     for (buffer[offset..], offset..) |c, i| {
         if (textFamily(c) != family) return @intCast(i - 1);
-    } else return @intCast(buffer.len);
+    } else return @intCast(buffer.len - 1);
+}
+
+test anyWordTail {
+    try std.testing.expectEqual(4, anyWordTail("hello ", 0));
+    try std.testing.expectEqual(4, anyWordTail("hello ", 4));
+    try std.testing.expectEqual(5, anyWordTail("hello ", 5));
+    try std.testing.expectEqual(1, anyWordTail("  aaa ", 0));
+    try std.testing.expectEqual(1, anyWordTail("  aaa ", 1));
+    try std.testing.expectEqual(4, anyWordTail("  aaa ", 2));
+    try std.testing.expectEqual(5, anyWordTail("  aaa ", 5));
+    try std.testing.expectEqual(5, anyWordTail("  aaa\n", 5));
+    try std.testing.expectEqual(6, anyWordTail("  aaa \n", 5));
 }
 
 fn wordTail(buffer: []const u8, offset: u32) u32 {
@@ -393,6 +405,45 @@ fn wordTail(buffer: []const u8, offset: u32) u32 {
     if (tail >= buffer.len - 1) return @intCast(buffer.len - 1); // end of file
     const family = textFamily(buffer[tail]);
     if (family == .whitespace) return anyWordTail(buffer, tail + 1) else return tail;
+}
+
+test wordTail {
+    try std.testing.expectEqual(4, wordTail("  aaa ", 0));
+    try std.testing.expectEqual(4, wordTail("  aaa ", 2));
+    try std.testing.expectEqual(5, wordTail("  aaa ", 5));
+}
+
+fn anyWordHead(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    const family = textFamily(buffer[offset]);
+    var it = std.mem.reverseIterator(buffer[0..offset]);
+    var i: u32 = offset;
+    while (it.next()) |c| : (i -= 1) if (textFamily(c) != family) break;
+    return i;
+}
+
+test anyWordHead {
+    try std.testing.expectEqual(0, anyWordHead("hello ", 4));
+    try std.testing.expectEqual(5, anyWordHead("hello ", 5));
+    try std.testing.expectEqual(0, anyWordHead("hello ", 0));
+    try std.testing.expectEqual(2, anyWordHead("  aaa ", 4));
+    try std.testing.expectEqual(2, anyWordHead("  aaa ", 2));
+    try std.testing.expectEqual(0, anyWordHead("  aaa ", 1));
+}
+
+fn wordHead(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    const head = anyWordHead(buffer, offset);
+    if (head == 0) return 0;
+    const family = textFamily(buffer[head]);
+    if (family == .whitespace) return anyWordHead(buffer, head - 1) else return head;
+}
+
+test wordHead {
+    try std.testing.expectEqual(0, wordHead("  aaa ", 0));
+    try std.testing.expectEqual(2, wordHead("  aaa ", 2));
+    try std.testing.expectEqual(2, wordHead("  aaa ", 4));
+    try std.testing.expectEqual(2, wordHead("  aaa ", 5));
 }
 
 pub fn tick(editor: *Editor) !bool {
