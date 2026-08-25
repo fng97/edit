@@ -362,88 +362,85 @@ fn indentCount(editor: *const Editor) u16 {
     return @intCast(i - line.head);
 }
 
-fn textFamily(c: u8) enum { whitespace, symbols, word } {
+fn characterKind(c: u8) enum { whitespace, symbol, alphanumeric } {
     return switch (c) {
         '\n' => .whitespace,
         0x20...0x7E => switch (c) { // printable ASCII range
             ' ' => .whitespace,
-            '_' => .word,
-            '0'...'9' => .word,
-            'a'...'z' => .word,
-            'A'...'Z' => .word,
-            else => .symbols,
+            '_' => .alphanumeric,
+            '0'...'9' => .alphanumeric,
+            'a'...'z' => .alphanumeric,
+            'A'...'Z' => .alphanumeric,
+            else => .symbol,
         },
         else => unreachable,
     };
 }
 
-/// Find the end of the current word. Along with normal words, sequences of whitespace count as a
-/// word, as do sequences of symbols.
-fn anyWordTail(buffer: []const u8, offset: u32) u32 {
+/// Find the next word end where a word is a contiguous span of only aphanumeric characters OR only
+/// symbols. If the offset is already the end of the word, returns the index of the next word end.
+/// Advances past whitespace to the next word. The only time this returns an index containing
+/// whitespace is if it's the end of the buffer.
+fn wordTailNext(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    const family = textFamily(buffer[offset]);
-    for (buffer[offset..], offset..) |c, i| {
-        if (textFamily(c) != family) return @intCast(i - 1);
-    } else return @intCast(buffer.len - 1);
-}
-
-test anyWordTail {
-    try std.testing.expectEqual(4, anyWordTail("hello ", 0));
-    try std.testing.expectEqual(4, anyWordTail("hello ", 4));
-    try std.testing.expectEqual(5, anyWordTail("hello ", 5));
-    try std.testing.expectEqual(1, anyWordTail("  aaa ", 0));
-    try std.testing.expectEqual(1, anyWordTail("  aaa ", 1));
-    try std.testing.expectEqual(4, anyWordTail("  aaa ", 2));
-    try std.testing.expectEqual(5, anyWordTail("  aaa ", 5));
-    try std.testing.expectEqual(5, anyWordTail("  aaa\n", 5));
-    try std.testing.expectEqual(6, anyWordTail("  aaa \n", 5));
-}
-
-fn wordTail(buffer: []const u8, offset: u32) u32 {
-    assert(offset < buffer.len);
-    const tail = anyWordTail(buffer, offset);
-    if (tail >= buffer.len - 1) return @intCast(buffer.len - 1); // end of file
-    const family = textFamily(buffer[tail]);
-    if (family == .whitespace) return anyWordTail(buffer, tail + 1) else return tail;
-}
-
-test wordTail {
-    try std.testing.expectEqual(4, wordTail("  aaa ", 0));
-    try std.testing.expectEqual(4, wordTail("  aaa ", 2));
-    try std.testing.expectEqual(5, wordTail("  aaa ", 5));
-}
-
-fn anyWordHead(buffer: []const u8, offset: u32) u32 {
-    assert(offset < buffer.len);
-    const family = textFamily(buffer[offset]);
-    var it = std.mem.reverseIterator(buffer[0..offset]);
-    var i: u32 = offset;
-    while (it.next()) |c| : (i -= 1) if (textFamily(c) != family) break;
+    var i: u32 = offset + 1;
+    while (i < buffer.len and characterKind(buffer[i]) == .whitespace) i += 1; // go past whitespace
+    if (i == buffer.len) return i - 1;
+    const kind = characterKind(buffer[i]);
+    while (i + 1 < buffer.len and characterKind(buffer[i + 1]) == kind) i += 1;
     return i;
 }
 
-test anyWordHead {
-    try std.testing.expectEqual(0, anyWordHead("hello ", 4));
-    try std.testing.expectEqual(5, anyWordHead("hello ", 5));
-    try std.testing.expectEqual(0, anyWordHead("hello ", 0));
-    try std.testing.expectEqual(2, anyWordHead("  aaa ", 4));
-    try std.testing.expectEqual(2, anyWordHead("  aaa ", 2));
-    try std.testing.expectEqual(0, anyWordHead("  aaa ", 1));
+test wordTailNext {
+    try std.testing.expectEqual(4, wordTailNext("Hello,\n  world!", 0));
+    try std.testing.expectEqual(4, wordTailNext("Hello,\n  world!", 1));
+    try std.testing.expectEqual(5, wordTailNext("Hello,\n  world!", 4));
+    try std.testing.expectEqual(13, wordTailNext("Hello,\n  world!", 5));
+    try std.testing.expectEqual(13, wordTailNext("Hello,\n  world!", 7));
+    try std.testing.expectEqual(14, wordTailNext("Hello,\n  world!", 13));
+    try std.testing.expectEqual(14, wordTailNext("Hello,\n  world!", 14));
 }
 
-fn wordHead(buffer: []const u8, offset: u32) u32 {
+/// Same as `wordTailNext` except each token is any contiguous span of non-whitespace.
+fn tokenTailNext(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    const head = anyWordHead(buffer, offset);
-    if (head == 0) return 0;
-    const family = textFamily(buffer[head]);
-    if (family == .whitespace) return anyWordHead(buffer, head - 1) else return head;
+    var i: u32 = offset + 1;
+    while (i < buffer.len and characterKind(buffer[i]) == .whitespace) i += 1; // go past whitespace
+    if (i == buffer.len) return i - 1;
+    while (i + 1 < buffer.len and characterKind(buffer[i + 1]) != .whitespace) i += 1;
+    return i;
 }
 
-test wordHead {
-    try std.testing.expectEqual(0, wordHead("  aaa ", 0));
-    try std.testing.expectEqual(2, wordHead("  aaa ", 2));
-    try std.testing.expectEqual(2, wordHead("  aaa ", 4));
-    try std.testing.expectEqual(2, wordHead("  aaa ", 5));
+test tokenTailNext {
+    try std.testing.expectEqual(5, tokenTailNext("Hello,\n  world!", 0));
+    try std.testing.expectEqual(5, tokenTailNext("Hello,\n  world!", 1));
+    try std.testing.expectEqual(14, tokenTailNext("Hello,\n  world!", 5));
+    try std.testing.expectEqual(14, tokenTailNext("Hello,\n  world!", 14));
+    try std.testing.expectEqual(14, tokenTailNext("Hello,\n  world!", 14));
+}
+
+/// Same principle `wordTailNext` but going backwards until we find the next word start.
+fn wordHeadPrev(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    if (offset == 0) return 0;
+    var i: u32 = offset - 1;
+    while (i > 0 and characterKind(buffer[i]) == .whitespace) i -= 1;
+    const kind = characterKind(buffer[i]);
+    while (i > 0 and characterKind(buffer[i - 1]) == kind) i -= 1;
+    return i;
+}
+
+test wordHeadPrev {
+    try std.testing.expectEqual(9, wordHeadPrev("Hello,\n  world!", 14));
+    try std.testing.expectEqual(9, wordHeadPrev("Hello,\n  world!", 12));
+    try std.testing.expectEqual(5, wordHeadPrev("Hello,\n  world!", 9));
+    try std.testing.expectEqual(0, wordHeadPrev("Hello,\n  world!", 5));
+    try std.testing.expectEqual(0, wordHeadPrev("Hello,\n  world!", 4));
+    try std.testing.expectEqual(0, wordHeadPrev("Hello,\n  world!", 0));
+    try std.testing.expectEqual(0, wordHeadPrev(", ", 1));
+    try std.testing.expectEqual(0, wordHeadPrev(",  ", 2));
+    try std.testing.expectEqual(1, wordHeadPrev(" , ", 2));
+    try std.testing.expectEqual(0, wordHeadPrev(",, ", 2));
 }
 
 pub fn tick(editor: *Editor) !bool {
@@ -464,10 +461,25 @@ pub fn tick(editor: *Editor) !bool {
                 'G' => editor.cursor.moveMax(.down, editor.lines.items),
                 'g' => editor.cursor.moveMax(.up, editor.lines.items),
                 'e' => {
-                    editor.cursor.moveOne(.right, editor.lines.items);
-                    const offset = editor.cursor.head.toOffset(editor.lines.items);
-                    const word_tail = wordTail(editor.buffer.items, offset);
-                    editor.cursor.move(.right, word_tail - offset, editor.lines.items);
+                    const buffer = editor.buffer.items;
+                    const lines = editor.lines.items;
+                    const offset = editor.cursor.head.toOffset(lines);
+                    const offset_next = wordTailNext(buffer, offset) - offset;
+                    editor.cursor.move(.right, offset_next, lines);
+                },
+                'E' => {
+                    const buffer = editor.buffer.items;
+                    const lines = editor.lines.items;
+                    const offset = editor.cursor.head.toOffset(lines);
+                    const offset_next = tokenTailNext(buffer, offset) - offset;
+                    editor.cursor.move(.right, offset_next, lines);
+                },
+                'b' => {
+                    const buffer = editor.buffer.items;
+                    const lines = editor.lines.items;
+                    const offset = editor.cursor.head.toOffset(lines);
+                    const offset_next = offset - wordHeadPrev(buffer, offset);
+                    editor.cursor.move(.left, offset_next, lines);
                 },
                 'i' => editor.mode = .insert,
                 'I' => {
