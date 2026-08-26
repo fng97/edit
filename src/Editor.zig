@@ -424,7 +424,7 @@ fn wordHeadPrev(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
     if (offset == 0) return 0;
     var i: u32 = offset - 1;
-    while (i > 0 and characterKind(buffer[i]) == .whitespace) i -= 1;
+    while (i > 0 and characterKind(buffer[i]) == .whitespace) i -= 1; // go past whitespace
     const kind = characterKind(buffer[i]);
     while (i > 0 and characterKind(buffer[i - 1]) == kind) i -= 1;
     return i;
@@ -441,6 +441,28 @@ test wordHeadPrev {
     try std.testing.expectEqual(0, wordHeadPrev(",  ", 2));
     try std.testing.expectEqual(1, wordHeadPrev(" , ", 2));
     try std.testing.expectEqual(0, wordHeadPrev(",, ", 2));
+}
+
+fn tokenHeadPrev(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    if (offset == 0) return 0;
+    var i: u32 = offset - 1;
+    while (i > 0 and characterKind(buffer[i]) == .whitespace) i -= 1; // go past whitespace
+    while (i > 0 and characterKind(buffer[i - 1]) != .whitespace) i -= 1;
+    return i;
+}
+
+test tokenHeadPrev {
+    try std.testing.expectEqual(9, tokenHeadPrev("Hello,\n  world!", 14));
+    try std.testing.expectEqual(9, tokenHeadPrev("Hello,\n  world!", 12));
+    try std.testing.expectEqual(0, tokenHeadPrev("Hello,\n  world!", 9));
+    try std.testing.expectEqual(0, tokenHeadPrev("Hello,\n  world!", 5));
+    try std.testing.expectEqual(0, tokenHeadPrev("Hello,\n  world!", 4));
+    try std.testing.expectEqual(0, tokenHeadPrev("Hello,\n  world!", 0));
+    try std.testing.expectEqual(0, tokenHeadPrev(", ", 1));
+    try std.testing.expectEqual(0, tokenHeadPrev(",  ", 2));
+    try std.testing.expectEqual(1, tokenHeadPrev(" , ", 2));
+    try std.testing.expectEqual(0, tokenHeadPrev(",, ", 2));
 }
 
 pub fn tick(editor: *Editor) !bool {
@@ -479,6 +501,13 @@ pub fn tick(editor: *Editor) !bool {
                     const lines = editor.lines.items;
                     const offset = editor.cursor.head.toOffset(lines);
                     const offset_next = offset - wordHeadPrev(buffer, offset);
+                    editor.cursor.move(.left, offset_next, lines);
+                },
+                'B' => {
+                    const buffer = editor.buffer.items;
+                    const lines = editor.lines.items;
+                    const offset = editor.cursor.head.toOffset(lines);
+                    const offset_next = offset - tokenHeadPrev(buffer, offset);
                     editor.cursor.move(.left, offset_next, lines);
                 },
                 'i' => editor.mode = .insert,
