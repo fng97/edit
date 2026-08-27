@@ -49,56 +49,64 @@ cursor: Cursor,
 // File state:
 name: []const u8,
 buffer: std.ArrayList(u8),
+// TODO: I think this needs removing. We only want one source of truth: buffer.
 lines: std.ArrayList(Line),
 
 const Cursor = struct {
-    // TODO: Maybe we should actually store the offset instead of the Position.
-    head: Position,
+    head: u32,
     line_offset_snap: u16,
+
+    fn update(
+        cursor: *Cursor,
+        buffer: []const u8,
+        offset: u32,
+        kind: enum { snap_update, snap_remain },
+    ) void {
+        assert(cursor.head < buffer.len);
+        cursor.head = @min(offset, buffer.len - 1);
+        if (kind == .snap_update) cursor.line_offset_snap = lineOffset(buffer, cursor.head);
+    }
 
     const Direction = enum { up, down, left, right };
 
-    fn moveOne(cursor: *Cursor, direction: Direction, lines: []const Line) void {
+    /// Max here is in the context of a file Position. Left and right go to the start or end of a
+    /// line respectively. Up and down go to the first or last line respectively. Right is a special
+    /// case. We lock `line_offset_snap` to its max so that as we go up and down lines the cursor is
+    /// clamped to the end of each line.
+    fn moveMax(cursor: *Cursor, direction: Direction, buffer: []const u8) void {
         switch (direction) {
-            .left, .right => {
-                const offset = cursor.head.toOffset(lines);
-                const offset_new = @min(
-                    if (direction == .left) offset -| 1 else offset +| 1,
-                    lines[lines.len - 1].tail, // clamp to end of file
-                );
-                cursor.head = .fromOffset(offset_new, lines);
-                cursor.line_offset_snap = cursor.head.line_offset;
+            .left => cursor.update(buffer, lineHead(buffer, cursor.head), .snap_update),
+            .right => {
+                cursor.update(buffer, lineTail(buffer, cursor.head), .snap_update);
+                cursor.line_offset_snap = line_offset_max;
             },
-            .up, .down => {
-                const line_number = cursor.head.line_number;
-                cursor.head.line_number = @min(
-                    if (direction == .up) line_number -| 1 else line_number +| 1,
-                    lines.len - 1, // clamp to last line in file
-                );
-                // Clamp to line end if less than snap offset. Subtract 1 to go from size to offset.
-                cursor.head.line_offset = @min(
-                    cursor.line_offset_snap,
-                    lines[cursor.head.line_number].size() - 1,
-                );
+            .down => {
+                const line_head = lineHead(buffer, @intCast(buffer.len - 1)); // last line
+                const line_offset = @min(cursor.line_offset_snap, lineSize(buffer, line_head) - 1);
+                cursor.update(buffer, line_head + line_offset, .snap_remain);
             },
+            .up => cursor.update(buffer, @min( // stay clamped to snap or line end
+                cursor.line_offset_snap,
+                lineSize(buffer, 0) - 1, // first line
+            ), .snap_remain),
         }
     }
 
-    fn moveMax(cursor: *Cursor, direction: Direction, lines: []const Line) void {
-        const line_number = cursor.head.line_number;
-        const line_offset = cursor.head.line_offset;
-        const line = lines[line_number];
+    fn move(cursor: *Cursor, direction: Direction, count: u32, buffer: []const u8) void {
         switch (direction) {
-            .left => cursor.move(.left, line_offset, lines),
-            .right => cursor.move(.right, line.size() - 1 - line_offset, lines),
-            .down => cursor.move(.down, @intCast(lines.len - line_number), lines),
-            .up => cursor.move(.up, line_number, lines),
+            .left => cursor.update(buffer, cursor.head -| count, .snap_update),
+            .right => cursor.update(buffer, cursor.head +| count, .snap_update),
+            .up => cursor.update(buffer, moveLineUp(buffer, .{
+                .offset = cursor.head,
+                .count = @intCast(count),
+                .line_offset_snap = cursor.line_offset_snap,
+            }), .snap_remain),
+            .down => cursor.update(buffer, moveLineDown(buffer, .{
+                .offset = cursor.head,
+                .count = @intCast(count),
+                .line_offset_snap = cursor.line_offset_snap,
+            }), .snap_remain),
         }
-    }
-
-    // TODO: Build count back into move.
-    fn move(cursor: *Cursor, direction: Direction, count: u32, lines: []const Line) void {
-        for (0..count) |_| cursor.moveOne(direction, lines);
     }
 };
 
@@ -206,10 +214,7 @@ pub fn init(
         .name = file_name,
         .buffer = buffer,
         .lines = lines,
-        .cursor = .{
-            .head = .{ .line_number = 0, .line_offset = 0 },
-            .line_offset_snap = 0,
-        },
+        .cursor = .{ .head = 0, .line_offset_snap = 0 },
     };
 
     // First input must be viewport dimensions.
@@ -345,21 +350,164 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     }
 }
 
-// TODO: Add function for inserting slices so we don't have to do:
-// `for (count) |_| try editor.insert(c);`.
-fn insert(editor: *Editor, character: u8) !void {
-    const offset = editor.cursor.head.toOffset(editor.lines.items);
-    try editor.buffer.insertBounded(offset, character);
-    try indexLines(editor.buffer.items, &editor.lines);
-    editor.cursor.moveOne(.right, editor.lines.items);
+fn insert(editor: *Editor, text: []const u8) !void {
+    assert(text.len > 0);
+    assert(editor.cursor.head < editor.buffer.items.len);
+    try editor.buffer.insertSliceBounded(editor.cursor.head, text);
+    editor.cursor.move(.right, @intCast(text.len), editor.buffer.items);
     editor.dirty = true;
 }
 
-fn indentCount(editor: *const Editor) u16 {
-    const line = editor.lines.items[editor.cursor.head.line_number];
-    var i = line.head;
-    while (editor.buffer.items[i] == ' ') i += 1;
-    return @intCast(i - line.head);
+fn delete(editor: *Editor) !void {
+    if (editor.cursor.head == 0) return;
+    editor.cursor.move(.left, 1, editor.buffer.items);
+    _ = editor.buffer.orderedRemove(editor.cursor.head);
+    editor.dirty = true;
+}
+
+fn lineIndentation(buffer: []const u8, offset: u32) u16 {
+    assert(offset < buffer.len);
+    const line_head = lineHead(buffer, offset);
+    var i = line_head;
+    while (buffer[i] == ' ') i += 1;
+    return @intCast(i - line_head);
+}
+
+test lineIndentation {
+    try std.testing.expectEqual(2, lineIndentation("  badabop\n boom \npow", 0));
+    try std.testing.expectEqual(2, lineIndentation("  badabop\n boom \npow", 3));
+    try std.testing.expectEqual(2, lineIndentation("  badabop\n boom \npow", 9));
+    try std.testing.expectEqual(1, lineIndentation("  badabop\n boom \npow", 10));
+    try std.testing.expectEqual(0, lineIndentation("  badabop\n boom \npow", 17));
+}
+
+fn lineOffset(buffer: []const u8, offset: u32) u16 {
+    assert(offset < buffer.len);
+    const line_head = lineHead(buffer, offset);
+    assert(line_head <= offset);
+    return @intCast(offset - line_head);
+}
+
+test lineOffset {
+    const file =
+        \\  yo
+        \\
+        \\hi
+        \\
+        \\
+    ;
+    try std.testing.expectEqualStrings("  yo\n\nhi\n\n", file); // for clarity
+    try std.testing.expectEqual(0, lineOffset(file, 0)); // line 0: * yo
+    try std.testing.expectEqual(3, lineOffset(file, 3)); // line 0:   y*
+    try std.testing.expectEqual(4, lineOffset(file, 4)); // line 0:   yo* (end of line 0 newline)
+    try std.testing.expectEqual(0, lineOffset(file, 5)); // line 1: * (end of blank line newline)
+    try std.testing.expectEqual(1, lineOffset(file, 7)); // line 2: h*
+    try std.testing.expectEqual(0, lineOffset(file, 9)); // line 3: * (end of file newline)
+}
+
+fn lineHead(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    var i: u32 = offset;
+    while (i > 0 and buffer[i - 1] != '\n') i -= 1;
+    return i;
+}
+
+test lineHead {
+    try std.testing.expectEqual(0, lineHead("yo\nwhat's\nup?", 0));
+    try std.testing.expectEqual(0, lineHead("yo\nwhat's\nup?", 1));
+    try std.testing.expectEqual(0, lineHead("yo\nwhat's\nup?", 2));
+    try std.testing.expectEqual(3, lineHead("yo\nwhat's\nup?", 3));
+    try std.testing.expectEqual(10, lineHead("yo\nwhat's\nup?", 12));
+}
+
+fn lineTail(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    var i: u32 = offset;
+    while (i < buffer.len - 1 and buffer[i] != '\n') i += 1;
+    return i;
+}
+
+test lineTail {
+    try std.testing.expectEqual(2, lineTail("yo\nwhat's\nup?", 0));
+    try std.testing.expectEqual(2, lineTail("yo\nwhat's\nup?", 2));
+    try std.testing.expectEqual(9, lineTail("yo\nwhat's\nup?", 3));
+    try std.testing.expectEqual(12, lineTail("yo\nwhat's\nup?", 10));
+    try std.testing.expectEqual(13, lineTail("yo\nwhat's\nup?\n", 10));
+}
+
+/// Calculate the size of a line. A line starts after a newline (unless it's the first line in
+/// the buffer) and ends with a newline. The ending newline is part of the line.
+fn lineSize(buffer: []const u8, offset: u32) u32 {
+    assert(offset < buffer.len);
+    const line_head = lineHead(buffer, offset);
+    var i: u32 = line_head;
+    while (i < buffer.len and buffer[i] != '\n') i += 1;
+    return i - line_head + 1; // +1 for offset -> size
+}
+
+test lineSize {
+    try std.testing.expectEqual(3, lineSize("  \n\n \n", 0));
+    try std.testing.expectEqual(3, lineSize("  \n\n \n", 2));
+    try std.testing.expectEqual(1, lineSize("  \n\n \n", 3));
+    try std.testing.expectEqual(2, lineSize("  \n\n \n", 4));
+    try std.testing.expectEqual(2, lineSize("  \n\n \n", 5));
+}
+
+fn moveLineUp(
+    buffer: []const u8,
+    options: struct { offset: u32, count: u16, line_offset_snap: u16 },
+) u32 {
+    assert(options.offset < buffer.len);
+    var i: u32 = lineHead(buffer, options.offset);
+    for (0..options.count) |_| i = if (i == 0) break else lineHead(buffer, i - 1);
+    return i + @min(lineSize(buffer, i) - 1, options.line_offset_snap);
+}
+
+test moveLineUp {
+    const eq = std.testing.expectEqual; // low on cols
+    const buffer = "aaa\na\n\naa\n";
+    // Moving up on first line does nothing.
+    try eq(0, moveLineUp(buffer, .{ .offset = 0, .count = 1, .line_offset_snap = 0 }));
+    try eq(1, moveLineUp(buffer, .{ .offset = 1, .count = 1, .line_offset_snap = 1 }));
+    // Same goes when clamping to line end.
+    try eq(3, moveLineUp(buffer, .{ .offset = 3, .count = 1, .line_offset_snap = 5 }));
+    // Actually move up, clamping to line end.
+    try eq(3, moveLineUp(buffer, .{ .offset = 5, .count = 1, .line_offset_snap = 5 }));
+    // Move up, respecting snap offset.
+    try eq(0, moveLineUp(buffer, .{ .offset = 4, .count = 1, .line_offset_snap = 0 }));
+    // Again, checking we can't go up beyond first line.
+    try eq(0, moveLineUp(buffer, .{ .offset = 4, .count = 2, .line_offset_snap = 0 }));
+    // Move up multiple lines.
+    try eq(1, moveLineUp(buffer, .{ .offset = 6, .count = 2, .line_offset_snap = 1 }));
+    try eq(1, moveLineUp(buffer, .{ .offset = 8, .count = 3, .line_offset_snap = 1 }));
+    // Again, but clamp to line end.
+    try eq(3, moveLineUp(buffer, .{ .offset = 9, .count = 3, .line_offset_snap = 5 }));
+}
+
+fn moveLineDown(
+    buffer: []const u8,
+    options: struct { offset: u32, count: u16, line_offset_snap: u16 },
+) u32 {
+    assert(options.offset < buffer.len);
+    var i: u32 = lineHead(buffer, options.offset);
+    for (0..options.count) |_| {
+        const line_tail = lineTail(buffer, i);
+        if (line_tail == buffer.len - 1) break;
+        i = line_tail + 1;
+    }
+    return i + @min(lineSize(buffer, i) - 1, options.line_offset_snap);
+}
+
+test moveLineDown {
+    const eq = std.testing.expectEqual;
+    const buffer = "aaa\na\n\naa\n";
+    try eq(4, moveLineDown(buffer, .{ .offset = 0, .count = 1, .line_offset_snap = 0 }));
+    try eq(5, moveLineDown(buffer, .{ .offset = 3, .count = 1, .line_offset_snap = 3 }));
+    try eq(5, moveLineDown(buffer, .{ .offset = 3, .count = 1, .line_offset_snap = 4 }));
+    try eq(6, moveLineDown(buffer, .{ .offset = 3, .count = 2, .line_offset_snap = 3 }));
+    try eq(9, moveLineDown(buffer, .{ .offset = 3, .count = 3, .line_offset_snap = 3 }));
+    try eq(9, moveLineDown(buffer, .{ .offset = 9, .count = 1, .line_offset_snap = 3 }));
+    try eq(9, moveLineDown(buffer, .{ .offset = 9, .count = 2, .line_offset_snap = 3 }));
 }
 
 fn characterKind(c: u8) enum { whitespace, symbol, alphanumeric } {
@@ -509,96 +657,83 @@ pub fn tick(editor: *Editor) !bool {
         .normal => switch (input) {
             .ascii => |c| switch (c) {
                 'q' => return false, // quit
-                'h' => editor.cursor.moveOne(.left, editor.lines.items),
-                'l' => editor.cursor.moveOne(.right, editor.lines.items),
-                'j' => editor.cursor.moveOne(.down, editor.lines.items),
-                'k' => editor.cursor.moveOne(.up, editor.lines.items),
-                '0' => editor.cursor.moveMax(.left, editor.lines.items),
-                '$' => editor.cursor.moveMax(.right, editor.lines.items),
-                'G' => editor.cursor.moveMax(.down, editor.lines.items),
-                'g' => editor.cursor.moveMax(.up, editor.lines.items),
-                'e' => {
-                    const buffer = editor.buffer.items;
-                    const lines = editor.lines.items;
-                    const offset = editor.cursor.head.toOffset(lines);
-                    const offset_next = wordTailNext(buffer, offset) - offset;
-                    editor.cursor.move(.right, offset_next, lines);
-                },
-                'E' => {
-                    const buffer = editor.buffer.items;
-                    const lines = editor.lines.items;
-                    const offset = editor.cursor.head.toOffset(lines);
-                    const offset_next = tokenTailNext(buffer, offset) - offset;
-                    editor.cursor.move(.right, offset_next, lines);
-                },
-                'b' => {
-                    const buffer = editor.buffer.items;
-                    const lines = editor.lines.items;
-                    const offset = editor.cursor.head.toOffset(lines);
-                    const offset_next = offset - wordHeadPrev(buffer, offset);
-                    editor.cursor.move(.left, offset_next, lines);
-                },
-                'B' => {
-                    const buffer = editor.buffer.items;
-                    const lines = editor.lines.items;
-                    const offset = editor.cursor.head.toOffset(lines);
-                    const offset_next = offset - tokenHeadPrev(buffer, offset);
-                    editor.cursor.move(.left, offset_next, lines);
-                },
-                'w' => {
-                    const buffer = editor.buffer.items;
-                    const lines = editor.lines.items;
-                    const offset = editor.cursor.head.toOffset(lines);
-                    const offset_next = wordHeadNext(buffer, offset) - offset;
-                    editor.cursor.move(.right, offset_next, lines);
-                },
-                'W' => {
-                    const buffer = editor.buffer.items;
-                    const lines = editor.lines.items;
-                    const offset = editor.cursor.head.toOffset(lines);
-                    const offset_next = tokenHeadNext(buffer, offset) - offset;
-                    editor.cursor.move(.right, offset_next, lines);
-                },
+                'h' => editor.cursor.move(.left, 1, editor.buffer.items),
+                'l' => editor.cursor.move(.right, 1, editor.buffer.items),
+                'j' => editor.cursor.move(.down, 1, editor.buffer.items),
+                'k' => editor.cursor.move(.up, 1, editor.buffer.items),
+                '0' => editor.cursor.moveMax(.left, editor.buffer.items),
+                '$' => editor.cursor.moveMax(.right, editor.buffer.items),
+                'G' => editor.cursor.moveMax(.down, editor.buffer.items),
+                'g' => editor.cursor.moveMax(.up, editor.buffer.items),
+                'e' => editor.cursor.update(
+                    editor.buffer.items,
+                    wordTailNext(editor.buffer.items, editor.cursor.head),
+                    .snap_update,
+                ),
+                'E' => editor.cursor.update(
+                    editor.buffer.items,
+                    tokenTailNext(editor.buffer.items, editor.cursor.head),
+                    .snap_update,
+                ),
+                'b' => editor.cursor.update(
+                    editor.buffer.items,
+                    wordHeadPrev(editor.buffer.items, editor.cursor.head),
+                    .snap_update,
+                ),
+                'B' => editor.cursor.update(
+                    editor.buffer.items,
+                    tokenHeadPrev(editor.buffer.items, editor.cursor.head),
+                    .snap_update,
+                ),
+                'w' => editor.cursor.update(
+                    editor.buffer.items,
+                    wordHeadNext(editor.buffer.items, editor.cursor.head),
+                    .snap_update,
+                ),
+                'W' => editor.cursor.update(
+                    editor.buffer.items,
+                    tokenHeadNext(editor.buffer.items, editor.cursor.head),
+                    .snap_update,
+                ),
                 'i' => editor.mode = .insert,
                 'I' => {
-                    const indent_count = editor.indentCount();
-                    editor.cursor.moveMax(.left, editor.lines.items);
-                    editor.cursor.move(.right, indent_count, editor.lines.items);
+                    const offset = lineHead(editor.buffer.items, editor.cursor.head) +
+                        lineIndentation(editor.buffer.items, editor.cursor.head);
+                    editor.cursor.update(editor.buffer.items, offset, .snap_update);
                     editor.mode = .insert;
                 },
                 'a' => {
-                    editor.cursor.moveOne(.right, editor.lines.items);
+                    editor.cursor.move(.right, 1, editor.buffer.items);
                     editor.mode = .insert;
                 },
                 'A' => {
-                    editor.cursor.moveMax(.right, editor.lines.items);
+                    editor.cursor.moveMax(.right, editor.buffer.items);
                     editor.mode = .insert;
                 },
                 'o' => {
-                    const indent_count = editor.indentCount();
-                    editor.cursor.moveMax(.right, editor.lines.items);
+                    editor.cursor.moveMax(.right, editor.buffer.items);
+                    try editor.insert("\n");
+                    for (0..lineIndentation(editor.buffer.items, editor.cursor.head)) |_|
+                        try editor.insert(" ");
                     editor.mode = .insert;
-                    try editor.insert('\n');
-                    for (0..indent_count) |_| try editor.insert(' ');
                 },
                 'O' => {
-                    const indent_count = editor.indentCount();
-                    editor.cursor.moveMax(.left, editor.lines.items);
+                    editor.cursor.moveMax(.left, editor.buffer.items);
+                    try editor.insert("\n");
+                    editor.cursor.move(.up, 1, editor.buffer.items);
+                    for (0..lineIndentation(editor.buffer.items, editor.cursor.head)) |_|
+                        try editor.insert(" ");
                     editor.mode = .insert;
-                    try editor.insert('\n');
-                    editor.cursor.moveOne(.up, editor.lines.items);
-                    for (0..indent_count) |_| try editor.insert(' ');
                 },
                 else => {},
             },
             .chord => |chord| {
-                const lines = editor.lines.items;
                 const scroll = editor.viewport.row_count / 2;
                 const ctrl: Modifiers = .{ .ctrl = true };
                 const mod = chord.modifiers;
                 switch (chord.ascii) {
-                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, lines),
-                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, lines),
+                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.buffer.items),
+                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.buffer.items),
                     'w' => if (mod == ctrl) {
                         try std.Io.Dir.cwd().writeFile(editor.io, .{
                             .data = editor.buffer.items,
@@ -618,25 +753,21 @@ pub fn tick(editor: *Editor) !bool {
         },
         .insert => switch (input) {
             .escape => editor.mode = .normal,
-            .ascii => |c| try editor.insert(c),
-            .backspace => if (editor.cursor.head.toOffset(editor.lines.items) != 0) {
-                editor.cursor.moveOne(.left, editor.lines.items);
-                const offset = editor.cursor.head.toOffset(editor.lines.items);
-                _ = editor.buffer.orderedRemove(offset);
-                try indexLines(editor.buffer.items, &editor.lines);
-                editor.dirty = true;
-            },
-            .tab => for (0..4) |_| try editor.insert(' '),
+            .ascii => |c| try editor.insert(&.{c}),
+            .backspace => try editor.delete(),
+            .tab => try editor.insert("    "),
             .enter => {
-                const indent_count = editor.indentCount();
-                try editor.insert('\n');
-                for (0..indent_count) |_| try editor.insert(' ');
+                const indent_count = lineIndentation(editor.buffer.items, editor.cursor.head);
+                try editor.insert("\n");
+                for (0..indent_count) |_| try editor.insert(" ");
             },
             .chord => {}, // do nothing
             .resize => unreachable,
         },
         .select => {},
     }
+
+    try indexLines(editor.buffer.items, &editor.lines);
 
     // Check viewport dimensions.
     const row_count = editor.viewport.row_count;
@@ -648,28 +779,33 @@ pub fn tick(editor: *Editor) !bool {
 
     // Cursor must be within viewport. Adjust viewport if necessary.
     const last_line = editor.lastLine();
-    if (editor.cursor.head.line_number < editor.viewport.line_number_start) {
-        editor.viewport.line_number_start = editor.cursor.head.line_number;
-    } else if (editor.cursor.head.line_number > last_line) {
-        editor.viewport.line_number_start += editor.cursor.head.line_number - last_line;
+    const position: Position = .fromOffset(editor.cursor.head, editor.lines.items);
+    if (position.line_number < editor.viewport.line_number_start) {
+        editor.viewport.line_number_start = position.line_number;
+    } else if (position.line_number > last_line) {
+        editor.viewport.line_number_start += position.line_number - last_line;
     }
     const last_offset = editor.lastOffset();
-    if (editor.cursor.head.line_offset < editor.viewport.line_offset_start) {
-        editor.viewport.line_offset_start = editor.cursor.head.line_offset;
-    } else if (editor.cursor.head.line_offset > last_offset) {
-        editor.viewport.line_offset_start += editor.cursor.head.line_offset - last_offset;
+    if (position.line_offset < editor.viewport.line_offset_start) {
+        editor.viewport.line_offset_start = position.line_offset;
+    } else if (position.line_offset > last_offset) {
+        editor.viewport.line_offset_start += position.line_offset - last_offset;
     }
 
-    assert(editor.cursor.head.line_offset <= editor.cursor.line_offset_snap);
+    const line_size = lineSize(editor.buffer.items, editor.cursor.head);
+    const line_offset = lineOffset(editor.buffer.items, editor.cursor.head);
+    // Cursor is always at snap line offset or line end.
+    assert(line_offset == @min(editor.cursor.line_offset_snap, line_size - 1));
+    assert(line_offset <= editor.cursor.line_offset_snap);
 
     // Make sure cursor is within the viewport's bounds.
     const line_number_start = editor.viewport.line_number_start;
     const line_offset_start = editor.viewport.line_offset_start;
-    assert(editor.cursor.head.line_number >= line_number_start);
-    assert(editor.cursor.head.line_number <= editor.lastLine());
-    assert(editor.cursor.head.line_offset >= line_offset_start);
-    assert(editor.cursor.head.line_offset <= editor.lastOffset());
-    const cursor_cell = editor.cellFromPosition(editor.cursor.head);
+    assert(position.line_number >= line_number_start);
+    assert(position.line_number <= editor.lastLine());
+    assert(position.line_offset >= line_offset_start);
+    assert(position.line_offset <= editor.lastOffset());
+    const cursor_cell = editor.cellFromPosition(position);
     assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
@@ -688,7 +824,7 @@ fn render(editor: *const Editor) !void {
     const file_bytes = editor.buffer.items;
     const file_name = editor.name;
     const lines = editor.lines.items;
-    const cursor_head = editor.cursor.head;
+    const cursor_head: Position = .fromOffset(editor.cursor.head, lines);
 
     const gutter_width = editor.gutterWidth();
 
@@ -766,15 +902,6 @@ fn gutterWidth(editor: *const Editor) u8 {
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
 fn digitCount(number: u16) u8 {
     return std.math.log10_int(number) + 1;
-}
-
-fn positionFrom(lines: []const Line, offset: u32) Position {
-    for (lines, 0..) |line, line_number| {
-        if (offset <= line.tail) return .{
-            .line_number = @intCast(line_number),
-            .line_offset = @intCast(offset - line.head),
-        };
-    } else @panic("offset not within file bounds");
 }
 
 fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) !void {

@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
             }),
+            // .use_llvm = true, // when using a debugger
         }));
         break :blk &run.step;
     });
