@@ -38,19 +38,52 @@ mode: enum { normal, insert, select },
 dirty: bool = false,
 
 // Viewport state:
-viewport: struct {
-    row_count: u16,
-    col_count: u16,
-    line_number_start: u16, // line number of the top line
-    line_offset_start: u16, // viewport offset into lines (for horizontal scroll)
-},
+viewport: Viewport,
 cursor: Cursor,
 
 // File state:
 name: []const u8,
 buffer: std.ArrayList(u8),
-// TODO: I think this needs removing. We only want one source of truth: buffer.
-lines: std.ArrayList(Line),
+
+const Viewport = struct {
+    row_count: u16,
+    col_count: u16,
+    line_number_start: u16, // line number of the top line
+    line_offset_start: u16, // viewport offset into lines (for horizontal scroll)
+
+    /// Coordinate in the viewport.
+    const Cell = struct {
+        row: u16,
+        col: u16,
+    };
+
+    fn cursorCell(
+        viewport: Viewport,
+        buffer: []const u8,
+        offset: u32,
+        line_number: u16,
+        line_count: u16,
+    ) Cell {
+        return .{
+            .row = line_number - viewport.line_number_start,
+            .col = lineOffset(buffer, offset) - viewport.line_offset_start +
+                gutterWidth(viewport.row_count, line_count),
+        };
+    }
+
+    /// Last line offset visible in the viewport.
+    fn lastOffset(viewport: Viewport, line_count: u16) u16 {
+        const text_width = viewport.col_count -
+            gutterWidth(viewport.row_count, line_count);
+        return viewport.line_offset_start + text_width - 1;
+    }
+
+    /// Last line number visible in the viewport.
+    fn lastLine(viewport: Viewport) u16 {
+        // The extra -1 is for the status line.
+        return viewport.line_number_start + viewport.row_count - 2;
+    }
+};
 
 const Cursor = struct {
     head: u32,
@@ -69,10 +102,10 @@ const Cursor = struct {
 
     const Direction = enum { up, down, left, right };
 
-    /// Max here is in the context of a file Position. Left and right go to the start or end of a
-    /// line respectively. Up and down go to the first or last line respectively. Right is a special
-    /// case. We lock `line_offset_snap` to its max so that as we go up and down lines the cursor is
-    /// clamped to the end of each line.
+    /// Max here is in the context of a file coordinate (line_number, line_offset). Left and right
+    /// go to the start or end of a line respectively. Up and down go to the first or last line
+    /// respectively. Right is a special case. We lock `line_offset_snap` to its max so that as we
+    /// go up and down lines the cursor is clamped to the end of each line.
     fn moveMax(cursor: *Cursor, direction: Direction, buffer: []const u8) void {
         switch (direction) {
             .left => cursor.update(buffer, lineHead(buffer, cursor.head), .snap_update),
@@ -123,56 +156,6 @@ const Error = error{
     ViewportTooSmall,
 };
 
-const Line = struct {
-    head: u32, // line start offset
-    tail: u32, // line end offset (always a newline)
-
-    pub fn bytes(line: Line, file_bytes: []const u8) []const u8 {
-        assert(file_bytes[line.tail] == '\n');
-        return file_bytes[line.head..line.tail];
-    }
-
-    pub fn size(line: Line) u16 {
-        const result: u16 = @intCast(line.tail - line.head + 1); // +1 for index -> count
-        assert(result > 0);
-        return result;
-    }
-};
-
-/// Coordinate in the viewport.
-const Cell = struct {
-    row: u16,
-    col: u16,
-};
-
-fn cellFromPosition(editor: *const Editor, position: Position) Cell {
-    return .{
-        .row = position.line_number - editor.viewport.line_number_start,
-        .col = position.line_offset - editor.viewport.line_offset_start + editor.gutterWidth(),
-    };
-}
-
-/// Coordinate in the file.
-const Position = struct {
-    line_number: u16,
-    line_offset: u16,
-
-    pub fn fromOffset(file_offset: u32, lines: []const Line) Position {
-        // TODO: How much faster would binary search be?
-        for (lines, 0..) |line, line_number| {
-            if (file_offset <= line.tail) return .{
-                .line_number = @intCast(line_number),
-                .line_offset = @intCast(file_offset - line.head),
-            };
-        } else @panic("offset not within file bounds");
-    }
-
-    pub fn toOffset(position: Position, lines: []const Line) u32 {
-        assert(position.line_offset < lines[position.line_number].size());
-        return lines[position.line_number].head + position.line_offset;
-    }
-};
-
 pub fn init(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -190,10 +173,6 @@ pub fn init(
         else => return Error.FileContainsInvalidCharacter,
     };
     if (file_bytes[file_bytes.len - 1] != '\n') return Error.FileNotNewlineTerminated;
-
-    var lines: std.ArrayList(Line) = try .initCapacity(allocator, line_count_max);
-    errdefer lines.deinit(allocator);
-    try indexLines(file_bytes, &lines);
 
     assert(file_bytes.len <= file_size_max);
     var buffer: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
@@ -213,7 +192,6 @@ pub fn init(
         },
         .name = file_name,
         .buffer = buffer,
-        .lines = lines,
         .cursor = .{ .head = 0, .line_offset_snap = 0 },
     };
 
@@ -226,7 +204,6 @@ pub fn init(
 }
 
 pub fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
-    editor.lines.deinit(allocator);
     editor.buffer.deinit(allocator);
 }
 
@@ -405,11 +382,35 @@ test lineOffset {
     try std.testing.expectEqual(0, lineOffset(file, 9)); // line 3: * (end of file newline)
 }
 
+fn lineNumber(buffer: []const u8, offset: u32) u16 {
+    return @intCast(std.mem.countScalar(u8, buffer[0..offset], '\n'));
+}
+
+test lineNumber {
+    try std.testing.expectEqual(0, lineNumber("  yo\n\nhi\n\n", 0));
+    try std.testing.expectEqual(0, lineNumber("  yo\n\nhi\n\n", 3));
+    try std.testing.expectEqual(0, lineNumber("  yo\n\nhi\n\n", 4));
+    try std.testing.expectEqual(1, lineNumber("  yo\n\nhi\n\n", 5));
+    try std.testing.expectEqual(3, lineNumber("  yo\n\nhi\n\n", 9));
+}
+
+fn lineCount(buffer: []const u8) u16 {
+    return @intCast(std.mem.countScalar(u8, buffer, '\n'));
+}
+
+test lineCount {
+    try std.testing.expectEqual(0, lineCount(""));
+    try std.testing.expectEqual(1, lineCount("\n"));
+    try std.testing.expectEqual(2, lineCount("\n\n"));
+    try std.testing.expectEqual(2, lineCount("yo\nwhat's\nup?"));
+    try std.testing.expectEqual(4, lineCount("  yo\n\nhi\n\n"));
+}
+
 fn lineHead(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    var i: u32 = offset;
-    while (i > 0 and buffer[i - 1] != '\n') i -= 1;
-    return i;
+    return @intCast(
+        if (std.mem.findScalarLast(u8, buffer[0..offset], '\n')) |i| i + 1 else 0,
+    );
 }
 
 test lineHead {
@@ -422,9 +423,7 @@ test lineHead {
 
 fn lineTail(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    var i: u32 = offset;
-    while (i < buffer.len - 1 and buffer[i] != '\n') i += 1;
-    return i;
+    return @intCast(if (std.mem.findScalarPos(u8, buffer, offset, '\n')) |i| i else buffer.len - 1);
 }
 
 test lineTail {
@@ -712,17 +711,17 @@ pub fn tick(editor: *Editor) !bool {
                 },
                 'o' => {
                     editor.cursor.moveMax(.right, editor.buffer.items);
+                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.head);
                     try editor.insert("\n");
-                    for (0..lineIndentation(editor.buffer.items, editor.cursor.head)) |_|
-                        try editor.insert(" ");
+                    for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
                 'O' => {
                     editor.cursor.moveMax(.left, editor.buffer.items);
+                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.head);
                     try editor.insert("\n");
                     editor.cursor.move(.up, 1, editor.buffer.items);
-                    for (0..lineIndentation(editor.buffer.items, editor.cursor.head)) |_|
-                        try editor.insert(" ");
+                    for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
                 else => {},
@@ -767,80 +766,95 @@ pub fn tick(editor: *Editor) !bool {
         .select => {},
     }
 
-    try indexLines(editor.buffer.items, &editor.lines);
-
-    // Check viewport dimensions.
+    const buffer = editor.buffer.items;
+    const offset = editor.cursor.head;
+    const line_count = lineCount(buffer);
+    const line_number = lineNumber(buffer, offset);
+    const line_offset = lineOffset(buffer, offset);
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
+    const gutter_width = gutterWidth(row_count, line_count);
+
+    // Check viewport dimensions.
     if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
     if (row_count > row_count_max) return Error.ViewportTooLarge;
-    if (col_count < editor.gutterWidth() + 1) return Error.ViewportTooSmall; // at least one char
+    if (col_count < gutter_width + 1)
+        return Error.ViewportTooSmall; // at least one char
     if (col_count > col_count_max) return Error.ViewportTooLarge;
 
-    // Cursor must be within viewport. Adjust viewport if necessary.
-    const last_line = editor.lastLine();
-    const position: Position = .fromOffset(editor.cursor.head, editor.lines.items);
-    if (position.line_number < editor.viewport.line_number_start) {
-        editor.viewport.line_number_start = position.line_number;
-    } else if (position.line_number > last_line) {
-        editor.viewport.line_number_start += position.line_number - last_line;
+    // If cursor moved out of viewport, move viewport.
+    const last_line = editor.viewport.lastLine();
+    if (line_number < editor.viewport.line_number_start) {
+        editor.viewport.line_number_start = line_number;
+    } else if (line_number > last_line) {
+        editor.viewport.line_number_start += line_number - last_line;
     }
-    const last_offset = editor.lastOffset();
-    if (position.line_offset < editor.viewport.line_offset_start) {
-        editor.viewport.line_offset_start = position.line_offset;
-    } else if (position.line_offset > last_offset) {
-        editor.viewport.line_offset_start += position.line_offset - last_offset;
+    const last_offset = editor.viewport.lastOffset(line_count);
+    if (line_offset < editor.viewport.line_offset_start) {
+        editor.viewport.line_offset_start = line_offset;
+    } else if (line_offset > last_offset) {
+        editor.viewport.line_offset_start += line_offset - last_offset;
     }
 
-    const line_size = lineSize(editor.buffer.items, editor.cursor.head);
-    const line_offset = lineOffset(editor.buffer.items, editor.cursor.head);
     // Cursor is always at snap line offset or line end.
-    assert(line_offset == @min(editor.cursor.line_offset_snap, line_size - 1));
+    assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(buffer, offset) - 1));
     assert(line_offset <= editor.cursor.line_offset_snap);
 
     // Make sure cursor is within the viewport's bounds.
-    const line_number_start = editor.viewport.line_number_start;
-    const line_offset_start = editor.viewport.line_offset_start;
-    assert(position.line_number >= line_number_start);
-    assert(position.line_number <= editor.lastLine());
-    assert(position.line_offset >= line_offset_start);
-    assert(position.line_offset <= editor.lastOffset());
-    const cursor_cell = editor.cellFromPosition(position);
-    assert(cursor_cell.col >= editor.gutterWidth()); // right of line numbers
-    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
+    assert(line_number >= editor.viewport.line_number_start);
+    assert(line_number <= editor.viewport.lastLine());
+    assert(line_offset >= editor.viewport.line_offset_start);
+    assert(line_offset <= editor.viewport.lastOffset(line_count));
 
-    try editor.render();
+    try editor.render(.{
+        .line_count = line_count,
+        .gutter_width = gutter_width,
+        .cursor_line_number = line_number,
+        .cursor_line_offset = line_offset,
+    });
 
     return true;
 }
 
-fn render(editor: *const Editor) !void {
+fn render(editor: *const Editor, params: struct {
+    line_count: u16,
+    gutter_width: u8,
+    cursor_line_number: u16,
+    cursor_line_offset: u16,
+}) !void {
     const writer = editor.writer;
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
     const line_number_start = editor.viewport.line_number_start;
     const line_offset_start = editor.viewport.line_offset_start;
-    const file_bytes = editor.buffer.items;
+    const buffer = editor.buffer.items;
     const file_name = editor.name;
-    const lines = editor.lines.items;
-    const cursor_head: Position = .fromOffset(editor.cursor.head, lines);
 
-    const gutter_width = editor.gutterWidth();
+    const cursor_line_number = params.cursor_line_number;
+    const cursor_line_offset = params.cursor_line_offset;
+    const line_count = params.line_count;
+    const gutter_width = params.gutter_width;
 
     // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
     try writer.writeAll("\x1b[2J");
     // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
     try writer.writeAll("\x1b[H");
 
-    // The -1 below is to leave room for the status line.
+    const line_head_first = blk: {
+        const head = lineHead(buffer, editor.cursor.head);
+        var i: u32 = head;
+        for (0..cursor_line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
+        break :blk i;
+    };
+    assert(buffer.len > 0);
+    // We omit the final newline below so that the iterator doesn't give us an extra empty string at
+    // the end. E.g. doing a `splitScalar(u8, "yo\n", '\n')` gives us "yo" AND "" before null.
+    var it = std.mem.splitScalar(u8, buffer[line_head_first .. buffer.len - 1], '\n');
     for (line_number_start..line_number_start + row_count - 1) |line_number| {
-        const line = if (line_number < lines.len) blk: {
-            const line_full = lines[line_number].bytes(file_bytes);
-            if (line_offset_start > line_full.len) break :blk "";
-            const line = line_full[line_offset_start..];
-            const line_size = @min(line.len, col_count - gutter_width);
-            break :blk line_full[line_offset_start .. line_offset_start + line_size];
+        const line = if (it.next()) |line| blk: {
+            if (line_offset_start >= line.len) break :blk "";
+            const cropped = line[line_offset_start..];
+            break :blk cropped[0..@min(cropped.len, col_count - gutter_width)];
         } else "~";
         try writer.print(
             "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
@@ -854,8 +868,8 @@ fn render(editor: *const Editor) !void {
 
     // Draw status line. Displayed line number and offset should be indexed from 1.
     const cursor_coordinates_col_count =
-        digitCount(cursor_head.line_number + 1) +
-        digitCount(cursor_head.line_offset + 1) +
+        digitCount(cursor_line_number + 1) +
+        digitCount(cursor_line_offset + 1) +
         1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
     var min_size = file_name.len;
     const dirty_indicator = " [+]";
@@ -866,10 +880,18 @@ fn render(editor: *const Editor) !void {
     try writer.writeAll(file_name);
     if (editor.dirty) try writer.writeAll(dirty_indicator);
     try writer.splatByteAll(' ', col_count - min_size);
-    try writer.print(" {d},{d}", .{ cursor_head.line_number + 1, cursor_head.line_offset + 1 });
+    try writer.print(" {d},{d}", .{ cursor_line_number + 1, cursor_line_offset + 1 });
 
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
-    const cursor_cell = editor.cellFromPosition(cursor_head);
+    const cursor_cell = editor.viewport.cursorCell(
+        editor.buffer.items,
+        editor.cursor.head,
+        cursor_line_number,
+        line_count,
+    );
+    assert(cursor_cell.col >= gutter_width); // right of line numbers
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
     const cursor_style: u8 = switch (editor.mode) {
         .normal,
         .select,
@@ -882,44 +904,14 @@ fn render(editor: *const Editor) !void {
     try writer.flush();
 }
 
-/// Last line number visible in the viewport.
-fn lastLine(editor: *const Editor) u16 {
-    // The extra -1 is for the status line.
-    return editor.viewport.line_number_start + editor.viewport.row_count - 2;
-}
-
-/// Last line offset (col) visible in the viewport.
-fn lastOffset(editor: *const Editor) u16 {
-    const text_width = editor.viewport.col_count - editor.gutterWidth();
-    return editor.viewport.line_offset_start + text_width - 1;
-}
-
-fn gutterWidth(editor: *const Editor) u8 {
+fn gutterWidth(row_count: u16, line_count: u16) u8 {
     // Determine gutter width, enough digits for the greatest line number plus one for padding.
-    return digitCount(@intCast(@max(editor.viewport.row_count, editor.lines.items.len))) + 1;
+    return digitCount(@intCast(@max(row_count, line_count))) + 1;
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
 fn digitCount(number: u16) u8 {
     return std.math.log10_int(number) + 1;
-}
-
-fn indexLines(file_bytes: []const u8, lines: *std.ArrayList(Line)) !void {
-    assert(file_bytes[file_bytes.len - 1] == '\n'); // make sure file is newline terminated
-
-    lines.clearRetainingCapacity();
-    var head: u32 = 0;
-    while (head < file_bytes.len) {
-        var tail = head;
-        while (tail < file_bytes.len and file_bytes[tail] != '\n') tail += 1;
-        if (tail - head > line_offset_max) return Error.LineTooLong;
-        if (lines.items.len == line_count_max) return Error.FileTooManyLines;
-        lines.appendAssumeCapacity(.{ .head = head, .tail = tail });
-        head = tail + 1;
-    }
-
-    assert(lines.items[0].head == 0);
-    assert(lines.last().?.tail == file_bytes.len - 1);
 }
 
 test fuzzer {
@@ -1276,30 +1268,4 @@ test "go to start/end of line" {
     , stripping.written());
 
     try std.testing.expect(try editor.tick() == false); // process the q, exited
-}
-
-test indexLines {
-    const allocator = std.testing.allocator;
-
-    var lines: std.ArrayList(Line) = try .initCapacity(
-        allocator,
-        std.mem.countScalar(u8, hello_c, '\n'),
-    );
-    defer lines.deinit(allocator);
-
-    try indexLines(hello_c, &lines);
-    try std.testing.expect(lines.items.len == 6);
-    try std.testing.expect(lines.items[0].head == 0);
-    try std.testing.expect(lines.items[0].tail == 18);
-    try std.testing.expect(lines.items[0].size() == 19);
-    try std.testing.expect(lines.last().?.tail == hello_c.len - 1);
-
-    // This function should never be called with an empty slice. Empty files are handled by
-    // inserting a single newline.
-    const empty_file = "\n";
-    try indexLines(empty_file, &lines);
-    try std.testing.expect(lines.items.len == 1);
-    try std.testing.expect(lines.items[0].head == 0);
-    try std.testing.expect(lines.items[0].tail == 0);
-    try std.testing.expect(lines.items[0].size() == 1);
 }
