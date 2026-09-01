@@ -57,24 +57,16 @@ const Viewport = struct {
         col: u16,
     };
 
-    fn cursorCell(
-        viewport: Viewport,
-        buffer: []const u8,
-        offset: u32,
-        line_number: u16,
-        line_count: u16,
-    ) Cell {
+    fn cursorCell(viewport: Viewport, buffer: []const u8, offset: u32, line_number: u16) Cell {
         return .{
             .row = line_number - viewport.line_number_start,
-            .col = lineOffset(buffer, offset) - viewport.line_offset_start +
-                gutterWidth(viewport.row_count, line_count),
+            .col = lineOffset(buffer, offset) - viewport.line_offset_start + viewport.gutterWidth(),
         };
     }
 
     /// Last line offset visible in the viewport.
-    fn lastOffset(viewport: Viewport, line_count: u16) u16 {
-        const text_width = viewport.col_count -
-            gutterWidth(viewport.row_count, line_count);
+    fn lastOffset(viewport: Viewport) u16 {
+        const text_width = viewport.col_count - viewport.gutterWidth();
         return viewport.line_offset_start + text_width - 1;
     }
 
@@ -82,6 +74,12 @@ const Viewport = struct {
     fn lastLine(viewport: Viewport) u16 {
         // The extra -1 is for the status line.
         return viewport.line_number_start + viewport.row_count - 2;
+    }
+
+    /// Determine gutter width: enough digits for the greatest visible line number plus one for
+    /// padding.
+    fn gutterWidth(viewport: Viewport) u8 {
+        return digitCount(@intCast(viewport.line_number_start + viewport.row_count - 1)) + 1;
     }
 };
 
@@ -392,18 +390,6 @@ test lineNumber {
     try std.testing.expectEqual(0, lineNumber("  yo\n\nhi\n\n", 4));
     try std.testing.expectEqual(1, lineNumber("  yo\n\nhi\n\n", 5));
     try std.testing.expectEqual(3, lineNumber("  yo\n\nhi\n\n", 9));
-}
-
-fn lineCount(buffer: []const u8) u16 {
-    return @intCast(std.mem.countScalar(u8, buffer, '\n'));
-}
-
-test lineCount {
-    try std.testing.expectEqual(0, lineCount(""));
-    try std.testing.expectEqual(1, lineCount("\n"));
-    try std.testing.expectEqual(2, lineCount("\n\n"));
-    try std.testing.expectEqual(2, lineCount("yo\nwhat's\nup?"));
-    try std.testing.expectEqual(4, lineCount("  yo\n\nhi\n\n"));
 }
 
 fn lineHead(buffer: []const u8, offset: u32) u32 {
@@ -768,17 +754,15 @@ pub fn tick(editor: *Editor) !bool {
 
     const buffer = editor.buffer.items;
     const offset = editor.cursor.head;
-    const line_count = lineCount(buffer);
     const line_number = lineNumber(buffer, offset);
     const line_offset = lineOffset(buffer, offset);
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
-    const gutter_width = gutterWidth(row_count, line_count);
 
     // Check viewport dimensions.
     if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
     if (row_count > row_count_max) return Error.ViewportTooLarge;
-    if (col_count < gutter_width + 1)
+    if (col_count < editor.viewport.gutterWidth() + 1)
         return Error.ViewportTooSmall; // at least one char
     if (col_count > col_count_max) return Error.ViewportTooLarge;
 
@@ -789,7 +773,7 @@ pub fn tick(editor: *Editor) !bool {
     } else if (line_number > last_line) {
         editor.viewport.line_number_start += line_number - last_line;
     }
-    const last_offset = editor.viewport.lastOffset(line_count);
+    const last_offset = editor.viewport.lastOffset();
     if (line_offset < editor.viewport.line_offset_start) {
         editor.viewport.line_offset_start = line_offset;
     } else if (line_offset > last_offset) {
@@ -804,36 +788,22 @@ pub fn tick(editor: *Editor) !bool {
     assert(line_number >= editor.viewport.line_number_start);
     assert(line_number <= editor.viewport.lastLine());
     assert(line_offset >= editor.viewport.line_offset_start);
-    assert(line_offset <= editor.viewport.lastOffset(line_count));
+    assert(line_offset <= editor.viewport.lastOffset());
 
-    try editor.render(.{
-        .line_count = line_count,
-        .gutter_width = gutter_width,
-        .cursor_line_number = line_number,
-        .cursor_line_offset = line_offset,
-    });
+    try editor.render(.{ .line_number = line_number, .line_offset = line_offset });
 
     return true;
 }
 
-fn render(editor: *const Editor, params: struct {
-    line_count: u16,
-    gutter_width: u8,
-    cursor_line_number: u16,
-    cursor_line_offset: u16,
-}) !void {
+fn render(editor: *const Editor, cursor: struct { line_number: u16, line_offset: u16 }) !void {
     const writer = editor.writer;
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
+    const gutter_width = editor.viewport.gutterWidth();
     const line_number_start = editor.viewport.line_number_start;
     const line_offset_start = editor.viewport.line_offset_start;
     const buffer = editor.buffer.items;
     const file_name = editor.name;
-
-    const cursor_line_number = params.cursor_line_number;
-    const cursor_line_offset = params.cursor_line_offset;
-    const line_count = params.line_count;
-    const gutter_width = params.gutter_width;
 
     // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
     try writer.writeAll("\x1b[2J");
@@ -843,7 +813,7 @@ fn render(editor: *const Editor, params: struct {
     const line_head_first = blk: {
         const head = lineHead(buffer, editor.cursor.head);
         var i: u32 = head;
-        for (0..cursor_line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
+        for (0..cursor.line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
         break :blk i;
     };
     assert(buffer.len > 0);
@@ -868,8 +838,8 @@ fn render(editor: *const Editor, params: struct {
 
     // Draw status line. Displayed line number and offset should be indexed from 1.
     const cursor_coordinates_col_count =
-        digitCount(cursor_line_number + 1) +
-        digitCount(cursor_line_offset + 1) +
+        digitCount(cursor.line_number + 1) +
+        digitCount(cursor.line_offset + 1) +
         1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
     var min_size = file_name.len;
     const dirty_indicator = " [+]";
@@ -880,14 +850,13 @@ fn render(editor: *const Editor, params: struct {
     try writer.writeAll(file_name);
     if (editor.dirty) try writer.writeAll(dirty_indicator);
     try writer.splatByteAll(' ', col_count - min_size);
-    try writer.print(" {d},{d}", .{ cursor_line_number + 1, cursor_line_offset + 1 });
+    try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
 
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     const cursor_cell = editor.viewport.cursorCell(
         editor.buffer.items,
         editor.cursor.head,
-        cursor_line_number,
-        line_count,
+        cursor.line_number,
     );
     assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
@@ -902,11 +871,6 @@ fn render(editor: *const Editor, params: struct {
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
 
     try writer.flush();
-}
-
-fn gutterWidth(row_count: u16, line_count: u16) u8 {
-    // Determine gutter width, enough digits for the greatest line number plus one for padding.
-    return digitCount(@intCast(@max(row_count, line_count))) + 1;
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
