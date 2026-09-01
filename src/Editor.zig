@@ -358,9 +358,7 @@ test lineIndentation {
 
 fn lineOffset(buffer: []const u8, offset: u32) u16 {
     assert(offset < buffer.len);
-    const line_head = lineHead(buffer, offset);
-    assert(line_head <= offset);
-    return @intCast(offset - line_head);
+    return @intCast(offset - lineHead(buffer, offset));
 }
 
 test lineOffset {
@@ -394,9 +392,7 @@ test lineNumber {
 
 fn lineHead(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    return @intCast(
-        if (std.mem.findScalarLast(u8, buffer[0..offset], '\n')) |i| i + 1 else 0,
-    );
+    return @intCast(if (std.mem.findScalarLast(u8, buffer[0..offset], '\n')) |i| i + 1 else 0);
 }
 
 test lineHead {
@@ -424,10 +420,7 @@ test lineTail {
 /// the buffer) and ends with a newline. The ending newline is part of the line.
 fn lineSize(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    const line_head = lineHead(buffer, offset);
-    var i: u32 = line_head;
-    while (i < buffer.len and buffer[i] != '\n') i += 1;
-    return i - line_head + 1; // +1 for offset -> size
+    return lineTail(buffer, offset) - lineHead(buffer, offset) + 1; // +1 for offset -> size
 }
 
 test lineSize {
