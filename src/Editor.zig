@@ -706,6 +706,7 @@ pub fn tick(editor: *Editor) !bool {
                     for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
+                // Enable/disable selection.
                 'v' => editor.cursor.anchor =
                     if (editor.cursor.anchor != null) null else editor.cursor.offset,
                 else => {},
@@ -805,6 +806,8 @@ fn render(editor: *const Editor, cursor: Position) !void {
     const buffer = editor.buffer.items;
     const file_name = editor.name;
 
+    // Hide cursor.
+    try writer.writeAll("\x1b[?25l");
     // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
     try writer.writeAll("\x1b[2J");
     // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
@@ -886,7 +889,6 @@ fn render(editor: *const Editor, cursor: Position) !void {
     try writer.splatByteAll(' ', col_count - min_size);
     try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
 
-    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     const cursor_cell = editor.viewport.cursorCell(cursor);
     assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
@@ -895,8 +897,11 @@ fn render(editor: *const Editor, cursor: Position) !void {
         .normal => 2, // steady block
         .insert => 6, // steady vertical bar
     };
+    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     try writer.print("\x1b[{d}\x20q", .{cursor_style});
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
+    // Unhide cursor.
+    try writer.writeAll("\x1b[?25h");
 
     try writer.flush();
 }
@@ -1085,7 +1090,8 @@ test "rendering: hello_c" {
     defer editor.deinit(allocator);
 
     try std.testing.expect(try editor.tick() == false); // last tick: reports false on quit
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 #include <stdio.h>
         \\ 2 
@@ -1101,6 +1107,7 @@ test "rendering: hello_c" {
         \\hello.c                          1,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 }
 
@@ -1116,7 +1123,8 @@ test "rendering: empty" {
 
     try std.testing.expect(try editor.tick() == false);
 
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 
         \\ 2 ~
@@ -1132,6 +1140,7 @@ test "rendering: empty" {
         \\empty.zig                        1,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 }
 
@@ -1148,7 +1157,8 @@ test "go to start/end of file" {
     var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
     defer editor.deinit(allocator);
 
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\1 #include <stdio.h>
         \\2 
@@ -1157,11 +1167,13 @@ test "go to start/end of file" {
         \\hello.c                          1,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
     try std.testing.expect(try editor.tick() == true); // process the G
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\3 int main() {
         \\4   printf("Hello, world!\n");
@@ -1170,11 +1182,13 @@ test "go to start/end of file" {
         \\hello.c                          6,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[4;3H" // cursor coordinates at end of file: 3, 2 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
     try std.testing.expect(try editor.tick() == true); // process the g
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\1 #include <stdio.h>
         \\2 
@@ -1183,6 +1197,7 @@ test "go to start/end of file" {
         \\hello.c                          1,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
     try std.testing.expect(try editor.tick() == false); // process the q, exited
@@ -1201,7 +1216,8 @@ test "go to start/end of line" {
     var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
     defer editor.deinit(allocator);
 
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 #include 
         \\ 2 
@@ -1217,11 +1233,13 @@ test "go to start/end of line" {
         \\hello.c  1,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
     try std.testing.expect(try editor.tick() == true); // process the $
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 stdio.h>
         \\ 2 
@@ -1237,11 +1255,13 @@ test "go to start/end of line" {
         \\hello.c 1,19
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;12H" // cursor coordinates at end of line: 0, 11 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
     stripping.out.clearRetainingCapacity(); // clear what we've written
     try std.testing.expect(try editor.tick() == true); // process the 0
-    try std.testing.expectEqualSlices(u8, "\x1b[2J" ++ // clear screen
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
         "\x1b[H" ++ // place cursor at top left
         \\ 1 #include 
         \\ 2 
@@ -1257,6 +1277,7 @@ test "go to start/end of line" {
         \\hello.c  1,1
     ++ "\x1b[2\x20q" // set cursor style (steady block)
     ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
     try std.testing.expect(try editor.tick() == false); // process the q, exited
