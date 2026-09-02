@@ -34,7 +34,7 @@ io: std.Io,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
-mode: enum { normal, insert, select },
+mode: enum { normal, insert },
 dirty: bool = false,
 
 // Viewport state:
@@ -86,7 +86,8 @@ const Viewport = struct {
 };
 
 const Cursor = struct {
-    head: u32,
+    offset: u32,
+    anchor: ?u32,
     line_offset_snap: u16,
 
     fn update(
@@ -95,9 +96,9 @@ const Cursor = struct {
         offset: u32,
         kind: enum { snap_update, snap_remain },
     ) void {
-        assert(cursor.head < buffer.len);
-        cursor.head = @min(offset, buffer.len - 1);
-        if (kind == .snap_update) cursor.line_offset_snap = lineOffset(buffer, cursor.head);
+        assert(cursor.offset < buffer.len);
+        cursor.offset = @min(offset, buffer.len - 1);
+        if (kind == .snap_update) cursor.line_offset_snap = lineOffset(buffer, cursor.offset);
     }
 
     const Direction = enum { up, down, left, right };
@@ -108,9 +109,9 @@ const Cursor = struct {
     /// go up and down lines the cursor is clamped to the end of each line.
     fn moveMax(cursor: *Cursor, direction: Direction, buffer: []const u8) void {
         switch (direction) {
-            .left => cursor.update(buffer, lineHead(buffer, cursor.head), .snap_update),
+            .left => cursor.update(buffer, lineHead(buffer, cursor.offset), .snap_update),
             .right => {
-                cursor.update(buffer, lineTail(buffer, cursor.head), .snap_update);
+                cursor.update(buffer, lineTail(buffer, cursor.offset), .snap_update);
                 cursor.line_offset_snap = line_offset_max;
             },
             .down => {
@@ -127,15 +128,15 @@ const Cursor = struct {
 
     fn move(cursor: *Cursor, direction: Direction, count: u32, buffer: []const u8) void {
         switch (direction) {
-            .left => cursor.update(buffer, cursor.head -| count, .snap_update),
-            .right => cursor.update(buffer, cursor.head +| count, .snap_update),
+            .left => cursor.update(buffer, cursor.offset -| count, .snap_update),
+            .right => cursor.update(buffer, cursor.offset +| count, .snap_update),
             .up => cursor.update(buffer, moveLineUp(buffer, .{
-                .offset = cursor.head,
+                .offset = cursor.offset,
                 .count = @intCast(count),
                 .line_offset_snap = cursor.line_offset_snap,
             }), .snap_remain),
             .down => cursor.update(buffer, moveLineDown(buffer, .{
-                .offset = cursor.head,
+                .offset = cursor.offset,
                 .count = @intCast(count),
                 .line_offset_snap = cursor.line_offset_snap,
             }), .snap_remain),
@@ -192,7 +193,7 @@ pub fn init(
         },
         .name = file_name,
         .buffer = buffer,
-        .cursor = .{ .head = 0, .line_offset_snap = 0 },
+        .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
     };
 
     // First input must be viewport dimensions.
@@ -329,16 +330,16 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
 
 fn insert(editor: *Editor, text: []const u8) !void {
     assert(text.len > 0);
-    assert(editor.cursor.head < editor.buffer.items.len);
-    try editor.buffer.insertSliceBounded(editor.cursor.head, text);
+    assert(editor.cursor.offset < editor.buffer.items.len);
+    try editor.buffer.insertSliceBounded(editor.cursor.offset, text);
     editor.cursor.move(.right, @intCast(text.len), editor.buffer.items);
     editor.dirty = true;
 }
 
 fn delete(editor: *Editor) !void {
-    if (editor.cursor.head == 0) return;
+    if (editor.cursor.offset == 0) return;
     editor.cursor.move(.left, 1, editor.buffer.items);
-    _ = editor.buffer.orderedRemove(editor.cursor.head);
+    _ = editor.buffer.orderedRemove(editor.cursor.offset);
     editor.dirty = true;
 }
 
@@ -647,38 +648,38 @@ pub fn tick(editor: *Editor) !bool {
                 'g' => editor.cursor.moveMax(.up, editor.buffer.items),
                 'e' => editor.cursor.update(
                     editor.buffer.items,
-                    wordTailNext(editor.buffer.items, editor.cursor.head),
+                    wordTailNext(editor.buffer.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'E' => editor.cursor.update(
                     editor.buffer.items,
-                    tokenTailNext(editor.buffer.items, editor.cursor.head),
+                    tokenTailNext(editor.buffer.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'b' => editor.cursor.update(
                     editor.buffer.items,
-                    wordHeadPrev(editor.buffer.items, editor.cursor.head),
+                    wordHeadPrev(editor.buffer.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'B' => editor.cursor.update(
                     editor.buffer.items,
-                    tokenHeadPrev(editor.buffer.items, editor.cursor.head),
+                    tokenHeadPrev(editor.buffer.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'w' => editor.cursor.update(
                     editor.buffer.items,
-                    wordHeadNext(editor.buffer.items, editor.cursor.head),
+                    wordHeadNext(editor.buffer.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'W' => editor.cursor.update(
                     editor.buffer.items,
-                    tokenHeadNext(editor.buffer.items, editor.cursor.head),
+                    tokenHeadNext(editor.buffer.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'i' => editor.mode = .insert,
                 'I' => {
-                    const offset = lineHead(editor.buffer.items, editor.cursor.head) +
-                        lineIndentation(editor.buffer.items, editor.cursor.head);
+                    const offset = lineHead(editor.buffer.items, editor.cursor.offset) +
+                        lineIndentation(editor.buffer.items, editor.cursor.offset);
                     editor.cursor.update(editor.buffer.items, offset, .snap_update);
                     editor.mode = .insert;
                 },
@@ -692,19 +693,21 @@ pub fn tick(editor: *Editor) !bool {
                 },
                 'o' => {
                     editor.cursor.moveMax(.right, editor.buffer.items);
-                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.head);
+                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
                     try editor.insert("\n");
                     for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
                 'O' => {
                     editor.cursor.moveMax(.left, editor.buffer.items);
-                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.head);
+                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
                     try editor.insert("\n");
                     editor.cursor.move(.up, 1, editor.buffer.items);
                     for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
+                'v' => editor.cursor.anchor =
+                    if (editor.cursor.anchor != null) null else editor.cursor.offset,
                 else => {},
             },
             .chord => |chord| {
@@ -724,31 +727,33 @@ pub fn tick(editor: *Editor) !bool {
                     else => {},
                 }
             },
+            .escape => editor.cursor.anchor = null,
             .backspace,
             .enter,
-            .escape,
             .tab,
             => {}, // do nothing
             .resize => unreachable,
         },
-        .insert => switch (input) {
-            .escape => editor.mode = .normal,
-            .ascii => |c| try editor.insert(&.{c}),
-            .backspace => try editor.delete(),
-            .tab => try editor.insert("    "),
-            .enter => {
-                const indent_count = lineIndentation(editor.buffer.items, editor.cursor.head);
-                try editor.insert("\n");
-                for (0..indent_count) |_| try editor.insert(" ");
-            },
-            .chord => {}, // do nothing
-            .resize => unreachable,
+        .insert => {
+            editor.cursor.anchor = null;
+            switch (input) {
+                .escape => editor.mode = .normal,
+                .ascii => |c| try editor.insert(&.{c}),
+                .backspace => try editor.delete(),
+                .tab => try editor.insert("    "),
+                .enter => {
+                    const indent_count = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    try editor.insert("\n");
+                    for (0..indent_count) |_| try editor.insert(" ");
+                },
+                .chord => {}, // do nothing
+                .resize => unreachable,
+            }
         },
-        .select => {},
     }
 
     const buffer = editor.buffer.items;
-    const offset = editor.cursor.head;
+    const offset = editor.cursor.offset;
     const line_number = lineNumber(buffer, offset);
     const line_offset = lineOffset(buffer, offset);
     const row_count = editor.viewport.row_count;
@@ -805,30 +810,64 @@ fn render(editor: *const Editor, cursor: Position) !void {
     // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
     try writer.writeAll("\x1b[H");
 
-    const line_head_first = blk: {
-        const head = lineHead(buffer, editor.cursor.head);
-        var i: u32 = head;
+    assert(buffer.len > 0);
+    var line_head = blk: {
+        var i: u32 = lineHead(buffer, editor.cursor.offset);
         for (0..cursor.line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
         break :blk i;
     };
-    assert(buffer.len > 0);
-    // We omit the final newline below so that the iterator doesn't give us an extra empty string at
-    // the end. E.g. doing a `splitScalar(u8, "yo\n", '\n')` gives us "yo" AND "" before null.
-    var it = std.mem.splitScalar(u8, buffer[line_head_first .. buffer.len - 1], '\n');
+    var highlight = false;
     for (line_number_start..line_number_start + row_count - 1) |line_number| {
-        const line = if (it.next()) |line| blk: {
-            if (line_offset_start >= line.len) break :blk "";
-            const cropped = line[line_offset_start..];
-            break :blk cropped[0..@min(cropped.len, col_count - gutter_width)];
-        } else "~";
-        try writer.print(
-            "{[line_number]d: >[gutter_width]} {[line]s}\r\n",
-            .{
-                .line_number = line_number + 1, // displayed line number indexed from 1
-                .gutter_width = gutter_width - 1, // extra space already in format string
-                .line = line,
-            },
-        );
+        try writer.print("{[line_number]d: >[gutter_width]} ", .{ // draw gutter
+            .line_number = line_number + 1, // displayed line number indexed from 1
+            .gutter_width = gutter_width - 1, // space suffix already in format string
+        });
+
+        if (line_head < buffer.len) {
+            const line_tail = lineTail(buffer, line_head);
+
+            // Handle horizontal scroll.
+            const text_width = col_count - gutter_width;
+            const cropped_head = @min(line_head + line_offset_start, line_tail);
+            const cropped_tail = @min(line_tail, cropped_head + text_width);
+
+            // Handle selection highlighting.
+            if (editor.cursor.anchor) |anchor| {
+                const esc_highlight =
+                    "\x1b[38;2;40;40;40m" ++ // dark foreground
+                    "\x1b[48;2;200;200;200m"; // light gray background
+                const esc_reset = "\x1b[0m"; // reset
+                const highlight_head = @min(anchor, editor.cursor.offset);
+                const highlight_tail = @max(anchor, editor.cursor.offset);
+
+                // Should we have already started/stopped highlighting? E.g. anchor not within
+                // cropped line.
+                if (highlight_head < cropped_head) highlight = true;
+                if (highlight_tail < cropped_head) highlight = false;
+
+                if (highlight) try writer.writeAll(esc_highlight);
+
+                for (cropped_head..cropped_tail) |offset| {
+                    if (offset == highlight_head) {
+                        highlight = true;
+                        try writer.writeAll(esc_highlight);
+                    }
+
+                    try writer.writeByte(buffer[offset]);
+
+                    if (offset == highlight_tail) {
+                        highlight = false;
+                        try writer.writeAll(esc_reset);
+                    }
+                }
+
+                // Reset before printing the next line so that line numbers aren't highlighted.
+                if (highlight) try writer.writeAll(esc_reset);
+            } else try writer.writeAll(buffer[cropped_head..cropped_tail]); // strips newline
+
+            line_head = line_tail + 1;
+        } else try writer.writeByte('~');
+        try writer.writeAll("\r\n");
     }
 
     // Draw status line. Displayed line number and offset should be indexed from 1.
@@ -853,9 +892,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
     const cursor_style: u8 = switch (editor.mode) {
-        .normal,
-        .select,
-        => 2, // steady block
+        .normal => 2, // steady block
         .insert => 6, // steady vertical bar
     };
     try writer.print("\x1b[{d}\x20q", .{cursor_style});
