@@ -45,6 +45,8 @@ cursor: Cursor,
 name: []const u8,
 buffer: std.ArrayList(u8),
 
+const Position = struct { line_number: u16, line_offset: u16 };
+
 const Viewport = struct {
     row_count: u16,
     col_count: u16,
@@ -57,10 +59,10 @@ const Viewport = struct {
         col: u16,
     };
 
-    fn cursorCell(viewport: Viewport, buffer: []const u8, offset: u32, line_number: u16) Cell {
+    fn cursorCell(viewport: Viewport, cursor: Position) Cell {
         return .{
-            .row = line_number - viewport.line_number_start,
-            .col = lineOffset(buffer, offset) - viewport.line_offset_start + viewport.gutterWidth(),
+            .row = cursor.line_number - viewport.line_number_start,
+            .col = cursor.line_offset - viewport.line_offset_start + viewport.gutterWidth(),
         };
     }
 
@@ -788,7 +790,7 @@ pub fn tick(editor: *Editor) !bool {
     return true;
 }
 
-fn render(editor: *const Editor, cursor: struct { line_number: u16, line_offset: u16 }) !void {
+fn render(editor: *const Editor, cursor: Position) !void {
     const writer = editor.writer;
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
@@ -846,11 +848,7 @@ fn render(editor: *const Editor, cursor: struct { line_number: u16, line_offset:
     try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
 
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
-    const cursor_cell = editor.viewport.cursorCell(
-        editor.buffer.items,
-        editor.cursor.head,
-        cursor.line_number,
-    );
+    const cursor_cell = editor.viewport.cursorCell(cursor);
     assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
