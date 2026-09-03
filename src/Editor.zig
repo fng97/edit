@@ -96,7 +96,7 @@ const Cursor = struct {
         offset: u32,
         kind: enum { snap_update, snap_remain },
     ) void {
-        assert(cursor.offset < buffer.len);
+        assert(buffer.len > 0);
         cursor.offset = @min(offset, buffer.len - 1);
         if (kind == .snap_update) cursor.line_offset_snap = lineOffset(buffer, cursor.offset);
     }
@@ -336,10 +336,19 @@ fn insert(editor: *Editor, text: []const u8) !void {
     editor.dirty = true;
 }
 
+/// Delete text under cursor.
 fn delete(editor: *Editor) !void {
-    if (editor.cursor.offset == 0) return;
-    editor.cursor.move(.left, 1, editor.buffer.items);
-    _ = editor.buffer.orderedRemove(editor.cursor.offset);
+    if (editor.cursor.anchor) |anchor| {
+        const selection_head = @min(anchor, editor.cursor.offset);
+        const selection_tail = @max(anchor, editor.cursor.offset);
+        const selection_size = selection_tail - selection_head + 1; // +1: offset -> size
+        // We're removing text here so this should never return an error.
+        editor.buffer.replaceRangeAssumeCapacity(selection_head, selection_size, "");
+        editor.cursor.anchor = null;
+    } else _ = editor.buffer.orderedRemove(editor.cursor.offset);
+    // File must always end in a newline.
+    if (editor.buffer.items.len == 0 or editor.buffer.last() != '\n')
+        editor.buffer.appendAssumeCapacity('\n');
     editor.dirty = true;
 }
 
@@ -709,6 +718,14 @@ pub fn tick(editor: *Editor) !bool {
                 // Enable/disable selection.
                 'v' => editor.cursor.anchor =
                     if (editor.cursor.anchor != null) null else editor.cursor.offset,
+                'd' => {
+                    const selection_head = if (editor.cursor.anchor) |anchor| @min(
+                        editor.cursor.offset,
+                        anchor,
+                    ) else editor.cursor.offset;
+                    try editor.delete();
+                    editor.cursor.update(editor.buffer.items, selection_head, .snap_update);
+                },
                 else => {},
             },
             .chord => |chord| {
@@ -740,7 +757,10 @@ pub fn tick(editor: *Editor) !bool {
             switch (input) {
                 .escape => editor.mode = .normal,
                 .ascii => |c| try editor.insert(&.{c}),
-                .backspace => try editor.delete(),
+                .backspace => if (editor.cursor.offset != 0) {
+                    editor.cursor.move(.left, 1, editor.buffer.items);
+                    try editor.delete();
+                },
                 .tab => try editor.insert("    "),
                 .enter => {
                     const indent_count = lineIndentation(editor.buffer.items, editor.cursor.offset);
@@ -1102,8 +1122,8 @@ test "rendering: hello_c" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1138,8 +1158,8 @@ test "rendering: empty" {
         \\10 ~
         \\11 ~
         \\empty.zig                        1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 }
@@ -1165,8 +1185,8 @@ test "go to start/end of file" {
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;3H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1180,7 +1200,7 @@ test "go to start/end of file" {
         \\5   return 0;
         \\6 }
         \\hello.c                          6,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[4;3H" // cursor coordinates at end of file: 3, 2 (but indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1195,8 +1215,8 @@ test "go to start/end of file" {
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;3H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;3H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1231,8 +1251,8 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c  1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1253,7 +1273,7 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c 1,19
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[1;12H" // cursor coordinates at end of line: 0, 11 (but indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1275,8 +1295,8 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c  1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 2 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1291,6 +1311,10 @@ test "insert mode" {
         "i" ++ // enter insert mode
         "a" ++ // insert text
         "b" ++ // insert text
+        "\x1b[27u" ++ // ESC: return to normal mode
+        "$" ++ // move to end of line
+        "i" ++ // enter insert mode
+        "\x08" ++ // backspace
         "\x1b[27u" ++ // ESC: return to normal mode
         "q"); // quit
 
@@ -1314,8 +1338,8 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1337,7 +1361,7 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[6\x20q" // set cursor style (steady block -> steady bar)
+    ++ "\x1b[6\x20q" // cursor style (steady block -> steady bar)
     ++ "\x1b[1;4H" // cursor remains at start of file
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1360,7 +1384,7 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,2
-    ++ "\x1b[6\x20q" // set cursor style (steady bar)
+    ++ "\x1b[6\x20q" // cursor style (steady bar)
     ++ "\x1b[1;5H" // cursor moves after inserted character
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1383,7 +1407,7 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,3
-    ++ "\x1b[6\x20q" // set cursor style (steady bar)
+    ++ "\x1b[6\x20q" // cursor style (steady bar)
     ++ "\x1b[1;6H" // cursor moves after second inserted character
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1408,6 +1432,32 @@ test "insert mode" {
         \\hello.c [+]                      1,3
     ++ "\x1b[2\x20q" // restore normal cursor style
     ++ "\x1b[1;6H" // cursor remains after inserted text
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == true); // process $
+    try std.testing.expect(try editor.tick() == true); // process i
+    try std.testing.expect(try editor.tick() == true); // process backspace
+    stripping.out.clearRetainingCapacity();
+    try std.testing.expect(try editor.tick() == true); // process escape
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 ab#include <stdio.h
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                     1,20
+    ++ "\x1b[2\x20q" // cursor style
+    ++ "\x1b[1;23H" // cursor coordinates (indexed from 0)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1445,8 +1495,8 @@ test "new line with o preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1473,7 +1523,7 @@ test "new line with o preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      5,4
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[5;7H" // cursor after x
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1512,8 +1562,8 @@ test "new line with O preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1540,7 +1590,7 @@ test "new line with O preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      4,4
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[4;7H" // cursor after x
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1579,8 +1629,8 @@ test "insert with I goes to start of line after indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1607,7 +1657,7 @@ test "insert with I goes to start of line after indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      4,4
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[4;7H" // cursor after y
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1646,8 +1696,8 @@ test "A inserts at end of line" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1674,7 +1724,7 @@ test "A inserts at end of line" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                     4,30
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[4;33H" // cursor after x
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1713,8 +1763,8 @@ test "tab inserts four spaces" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1739,7 +1789,7 @@ test "tab inserts four spaces" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,6
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[1;9H" // cursor after x
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
@@ -1780,8 +1830,8 @@ test "enter preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates at start of file: 0, 3 (but indexed from 1)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
@@ -1810,8 +1860,221 @@ test "enter preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      5,4
-    ++ "\x1b[2\x20q" // set cursor style (steady block)
+    ++ "\x1b[2\x20q" // cursor style (steady block)
     ++ "\x1b[5;7H" // cursor after y
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == false); // process q
+}
+
+test "delete" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+        "d" ++ // delete first character
+        "$" ++ // move to end of line
+        "d" ++ // delete newline (character at end of line)
+        "G" ++ // move to last line
+        "$" ++ // move to end of line
+        "d" ++ // move to end of line
+        "q"); // quit
+
+    var stripping: StrippingWriter = try .init(allocator);
+    defer stripping.deinit();
+    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
+    defer editor.deinit(allocator);
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    stripping.out.clearRetainingCapacity();
+    try std.testing.expect(try editor.tick() == true); // process d
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      1,1
+        //         ^ file edited
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == true); // process $
+    stripping.out.clearRetainingCapacity();
+    try std.testing.expect(try editor.tick() == true); // process d
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide curso
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 include <stdio.h>
+        \\ 2 int main() {
+        \\ 3   printf("Hello, world!\n");
+        \\ 4   return 0;
+        \\ 5 }
+        \\ 6 ~
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                     1,18
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;21H" // cursor coordinates (indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == true); // process G
+    try std.testing.expect(try editor.tick() == true); // process $
+    stripping.out.clearRetainingCapacity();
+    try std.testing.expect(try editor.tick() == true); // process d
+
+    // Same as last time. You can't delete the final newline.
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide curso
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 include <stdio.h>
+        \\ 2 int main() {
+        \\ 3   printf("Hello, world!\n");
+        \\ 4   return 0;
+        \\ 5 }
+        \\ 6 ~
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      5,2
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[5;5H" // cursor coordinates (indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == false); // process q
+}
+
+test "delete selection" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+        "v" ++ // start selection: anchor at first character
+        "$" ++ // move to end of line
+        "d" ++ // delete selection
+        "j" ++ // move down a line
+        "e" ++ // move to end of word
+        "v" ++ // start selection
+        "G" ++ // move to last line
+        "$" ++ // move to end of line
+        "d" ++ // delete selection
+        "q"); // quit
+
+    var stripping: StrippingWriter = try .init(allocator);
+    defer stripping.deinit();
+    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
+    defer editor.deinit(allocator);
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == true); // process v
+    try std.testing.expect(try editor.tick() == true); // process $
+    stripping.out.clearRetainingCapacity();
+    try std.testing.expect(try editor.tick() == true); // process d
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide cursor
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 
+        \\ 2 int main() {
+        \\ 3   printf("Hello, world!\n");
+        \\ 4   return 0;
+        \\ 5 }
+        \\ 6 ~
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      1,1
+        //         ^ file edited
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
+    ++ "\x1b[?25h" // unhide cursor
+    , stripping.written());
+
+    try std.testing.expect(try editor.tick() == true); // process j
+    try std.testing.expect(try editor.tick() == true); // process e
+    try std.testing.expect(try editor.tick() == true); // process v
+    try std.testing.expect(try editor.tick() == true); // process G
+    try std.testing.expect(try editor.tick() == true); // process $
+    stripping.out.clearRetainingCapacity();
+    try std.testing.expect(try editor.tick() == true); // process d
+
+    try std.testing.expectEqualSlices(u8, "\x1b[?25l" ++ // hide curso
+        "\x1b[2J" ++ // clear screen
+        "\x1b[H" ++ // place cursor at top left
+        \\ 1 
+        \\ 2 in
+        \\ 3 ~
+        \\ 4 ~
+        \\ 5 ~
+        \\ 6 ~
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      2,3
+    ++ "\x1b[2\x20q" // cursor style (steady block)
+    ++ "\x1b[2;6H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
