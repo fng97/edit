@@ -45,6 +45,294 @@ cursor: Cursor,
 name: []const u8,
 buffer: std.ArrayList(u8),
 
+pub fn tick(editor: *Editor) !bool {
+    const input = try parseOne(editor.reader);
+    if (input == .resize) {
+        editor.viewport.row_count = input.resize.row_count;
+        editor.viewport.col_count = input.resize.col_count;
+    } else switch (editor.mode) {
+        .normal => switch (input) {
+            .ascii => |c| switch (c) {
+                'q' => return false, // quit
+                'h' => editor.cursor.move(.left, 1, editor.buffer.items),
+                'l' => editor.cursor.move(.right, 1, editor.buffer.items),
+                'j' => editor.cursor.move(.down, 1, editor.buffer.items),
+                'k' => editor.cursor.move(.up, 1, editor.buffer.items),
+                '0' => editor.cursor.moveMax(.left, editor.buffer.items),
+                '$' => editor.cursor.moveMax(.right, editor.buffer.items),
+                'G' => editor.cursor.moveMax(.down, editor.buffer.items),
+                'g' => editor.cursor.moveMax(.up, editor.buffer.items),
+                'e' => editor.cursor.update(
+                    editor.buffer.items,
+                    wordTailNext(editor.buffer.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'E' => editor.cursor.update(
+                    editor.buffer.items,
+                    tokenTailNext(editor.buffer.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'b' => editor.cursor.update(
+                    editor.buffer.items,
+                    wordHeadPrev(editor.buffer.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'B' => editor.cursor.update(
+                    editor.buffer.items,
+                    tokenHeadPrev(editor.buffer.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'w' => editor.cursor.update(
+                    editor.buffer.items,
+                    wordHeadNext(editor.buffer.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'W' => editor.cursor.update(
+                    editor.buffer.items,
+                    tokenHeadNext(editor.buffer.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'i' => editor.mode = .insert,
+                'I' => {
+                    const offset = lineHead(editor.buffer.items, editor.cursor.offset) +
+                        lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    editor.cursor.update(editor.buffer.items, offset, .snap_update);
+                    editor.mode = .insert;
+                },
+                'a' => {
+                    editor.cursor.move(.right, 1, editor.buffer.items);
+                    editor.mode = .insert;
+                },
+                'A' => {
+                    editor.cursor.moveMax(.right, editor.buffer.items);
+                    editor.mode = .insert;
+                },
+                'o' => {
+                    editor.cursor.moveMax(.right, editor.buffer.items);
+                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    try editor.insert("\n");
+                    for (0..indentation) |_| try editor.insert(" ");
+                    editor.mode = .insert;
+                },
+                'O' => {
+                    editor.cursor.moveMax(.left, editor.buffer.items);
+                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    try editor.insert("\n");
+                    editor.cursor.move(.up, 1, editor.buffer.items);
+                    for (0..indentation) |_| try editor.insert(" ");
+                    editor.mode = .insert;
+                },
+                // Enable/disable selection.
+                'v' => editor.cursor.anchor =
+                    if (editor.cursor.anchor != null) null else editor.cursor.offset,
+                'd' => {
+                    const selection_head = if (editor.cursor.anchor) |anchor| @min(
+                        editor.cursor.offset,
+                        anchor,
+                    ) else editor.cursor.offset;
+                    try editor.delete();
+                    editor.cursor.update(editor.buffer.items, selection_head, .snap_update);
+                },
+                else => {},
+            },
+            .chord => |chord| {
+                const scroll = editor.viewport.row_count / 2;
+                const ctrl: Modifiers = .{ .ctrl = true };
+                const mod = chord.modifiers;
+                switch (chord.ascii) {
+                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.buffer.items),
+                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.buffer.items),
+                    'w' => if (mod == ctrl) {
+                        try std.Io.Dir.cwd().writeFile(editor.io, .{
+                            .data = editor.buffer.items,
+                            .sub_path = editor.name,
+                        });
+                        editor.dirty = false;
+                    },
+                    else => {},
+                }
+            },
+            .escape => editor.cursor.anchor = null,
+            .backspace,
+            .enter,
+            .tab,
+            => {}, // do nothing
+            .resize => unreachable,
+        },
+        .insert => {
+            editor.cursor.anchor = null;
+            switch (input) {
+                .escape => editor.mode = .normal,
+                .ascii => |c| try editor.insert(&.{c}),
+                .backspace => if (editor.cursor.offset != 0) {
+                    editor.cursor.move(.left, 1, editor.buffer.items);
+                    try editor.delete();
+                },
+                .tab => try editor.insert("    "),
+                .enter => {
+                    const indent_count = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    try editor.insert("\n");
+                    for (0..indent_count) |_| try editor.insert(" ");
+                },
+                .chord => {}, // do nothing
+                .resize => unreachable,
+            }
+        },
+    }
+
+    const buffer = editor.buffer.items;
+    const offset = editor.cursor.offset;
+    const line_number = lineNumber(buffer, offset);
+    const line_offset = lineOffset(buffer, offset);
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+
+    // Check viewport dimensions.
+    if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
+    if (row_count > row_count_max) return Error.ViewportTooLarge;
+    if (col_count < editor.viewport.gutterWidth() + 1)
+        return Error.ViewportTooSmall; // at least one char
+    if (col_count > col_count_max) return Error.ViewportTooLarge;
+
+    // If cursor moved out of viewport, move viewport.
+    const last_line = editor.viewport.lastLine();
+    if (line_number < editor.viewport.line_number_start) {
+        editor.viewport.line_number_start = line_number;
+    } else if (line_number > last_line) {
+        editor.viewport.line_number_start += line_number - last_line;
+    }
+    const last_offset = editor.viewport.lastOffset();
+    if (line_offset < editor.viewport.line_offset_start) {
+        editor.viewport.line_offset_start = line_offset;
+    } else if (line_offset > last_offset) {
+        editor.viewport.line_offset_start += line_offset - last_offset;
+    }
+
+    // Cursor is always at snap line offset or line end.
+    assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(buffer, offset) - 1));
+    assert(line_offset <= editor.cursor.line_offset_snap);
+
+    // Make sure cursor is within the viewport's bounds.
+    assert(line_number >= editor.viewport.line_number_start);
+    assert(line_number <= editor.viewport.lastLine());
+    assert(line_offset >= editor.viewport.line_offset_start);
+    assert(line_offset <= editor.viewport.lastOffset());
+
+    try editor.render(.{ .line_number = line_number, .line_offset = line_offset });
+
+    return true;
+}
+
+fn render(editor: *const Editor, cursor: Position) !void {
+    const writer = editor.writer;
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+    const gutter_width = editor.viewport.gutterWidth();
+    const line_number_start = editor.viewport.line_number_start;
+    const line_offset_start = editor.viewport.line_offset_start;
+    const buffer = editor.buffer.items;
+    const file_name = editor.name;
+
+    // Hide cursor.
+    try writer.writeAll("\x1b[?25l");
+    // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
+    try writer.writeAll("\x1b[2J");
+    // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
+    try writer.writeAll("\x1b[H");
+
+    assert(buffer.len > 0);
+    var line_head = blk: {
+        var i: u32 = lineHead(buffer, editor.cursor.offset);
+        for (0..cursor.line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
+        break :blk i;
+    };
+    var highlight = false;
+    for (line_number_start..line_number_start + row_count - 1) |line_number| {
+        try writer.print("{[line_number]d: >[gutter_width]} ", .{ // draw gutter
+            .line_number = line_number + 1, // displayed line number indexed from 1
+            .gutter_width = gutter_width - 1, // space suffix already in format string
+        });
+
+        if (line_head < buffer.len) {
+            const line_tail = lineTail(buffer, line_head);
+
+            // Handle horizontal scroll.
+            const text_width = col_count - gutter_width;
+            const cropped_head = @min(line_head + line_offset_start, line_tail);
+            const cropped_tail = @min(line_tail, cropped_head + text_width);
+
+            // Handle selection highlighting.
+            if (editor.cursor.anchor) |anchor| {
+                const esc_highlight =
+                    "\x1b[38;2;40;40;40m" ++ // dark foreground
+                    "\x1b[48;2;200;200;200m"; // light gray background
+                const esc_reset = "\x1b[0m"; // reset
+                const highlight_head = @min(anchor, editor.cursor.offset);
+                const highlight_tail = @max(anchor, editor.cursor.offset);
+
+                // Should we have already started/stopped highlighting? E.g. anchor not within
+                // cropped line.
+                if (highlight_head < cropped_head) highlight = true;
+                if (highlight_tail < cropped_head) highlight = false;
+
+                if (highlight) try writer.writeAll(esc_highlight);
+
+                for (cropped_head..cropped_tail) |offset| {
+                    if (offset == highlight_head) {
+                        highlight = true;
+                        try writer.writeAll(esc_highlight);
+                    }
+
+                    try writer.writeByte(buffer[offset]);
+
+                    if (offset == highlight_tail) {
+                        highlight = false;
+                        try writer.writeAll(esc_reset);
+                    }
+                }
+
+                // Reset before printing the next line so that line numbers aren't highlighted.
+                if (highlight) try writer.writeAll(esc_reset);
+            } else try writer.writeAll(buffer[cropped_head..cropped_tail]); // strips newline
+
+            line_head = line_tail + 1;
+        } else try writer.writeByte('~');
+        try writer.writeAll("\r\n");
+    }
+
+    // Draw status line. Displayed line number and offset should be indexed from 1.
+    const cursor_coordinates_col_count =
+        digitCount(cursor.line_number + 1) +
+        digitCount(cursor.line_offset + 1) +
+        1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+    var min_size = file_name.len;
+    const dirty_indicator = " [+]";
+    if (editor.dirty) min_size += dirty_indicator.len;
+    min_size += cursor_coordinates_col_count + 1; // 1 for padding
+    if (min_size > col_count) return Error.ViewportTooSmall;
+
+    try writer.writeAll(file_name);
+    if (editor.dirty) try writer.writeAll(dirty_indicator);
+    try writer.splatByteAll(' ', col_count - min_size);
+    try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
+
+    const cursor_cell = editor.viewport.cursorCell(cursor);
+    assert(cursor_cell.col >= gutter_width); // right of line numbers
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
+    const cursor_style: u8 = switch (editor.mode) {
+        .normal => 2, // steady block
+        .insert => 6, // steady vertical bar
+    };
+    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
+    try writer.print("\x1b[{d}\x20q", .{cursor_style});
+    try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
+    // Unhide cursor.
+    try writer.writeAll("\x1b[?25h");
+
+    try writer.flush();
+}
+
 const Position = struct { line_number: u16, line_offset: u16 };
 
 const Viewport = struct {
@@ -636,294 +924,6 @@ test tokenHeadNext {
     try std.testing.expectEqual(11, tokenHeadNext("  Hello,\n  world!", 4));
     try std.testing.expectEqual(16, tokenHeadNext("  Hello,\n  world!", 11));
     try std.testing.expectEqual(16, tokenHeadNext("  Hello,\n  world!", 16));
-}
-
-pub fn tick(editor: *Editor) !bool {
-    const input = try parseOne(editor.reader);
-    if (input == .resize) {
-        editor.viewport.row_count = input.resize.row_count;
-        editor.viewport.col_count = input.resize.col_count;
-    } else switch (editor.mode) {
-        .normal => switch (input) {
-            .ascii => |c| switch (c) {
-                'q' => return false, // quit
-                'h' => editor.cursor.move(.left, 1, editor.buffer.items),
-                'l' => editor.cursor.move(.right, 1, editor.buffer.items),
-                'j' => editor.cursor.move(.down, 1, editor.buffer.items),
-                'k' => editor.cursor.move(.up, 1, editor.buffer.items),
-                '0' => editor.cursor.moveMax(.left, editor.buffer.items),
-                '$' => editor.cursor.moveMax(.right, editor.buffer.items),
-                'G' => editor.cursor.moveMax(.down, editor.buffer.items),
-                'g' => editor.cursor.moveMax(.up, editor.buffer.items),
-                'e' => editor.cursor.update(
-                    editor.buffer.items,
-                    wordTailNext(editor.buffer.items, editor.cursor.offset),
-                    .snap_update,
-                ),
-                'E' => editor.cursor.update(
-                    editor.buffer.items,
-                    tokenTailNext(editor.buffer.items, editor.cursor.offset),
-                    .snap_update,
-                ),
-                'b' => editor.cursor.update(
-                    editor.buffer.items,
-                    wordHeadPrev(editor.buffer.items, editor.cursor.offset),
-                    .snap_update,
-                ),
-                'B' => editor.cursor.update(
-                    editor.buffer.items,
-                    tokenHeadPrev(editor.buffer.items, editor.cursor.offset),
-                    .snap_update,
-                ),
-                'w' => editor.cursor.update(
-                    editor.buffer.items,
-                    wordHeadNext(editor.buffer.items, editor.cursor.offset),
-                    .snap_update,
-                ),
-                'W' => editor.cursor.update(
-                    editor.buffer.items,
-                    tokenHeadNext(editor.buffer.items, editor.cursor.offset),
-                    .snap_update,
-                ),
-                'i' => editor.mode = .insert,
-                'I' => {
-                    const offset = lineHead(editor.buffer.items, editor.cursor.offset) +
-                        lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    editor.cursor.update(editor.buffer.items, offset, .snap_update);
-                    editor.mode = .insert;
-                },
-                'a' => {
-                    editor.cursor.move(.right, 1, editor.buffer.items);
-                    editor.mode = .insert;
-                },
-                'A' => {
-                    editor.cursor.moveMax(.right, editor.buffer.items);
-                    editor.mode = .insert;
-                },
-                'o' => {
-                    editor.cursor.moveMax(.right, editor.buffer.items);
-                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    try editor.insert("\n");
-                    for (0..indentation) |_| try editor.insert(" ");
-                    editor.mode = .insert;
-                },
-                'O' => {
-                    editor.cursor.moveMax(.left, editor.buffer.items);
-                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    try editor.insert("\n");
-                    editor.cursor.move(.up, 1, editor.buffer.items);
-                    for (0..indentation) |_| try editor.insert(" ");
-                    editor.mode = .insert;
-                },
-                // Enable/disable selection.
-                'v' => editor.cursor.anchor =
-                    if (editor.cursor.anchor != null) null else editor.cursor.offset,
-                'd' => {
-                    const selection_head = if (editor.cursor.anchor) |anchor| @min(
-                        editor.cursor.offset,
-                        anchor,
-                    ) else editor.cursor.offset;
-                    try editor.delete();
-                    editor.cursor.update(editor.buffer.items, selection_head, .snap_update);
-                },
-                else => {},
-            },
-            .chord => |chord| {
-                const scroll = editor.viewport.row_count / 2;
-                const ctrl: Modifiers = .{ .ctrl = true };
-                const mod = chord.modifiers;
-                switch (chord.ascii) {
-                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.buffer.items),
-                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.buffer.items),
-                    'w' => if (mod == ctrl) {
-                        try std.Io.Dir.cwd().writeFile(editor.io, .{
-                            .data = editor.buffer.items,
-                            .sub_path = editor.name,
-                        });
-                        editor.dirty = false;
-                    },
-                    else => {},
-                }
-            },
-            .escape => editor.cursor.anchor = null,
-            .backspace,
-            .enter,
-            .tab,
-            => {}, // do nothing
-            .resize => unreachable,
-        },
-        .insert => {
-            editor.cursor.anchor = null;
-            switch (input) {
-                .escape => editor.mode = .normal,
-                .ascii => |c| try editor.insert(&.{c}),
-                .backspace => if (editor.cursor.offset != 0) {
-                    editor.cursor.move(.left, 1, editor.buffer.items);
-                    try editor.delete();
-                },
-                .tab => try editor.insert("    "),
-                .enter => {
-                    const indent_count = lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    try editor.insert("\n");
-                    for (0..indent_count) |_| try editor.insert(" ");
-                },
-                .chord => {}, // do nothing
-                .resize => unreachable,
-            }
-        },
-    }
-
-    const buffer = editor.buffer.items;
-    const offset = editor.cursor.offset;
-    const line_number = lineNumber(buffer, offset);
-    const line_offset = lineOffset(buffer, offset);
-    const row_count = editor.viewport.row_count;
-    const col_count = editor.viewport.col_count;
-
-    // Check viewport dimensions.
-    if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
-    if (row_count > row_count_max) return Error.ViewportTooLarge;
-    if (col_count < editor.viewport.gutterWidth() + 1)
-        return Error.ViewportTooSmall; // at least one char
-    if (col_count > col_count_max) return Error.ViewportTooLarge;
-
-    // If cursor moved out of viewport, move viewport.
-    const last_line = editor.viewport.lastLine();
-    if (line_number < editor.viewport.line_number_start) {
-        editor.viewport.line_number_start = line_number;
-    } else if (line_number > last_line) {
-        editor.viewport.line_number_start += line_number - last_line;
-    }
-    const last_offset = editor.viewport.lastOffset();
-    if (line_offset < editor.viewport.line_offset_start) {
-        editor.viewport.line_offset_start = line_offset;
-    } else if (line_offset > last_offset) {
-        editor.viewport.line_offset_start += line_offset - last_offset;
-    }
-
-    // Cursor is always at snap line offset or line end.
-    assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(buffer, offset) - 1));
-    assert(line_offset <= editor.cursor.line_offset_snap);
-
-    // Make sure cursor is within the viewport's bounds.
-    assert(line_number >= editor.viewport.line_number_start);
-    assert(line_number <= editor.viewport.lastLine());
-    assert(line_offset >= editor.viewport.line_offset_start);
-    assert(line_offset <= editor.viewport.lastOffset());
-
-    try editor.render(.{ .line_number = line_number, .line_offset = line_offset });
-
-    return true;
-}
-
-fn render(editor: *const Editor, cursor: Position) !void {
-    const writer = editor.writer;
-    const row_count = editor.viewport.row_count;
-    const col_count = editor.viewport.col_count;
-    const gutter_width = editor.viewport.gutterWidth();
-    const line_number_start = editor.viewport.line_number_start;
-    const line_offset_start = editor.viewport.line_offset_start;
-    const buffer = editor.buffer.items;
-    const file_name = editor.name;
-
-    // Hide cursor.
-    try writer.writeAll("\x1b[?25l");
-    // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
-    try writer.writeAll("\x1b[2J");
-    // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
-    try writer.writeAll("\x1b[H");
-
-    assert(buffer.len > 0);
-    var line_head = blk: {
-        var i: u32 = lineHead(buffer, editor.cursor.offset);
-        for (0..cursor.line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
-        break :blk i;
-    };
-    var highlight = false;
-    for (line_number_start..line_number_start + row_count - 1) |line_number| {
-        try writer.print("{[line_number]d: >[gutter_width]} ", .{ // draw gutter
-            .line_number = line_number + 1, // displayed line number indexed from 1
-            .gutter_width = gutter_width - 1, // space suffix already in format string
-        });
-
-        if (line_head < buffer.len) {
-            const line_tail = lineTail(buffer, line_head);
-
-            // Handle horizontal scroll.
-            const text_width = col_count - gutter_width;
-            const cropped_head = @min(line_head + line_offset_start, line_tail);
-            const cropped_tail = @min(line_tail, cropped_head + text_width);
-
-            // Handle selection highlighting.
-            if (editor.cursor.anchor) |anchor| {
-                const esc_highlight =
-                    "\x1b[38;2;40;40;40m" ++ // dark foreground
-                    "\x1b[48;2;200;200;200m"; // light gray background
-                const esc_reset = "\x1b[0m"; // reset
-                const highlight_head = @min(anchor, editor.cursor.offset);
-                const highlight_tail = @max(anchor, editor.cursor.offset);
-
-                // Should we have already started/stopped highlighting? E.g. anchor not within
-                // cropped line.
-                if (highlight_head < cropped_head) highlight = true;
-                if (highlight_tail < cropped_head) highlight = false;
-
-                if (highlight) try writer.writeAll(esc_highlight);
-
-                for (cropped_head..cropped_tail) |offset| {
-                    if (offset == highlight_head) {
-                        highlight = true;
-                        try writer.writeAll(esc_highlight);
-                    }
-
-                    try writer.writeByte(buffer[offset]);
-
-                    if (offset == highlight_tail) {
-                        highlight = false;
-                        try writer.writeAll(esc_reset);
-                    }
-                }
-
-                // Reset before printing the next line so that line numbers aren't highlighted.
-                if (highlight) try writer.writeAll(esc_reset);
-            } else try writer.writeAll(buffer[cropped_head..cropped_tail]); // strips newline
-
-            line_head = line_tail + 1;
-        } else try writer.writeByte('~');
-        try writer.writeAll("\r\n");
-    }
-
-    // Draw status line. Displayed line number and offset should be indexed from 1.
-    const cursor_coordinates_col_count =
-        digitCount(cursor.line_number + 1) +
-        digitCount(cursor.line_offset + 1) +
-        1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-    var min_size = file_name.len;
-    const dirty_indicator = " [+]";
-    if (editor.dirty) min_size += dirty_indicator.len;
-    min_size += cursor_coordinates_col_count + 1; // 1 for padding
-    if (min_size > col_count) return Error.ViewportTooSmall;
-
-    try writer.writeAll(file_name);
-    if (editor.dirty) try writer.writeAll(dirty_indicator);
-    try writer.splatByteAll(' ', col_count - min_size);
-    try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
-
-    const cursor_cell = editor.viewport.cursorCell(cursor);
-    assert(cursor_cell.col >= gutter_width); // right of line numbers
-    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
-    const cursor_style: u8 = switch (editor.mode) {
-        .normal => 2, // steady block
-        .insert => 6, // steady vertical bar
-    };
-    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
-    try writer.print("\x1b[{d}\x20q", .{cursor_style});
-    try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
-    // Unhide cursor.
-    try writer.writeAll("\x1b[?25h");
-
-    try writer.flush();
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.

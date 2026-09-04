@@ -56,8 +56,8 @@ pub fn main(init: std.process.Init) !void {
     termios_raw.lflag.ICANON = false;
     termios_raw.lflag.IEXTEN = false;
     termios_raw.lflag.ISIG = false;
-    termios_raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-    termios_raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+    termios_raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+    termios_raw.cc[@backingInt(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
 
     // Always restore, even if init fails.
