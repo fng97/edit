@@ -1,43 +1,13 @@
 # Notes
 
-- Any benefit to saving (DECSC) and restoring (DECRC) cursor rather than placing
-  it back manually?
 - Rendering optimisation ideas:
   - Use repeat (REP) when implementing splat?
   - Move cursor instead of sending multiple spaces (splat special case)?
 
 ## TODO
 
-- Replace FRNG fuzzer with non-stop in-process fuzzer.
+- Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
-- Add metrics to fuzzer: show live metrics and optionally includein
+- Add metrics to fuzzer: show live metrics and optionally include in
   `trace.json`.
 - Add timing instrumentation. Is 2ms max reasonable per-tick?
-
-## Bugs caught by fuzzer
-
-- Didn't handle empty files. When indexing lines,
-  `file_bytes[file_bytes.len -1]` overflowed. There were a few other places that
-  didn't handle empty files.
-- Crashed on long file names. Integer overflow when calculating padding size. In
-  other words because it couldn't fit everything on the status line.
-- Crashed on long lines. Haven't implemented wrappings so was just asserting on
-  line length. Going to avoid wrapping and just only print what fits. Will add
-  horizontal scroll later.
-- Crashed on too many lines. This was asserted in `indexLines`. Instead, should
-  return an error. Reasonable that we might manually edit a file and leave it
-  with more lines than before.
-- Crashed because viewport was too small. Minimum viewport width depends on
-  gutter width which depends on number of lines so can't easily generate valid
-  dimensions. Just catch error in the fuzzer.
-- A couple overflow bugs to do with the status line once I started fuzzing the
-  dimensions. Just hiding the filename and then the cursor indicator if they
-  don't fit in the viewport.
-- Loads of overflows in `tick()`. Ended up moving checks into a `validate()`
-  function. Called in `init()` so that we know the first `render()` call will be
-  safe then called at end of `tick()` to check state after input processed.
-- Interesting one. See `7170bd2a79b7418ce78ac649b3d0d2e834feecc2`. In cases
-  where we have a huge viewport we were overflowing when checking if the cursor
-  was within bounds. This was because the last visible line is the current line
-  plus `row_count`. Both are stored as u16. If `row_count` is huge we can
-  overflow.

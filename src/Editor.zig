@@ -34,7 +34,12 @@ io: std.Io,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
-mode: enum { normal, insert },
+prompt_buffer: [std.math.maxInt(u8)]u8 = undefined,
+mode: union(enum) {
+    normal,
+    insert,
+    prompt: struct { buffer: std.ArrayList(u8), cursor_offset: u8 },
+},
 dirty: bool = false,
 
 // Viewport state:
@@ -133,6 +138,15 @@ pub fn tick(editor: *Editor) !bool {
                     try editor.delete();
                     editor.cursor.update(editor.buffer.items, selection_head, .snap_update);
                 },
+                ':' => {
+                    for (&editor.prompt_buffer) |*byte| byte.* = undefined;
+                    editor.mode = .{
+                        .prompt = .{
+                            .buffer = .initBuffer(&editor.prompt_buffer),
+                            .cursor_offset = 0,
+                        },
+                    };
+                },
                 else => {},
             },
             .chord => |chord| {
@@ -142,13 +156,6 @@ pub fn tick(editor: *Editor) !bool {
                 switch (chord.ascii) {
                     'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.buffer.items),
                     'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.buffer.items),
-                    'w' => if (mod == ctrl) {
-                        try std.Io.Dir.cwd().writeFile(editor.io, .{
-                            .data = editor.buffer.items,
-                            .sub_path = editor.name,
-                        });
-                        editor.dirty = false;
-                    },
                     else => {},
                 }
             },
@@ -177,6 +184,35 @@ pub fn tick(editor: *Editor) !bool {
                 .chord => {}, // do nothing
                 .resize => unreachable,
             }
+        },
+        .prompt => |*prompt| switch (input) {
+            .escape => editor.mode = .normal,
+            .ascii => |c| {
+                assert(prompt.cursor_offset == prompt.buffer.items.len);
+                try prompt.buffer.insertBounded(prompt.cursor_offset, c);
+                prompt.cursor_offset += 1;
+                assert(prompt.cursor_offset == prompt.buffer.items.len);
+            },
+            .backspace => if (prompt.cursor_offset != 0) {
+                assert(prompt.cursor_offset == prompt.buffer.items.len);
+                _ = prompt.buffer.orderedRemove(prompt.cursor_offset - 1);
+                prompt.cursor_offset -= 1;
+                assert(prompt.cursor_offset == prompt.buffer.items.len);
+            },
+            .enter => {
+                if (std.mem.eql(u8, "w", prompt.buffer.items)) {
+                    try editor.save();
+                } else if (std.mem.eql(u8, "q", prompt.buffer.items)) {
+                    return false;
+                } else if (std.mem.eql(u8, "wq", prompt.buffer.items)) {
+                    try editor.save();
+                    return false;
+                }
+                // TODO: Error if command not recognised.
+                editor.mode = .normal;
+            },
+            .tab, .chord => {}, // do nothing
+            .resize => unreachable,
         },
     }
 
@@ -233,13 +269,13 @@ fn render(editor: *const Editor, cursor: Position) !void {
     const buffer = editor.buffer.items;
     const file_name = editor.name;
 
-    // Hide cursor.
-    try writer.writeAll("\x1b[?25l");
+    try writer.writeAll("\x1b[?25l"); // hide cursor
     // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
     try writer.writeAll("\x1b[2J");
     // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
     try writer.writeAll("\x1b[H");
 
+    // Render the buffer.
     assert(buffer.len > 0);
     var line_head = blk: {
         var i: u32 = lineHead(buffer, editor.cursor.offset);
@@ -300,37 +336,67 @@ fn render(editor: *const Editor, cursor: Position) !void {
         try writer.writeAll("\r\n");
     }
 
-    // Draw status line. Displayed line number and offset should be indexed from 1.
-    const cursor_coordinates_col_count =
-        digitCount(cursor.line_number + 1) +
-        digitCount(cursor.line_offset + 1) +
-        1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-    var min_size = file_name.len;
-    const dirty_indicator = " [+]";
-    if (editor.dirty) min_size += dirty_indicator.len;
-    min_size += cursor_coordinates_col_count + 1; // 1 for padding
-    if (min_size > col_count) return Error.ViewportTooSmall;
+    // Draw final row: status line or prompt.
+    switch (editor.mode) {
+        // Draw status line. Displayed line number and offset should be indexed from 1.
+        .insert, .normal => {
+            const cursor_coordinates_col_count =
+                digitCount(cursor.line_number + 1) +
+                digitCount(cursor.line_offset + 1) +
+                1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+            var min_size = file_name.len;
+            const dirty_indicator = " [+]";
+            if (editor.dirty) min_size += dirty_indicator.len;
+            min_size += cursor_coordinates_col_count + 1; // 1 for padding
+            if (min_size > col_count) return Error.ViewportTooSmall;
 
-    try writer.writeAll(file_name);
-    if (editor.dirty) try writer.writeAll(dirty_indicator);
-    try writer.splatByteAll(' ', col_count - min_size);
-    try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
+            try writer.writeAll(file_name);
+            if (editor.dirty) try writer.writeAll(dirty_indicator);
+            try writer.splatByteAll(' ', col_count - min_size);
+            try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
+        },
+        // Draw prompt. Takes place of status line.
+        .prompt => |prompt| {
+            try writer.writeByte(':');
+            try writer.writeAll(prompt.buffer.items);
+        },
+    }
 
-    const cursor_cell = editor.viewport.cursorCell(cursor);
-    assert(cursor_cell.col >= gutter_width); // right of line numbers
-    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
+    // Restore cursor.
     const cursor_style: u8 = switch (editor.mode) {
         .normal => 2, // steady block
-        .insert => 6, // steady vertical bar
+        .prompt, .insert => 6, // steady vertical bar
     };
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     try writer.print("\x1b[{d}\x20q", .{cursor_style});
+    var cursor_cell: Viewport.Cell = undefined;
+    switch (editor.mode) {
+        .normal, .insert => {
+            cursor_cell = .{
+                .row = cursor.line_number - line_number_start,
+                .col = cursor.line_offset - line_offset_start + gutter_width,
+            };
+            assert(cursor_cell.col >= gutter_width); // right of line numbers
+        },
+        .prompt => |prompt| cursor_cell = .{
+            .row = editor.viewport.row_count - 1, // final row
+            .col = prompt.cursor_offset + 1, // +1 for the ':' prompt prefix
+        },
+    }
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
-    // Unhide cursor.
-    try writer.writeAll("\x1b[?25h");
+    try writer.writeAll("\x1b[?25h"); // unhide cursor
 
     try writer.flush();
+}
+
+fn save(editor: *Editor) !void {
+    try std.Io.Dir.cwd().writeFile(editor.io, .{
+        .data = editor.buffer.items,
+        .sub_path = editor.name,
+    });
+    editor.dirty = false;
 }
 
 const Position = struct { line_number: u16, line_offset: u16 };
@@ -346,13 +412,6 @@ const Viewport = struct {
         row: u16,
         col: u16,
     };
-
-    fn cursorCell(viewport: Viewport, cursor: Position) Cell {
-        return .{
-            .row = cursor.line_number - viewport.line_number_start,
-            .col = cursor.line_offset - viewport.line_offset_start + viewport.gutterWidth(),
-        };
-    }
 
     /// Last line offset visible in the viewport.
     fn lastOffset(viewport: Viewport) u16 {
