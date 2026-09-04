@@ -1988,11 +1988,14 @@ test "delete selection" {
     const io = std.testing.io;
 
     var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "v" ++ // start selection: anchor at first character
+        // Delete first line with anchor trailing cursor offset.
         "$" ++ // move to end of line
+        "v" ++ // start selection
+        "0" ++ // move to start of file
         "d" ++ // delete selection
         "j" ++ // move down a line
         "e" ++ // move to end of word
+        // Delete multiline selection with anchor leading cursor offset.
         "v" ++ // start selection
         "G" ++ // move to last line
         "$" ++ // move to end of line
@@ -2024,8 +2027,9 @@ test "delete selection" {
     ++ "\x1b[?25h" // unhide cursor
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == true); // process v
     try std.testing.expect(try editor.tick() == true); // process $
+    try std.testing.expect(try editor.tick() == true); // process v
+    try std.testing.expect(try editor.tick() == true); // process 0
     stripping.out.clearRetainingCapacity();
     try std.testing.expect(try editor.tick() == true); // process d
 
