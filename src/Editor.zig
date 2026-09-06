@@ -61,7 +61,6 @@ pub fn tick(editor: *Editor) !bool {
     } else switch (editor.mode) {
         .normal => switch (input) {
             .ascii => |c| switch (c) {
-                'q' => return false, // quit
                 'h' => editor.cursor.move(.left, 1, editor.buffer.items),
                 'l' => editor.cursor.move(.right, 1, editor.buffer.items),
                 'j' => editor.cursor.move(.down, 1, editor.buffer.items),
@@ -210,6 +209,8 @@ pub fn tick(editor: *Editor) !bool {
                         if (!editor.dirty) return false; // exit!
                         // Trying to exit without saving. Prompt user to save.
                         editor.mode = .{ .prompt = .unsaved };
+                    } else if (std.mem.eql(u8, "q!", command.buffer.items)) {
+                        return false; // exit, for real!
                     } else if (std.mem.eql(u8, "wq", command.buffer.items)) {
                         try editor.save();
                         return false;
@@ -1215,7 +1216,7 @@ test "rendering: hello_c" {
     const io = std.testing.io;
 
     var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "q"); // quit after first render
+        ":q!\r"); // quit after first render
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
@@ -1241,7 +1242,10 @@ test "rendering: hello_c" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // last tick: reports false on quit
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "rendering: empty" {
@@ -1249,13 +1253,11 @@ test "rendering: empty" {
     const io = std.testing.io;
 
     var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "q"); // quit after first render
+        ":q!\r"); // quit after first render
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "empty.zig", "\n");
     defer editor.deinit(allocator);
-
-    try std.testing.expect(try editor.tick() == false);
 
     try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
         "\x1b[2J" ++ // clear screen
@@ -1276,6 +1278,11 @@ test "rendering: empty" {
     ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
+
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "go to start/end of file" {
@@ -1285,7 +1292,7 @@ test "go to start/end of file" {
     var reader: std.Io.Reader = .fixed("\x1b[48;5;36;0;0t" ++ // dimensions: 5 rows by 36 cols
         "G" ++ // go to end of file
         "g" ++ // go to start of file
-        "q"); // quit
+        ":q!\r"); // quit
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
@@ -1334,7 +1341,10 @@ test "go to start/end of file" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process the q, exited
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "go to start/end of line" {
@@ -1344,7 +1354,7 @@ test "go to start/end of line" {
     var reader: std.Io.Reader = .fixed("\x1b[48;12;12;0;0t" ++ // dimensions: 12 rows by 12 cols
         "$" ++ // go to end of line
         "0" ++ // go to start of line
-        "q"); // quit
+        ":q!\r"); // quit
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
     var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
@@ -1414,7 +1424,10 @@ test "go to start/end of line" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process the q, exited
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "insert mode" {
@@ -1430,7 +1443,7 @@ test "insert mode" {
         "i" ++ // enter insert mode
         "\x08" ++ // backspace
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1575,7 +1588,10 @@ test "insert mode" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "new line with o preserves indentation" {
@@ -1587,7 +1603,7 @@ test "new line with o preserves indentation" {
         "o" ++ // open new line below
         "x" ++ // insert text
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1642,7 +1658,10 @@ test "new line with o preserves indentation" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "new line with O preserves indentation" {
@@ -1654,7 +1673,7 @@ test "new line with O preserves indentation" {
         "O" ++ // open new line above
         "x" ++ // insert text
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1709,7 +1728,10 @@ test "new line with O preserves indentation" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "insert with I goes to start of line after indentation" {
@@ -1721,7 +1743,7 @@ test "insert with I goes to start of line after indentation" {
         "I" ++ // insert at first non-whitespace character
         "x" ++ // insert text
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1776,7 +1798,10 @@ test "insert with I goes to start of line after indentation" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "A inserts at end of line" {
@@ -1788,7 +1813,7 @@ test "A inserts at end of line" {
         "A" ++ // insert at end of line
         "x" ++ // insert text
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1843,7 +1868,10 @@ test "A inserts at end of line" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "tab inserts four spaces" {
@@ -1855,7 +1883,7 @@ test "tab inserts four spaces" {
         "\t" ++ // insert four spaces
         "x" ++ // insert text
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1908,7 +1936,10 @@ test "tab inserts four spaces" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "enter preserves indentation" {
@@ -1922,7 +1953,7 @@ test "enter preserves indentation" {
         "\r" ++ // enter
         "y" ++ // insert text
         "\x1b[27u" ++ // ESC: return to normal mode
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -1979,7 +2010,10 @@ test "enter preserves indentation" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "delete" {
@@ -1993,7 +2027,7 @@ test "delete" {
         "G" ++ // move to last line
         "$" ++ // move to end of line
         "d" ++ // move to end of line
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -2094,7 +2128,10 @@ test "delete" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
 
 test "delete selection" {
@@ -2114,7 +2151,7 @@ test "delete selection" {
         "G" ++ // move to last line
         "$" ++ // move to end of line
         "d" ++ // delete selection
-        "q"); // quit
+        ":q!\r"); // quit
 
     var stripping: StrippingWriter = try .init(allocator);
     defer stripping.deinit();
@@ -2196,5 +2233,8 @@ test "delete selection" {
     ++ "\x1b[?2026l" // end synchronised update
     , stripping.written());
 
-    try std.testing.expect(try editor.tick() == false); // process q
+    try std.testing.expect(try editor.tick() == true); // process :
+    try std.testing.expect(try editor.tick() == true); // process q
+    try std.testing.expect(try editor.tick() == true); // process !
+    try std.testing.expect(try editor.tick() == false); // process enter
 }
