@@ -37,13 +37,10 @@ prompt_buffer: [std.math.maxInt(u8)]u8 = undefined,
 mode: union(enum) {
     normal,
     insert,
-    prompt: struct {
-        buffer: std.ArrayList(u8),
-        cursor_offset: u8,
-        kind: union(enum) {
-            command,
-            message: enum { command_not_recognised },
-        },
+    prompt: union(enum) {
+        command: struct { buffer: std.ArrayList(u8), cursor_offset: u8 },
+        message: enum { command_not_recognised },
+        unsaved,
     },
 },
 dirty: bool = false,
@@ -144,15 +141,13 @@ pub fn tick(editor: *Editor) !bool {
                     try editor.delete();
                     editor.cursor.update(editor.buffer.items, selection_head, .snap_update);
                 },
-                ':' => {
-                    for (&editor.prompt_buffer) |*byte| byte.* = undefined;
-                    editor.mode = .{
-                        .prompt = .{
-                            .kind = .command,
+                ':' => editor.mode = .{
+                    .prompt = .{
+                        .command = .{
                             .buffer = .initBuffer(&editor.prompt_buffer),
                             .cursor_offset = 0,
                         },
-                    };
+                    },
                 },
                 else => {},
             },
@@ -192,37 +187,39 @@ pub fn tick(editor: *Editor) !bool {
                 .resize => unreachable,
             }
         },
-        .prompt => |*prompt| switch (prompt.kind) {
-            .command => switch (input) {
+        .prompt => |*prompt| switch (prompt.*) {
+            .command => |*command| switch (input) {
                 .escape => editor.mode = .normal,
-                .ascii => |c| if (prompt.cursor_offset < prompt.buffer.capacity) {
-                    assert(prompt.cursor_offset == prompt.buffer.items.len);
-                    try prompt.buffer.insertBounded(prompt.cursor_offset, c);
-                    prompt.cursor_offset += 1;
-                    assert(prompt.cursor_offset == prompt.buffer.items.len);
+                .ascii => |c| if (command.cursor_offset < command.buffer.capacity) {
+                    assert(command.cursor_offset == command.buffer.items.len);
+                    try command.buffer.insertBounded(command.cursor_offset, c);
+                    command.cursor_offset += 1;
+                    assert(command.cursor_offset == command.buffer.items.len);
                 },
-                .backspace => if (prompt.cursor_offset != 0) {
-                    assert(prompt.cursor_offset == prompt.buffer.items.len);
-                    _ = prompt.buffer.orderedRemove(prompt.cursor_offset - 1);
-                    prompt.cursor_offset -= 1;
-                    assert(prompt.cursor_offset == prompt.buffer.items.len);
+                .backspace => if (command.cursor_offset != 0) {
+                    assert(command.cursor_offset == command.buffer.items.len);
+                    _ = command.buffer.orderedRemove(command.cursor_offset - 1);
+                    command.cursor_offset -= 1;
+                    assert(command.cursor_offset == command.buffer.items.len);
                 },
                 .enter => {
-                    if (std.mem.eql(u8, "w", prompt.buffer.items)) {
+                    if (std.mem.eql(u8, "w", command.buffer.items)) {
                         try editor.save();
                         editor.mode = .normal;
-                    } else if (std.mem.eql(u8, "q", prompt.buffer.items)) {
-                        return false;
-                    } else if (std.mem.eql(u8, "wq", prompt.buffer.items)) {
+                    } else if (std.mem.eql(u8, "q", command.buffer.items)) {
+                        if (!editor.dirty) return false; // exit!
+                        // Trying to exit without saving. Prompt user to save.
+                        editor.mode = .{ .prompt = .unsaved };
+                    } else if (std.mem.eql(u8, "wq", command.buffer.items)) {
                         try editor.save();
                         return false;
-                    } else if (std.fmt.parseInt(u16, prompt.buffer.items, 10) catch null) |number| {
+                    } else if (std.fmt.parseInt(u16, command.buffer.items, 10) catch null) |number| {
                         // Line number given is indexed from 1.
                         if (lineHeadFromNumber(editor.buffer.items, number - 1)) |head| {
                             editor.cursor.update(editor.buffer.items, head, .snap_remain);
                         }
                         editor.mode = .normal;
-                    } else prompt.kind = .{ .message = .command_not_recognised };
+                    } else editor.mode = .{ .prompt = .{ .message = .command_not_recognised } };
                 },
                 .tab, .chord => {}, // do nothing
                 .resize => unreachable,
@@ -230,6 +227,19 @@ pub fn tick(editor: *Editor) !bool {
             .message => switch (input) {
                 .enter, .escape => editor.mode = .normal,
                 .ascii, .tab, .chord, .backspace => {}, // do nothing
+                .resize => unreachable,
+            },
+            .unsaved => switch (input) {
+                .escape => editor.mode = .normal,
+                .ascii => |c| switch (c) {
+                    'y' => {
+                        try editor.save();
+                        return false;
+                    },
+                    'n' => return false, // quit without saving
+                    else => {}, // do nothing
+                },
+                .enter, .tab, .chord, .backspace => {}, // do nothing
                 .resize => unreachable,
             },
         },
@@ -377,13 +387,14 @@ fn render(editor: *const Editor, cursor: Position) !void {
             try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
         },
         // Draw prompt. Takes place of status line.
-        .prompt => |prompt| switch (prompt.kind) {
-            .command => {
+        .prompt => |prompt| switch (prompt) {
+            .command => |command| {
                 try writer.writeByte(':');
-                try writer.writeAll(prompt.buffer.items);
+                try writer.writeAll(command.buffer.items);
             },
+            .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.name}),
             .message => |message| switch (message) {
-                .command_not_recognised => try writer.writeAll("command not recognised"),
+                .command_not_recognised => try writer.writeAll("invalid command"),
             },
         },
     }
@@ -391,22 +402,26 @@ fn render(editor: *const Editor, cursor: Position) !void {
     // Restore cursor.
     const cursor_style: u8 = switch (editor.mode) {
         .normal => 2, // steady block
-        .prompt => |prompt| switch (prompt.kind) {
-            .command => 6, // steady vertical bar
+        .prompt => |prompt| switch (prompt) {
+            .command, .unsaved => 6, // steady vertical bar
             .message => 2,
         },
         .insert => 6,
     };
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     try writer.print("\x1b[{d}\x20q", .{cursor_style});
-    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and editor.mode.prompt.kind == .command) .{
+    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and
+        editor.mode.prompt == .command) .{
         .row = editor.viewport.row_count - 1, // final row
-        .col = editor.mode.prompt.cursor_offset + 1, // +1 for the ':' prompt prefix
-    } else .{
-        .row = cursor.line_number - line_number_start,
-        .col = cursor.line_offset - line_offset_start + gutter_width,
+        .col = editor.mode.prompt.command.cursor_offset + 1, // +1 for the ':' prompt prefix
+    } else blk: {
+        const cursor_cell: Viewport.Cell = .{
+            .row = cursor.line_number - line_number_start,
+            .col = cursor.line_offset - line_offset_start + gutter_width,
+        };
+        assert(cursor_cell.col >= gutter_width); // right of line numbers
+        break :blk cursor_cell;
     };
-    assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
