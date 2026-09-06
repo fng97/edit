@@ -186,7 +186,7 @@ pub fn tick(editor: *Editor) !bool {
         },
         .prompt => |*prompt| switch (input) {
             .escape => editor.mode = .normal,
-            .ascii => |c| {
+            .ascii => |c| if (prompt.cursor_offset < prompt.buffer.capacity) {
                 assert(prompt.cursor_offset == prompt.buffer.items.len);
                 try prompt.buffer.insertBounded(prompt.cursor_offset, c);
                 prompt.cursor_offset += 1;
