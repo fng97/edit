@@ -37,7 +37,14 @@ prompt_buffer: [std.math.maxInt(u8)]u8 = undefined,
 mode: union(enum) {
     normal,
     insert,
-    prompt: struct { buffer: std.ArrayList(u8), cursor_offset: u8 },
+    prompt: struct {
+        buffer: std.ArrayList(u8),
+        cursor_offset: u8,
+        kind: union(enum) {
+            command,
+            message: enum { command_not_recognised },
+        },
+    },
 },
 dirty: bool = false,
 
@@ -141,6 +148,7 @@ pub fn tick(editor: *Editor) !bool {
                     for (&editor.prompt_buffer) |*byte| byte.* = undefined;
                     editor.mode = .{
                         .prompt = .{
+                            .kind = .command,
                             .buffer = .initBuffer(&editor.prompt_buffer),
                             .cursor_offset = 0,
                         },
@@ -184,39 +192,46 @@ pub fn tick(editor: *Editor) !bool {
                 .resize => unreachable,
             }
         },
-        .prompt => |*prompt| switch (input) {
-            .escape => editor.mode = .normal,
-            .ascii => |c| if (prompt.cursor_offset < prompt.buffer.capacity) {
-                assert(prompt.cursor_offset == prompt.buffer.items.len);
-                try prompt.buffer.insertBounded(prompt.cursor_offset, c);
-                prompt.cursor_offset += 1;
-                assert(prompt.cursor_offset == prompt.buffer.items.len);
+        .prompt => |*prompt| switch (prompt.kind) {
+            .command => switch (input) {
+                .escape => editor.mode = .normal,
+                .ascii => |c| if (prompt.cursor_offset < prompt.buffer.capacity) {
+                    assert(prompt.cursor_offset == prompt.buffer.items.len);
+                    try prompt.buffer.insertBounded(prompt.cursor_offset, c);
+                    prompt.cursor_offset += 1;
+                    assert(prompt.cursor_offset == prompt.buffer.items.len);
+                },
+                .backspace => if (prompt.cursor_offset != 0) {
+                    assert(prompt.cursor_offset == prompt.buffer.items.len);
+                    _ = prompt.buffer.orderedRemove(prompt.cursor_offset - 1);
+                    prompt.cursor_offset -= 1;
+                    assert(prompt.cursor_offset == prompt.buffer.items.len);
+                },
+                .enter => {
+                    if (std.mem.eql(u8, "w", prompt.buffer.items)) {
+                        try editor.save();
+                        editor.mode = .normal;
+                    } else if (std.mem.eql(u8, "q", prompt.buffer.items)) {
+                        return false;
+                    } else if (std.mem.eql(u8, "wq", prompt.buffer.items)) {
+                        try editor.save();
+                        return false;
+                    } else if (std.fmt.parseInt(u16, prompt.buffer.items, 10) catch null) |number| {
+                        // Line number given is indexed from 1.
+                        if (lineHeadFromNumber(editor.buffer.items, number - 1)) |head| {
+                            editor.cursor.update(editor.buffer.items, head, .snap_remain);
+                        }
+                        editor.mode = .normal;
+                    } else prompt.kind = .{ .message = .command_not_recognised };
+                },
+                .tab, .chord => {}, // do nothing
+                .resize => unreachable,
             },
-            .backspace => if (prompt.cursor_offset != 0) {
-                assert(prompt.cursor_offset == prompt.buffer.items.len);
-                _ = prompt.buffer.orderedRemove(prompt.cursor_offset - 1);
-                prompt.cursor_offset -= 1;
-                assert(prompt.cursor_offset == prompt.buffer.items.len);
+            .message => switch (input) {
+                .enter, .escape => editor.mode = .normal,
+                .ascii, .tab, .chord, .backspace => {}, // do nothing
+                .resize => unreachable,
             },
-            .enter => {
-                if (std.mem.eql(u8, "w", prompt.buffer.items)) {
-                    try editor.save();
-                } else if (std.mem.eql(u8, "q", prompt.buffer.items)) {
-                    return false;
-                } else if (std.mem.eql(u8, "wq", prompt.buffer.items)) {
-                    try editor.save();
-                    return false;
-                } else if (std.fmt.parseInt(u16, prompt.buffer.items, 10) catch null) |number| {
-                    // Line number given is indexed from 1.
-                    if (lineHeadFromNumber(editor.buffer.items, number - 1)) |head| {
-                        editor.cursor.update(editor.buffer.items, head, .snap_remain);
-                    }
-                }
-                // TODO: Error if command not recognised.
-                editor.mode = .normal;
-            },
-            .tab, .chord => {}, // do nothing
-            .resize => unreachable,
         },
     }
 
@@ -273,7 +288,9 @@ fn render(editor: *const Editor, cursor: Position) !void {
     const buffer = editor.buffer.items;
     const file_name = editor.name;
 
-    try writer.writeAll("\x1b[?2026h"); // begin synchronised update
+    // Begin synchronised update. See
+    // https://contour-terminal.org/vt-extensions/synchronized-output.
+    try writer.writeAll("\x1b[?2026h");
     // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
     try writer.writeAll("\x1b[2J");
     // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
@@ -360,33 +377,36 @@ fn render(editor: *const Editor, cursor: Position) !void {
             try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
         },
         // Draw prompt. Takes place of status line.
-        .prompt => |prompt| {
-            try writer.writeByte(':');
-            try writer.writeAll(prompt.buffer.items);
+        .prompt => |prompt| switch (prompt.kind) {
+            .command => {
+                try writer.writeByte(':');
+                try writer.writeAll(prompt.buffer.items);
+            },
+            .message => |message| switch (message) {
+                .command_not_recognised => try writer.writeAll("command not recognised"),
+            },
         },
     }
 
     // Restore cursor.
     const cursor_style: u8 = switch (editor.mode) {
         .normal => 2, // steady block
-        .prompt, .insert => 6, // steady vertical bar
+        .prompt => |prompt| switch (prompt.kind) {
+            .command => 6, // steady vertical bar
+            .message => 2,
+        },
+        .insert => 6,
     };
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     try writer.print("\x1b[{d}\x20q", .{cursor_style});
-    var cursor_cell: Viewport.Cell = undefined;
-    switch (editor.mode) {
-        .normal, .insert => {
-            cursor_cell = .{
-                .row = cursor.line_number - line_number_start,
-                .col = cursor.line_offset - line_offset_start + gutter_width,
-            };
-            assert(cursor_cell.col >= gutter_width); // right of line numbers
-        },
-        .prompt => |prompt| cursor_cell = .{
-            .row = editor.viewport.row_count - 1, // final row
-            .col = prompt.cursor_offset + 1, // +1 for the ':' prompt prefix
-        },
-    }
+    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and editor.mode.prompt.kind == .command) .{
+        .row = editor.viewport.row_count - 1, // final row
+        .col = editor.mode.prompt.cursor_offset + 1, // +1 for the ':' prompt prefix
+    } else .{
+        .row = cursor.line_number - line_number_start,
+        .col = cursor.line_offset - line_offset_start + gutter_width,
+    };
+    assert(cursor_cell.col >= gutter_width); // right of line numbers
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
