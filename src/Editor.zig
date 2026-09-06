@@ -206,6 +206,11 @@ pub fn tick(editor: *Editor) !bool {
                 } else if (std.mem.eql(u8, "wq", prompt.buffer.items)) {
                     try editor.save();
                     return false;
+                } else if (std.fmt.parseInt(u16, prompt.buffer.items, 10) catch null) |number| {
+                    // Line number given is indexed from 1.
+                    if (lineHeadFromNumber(editor.buffer.items, number - 1)) |head| {
+                        editor.cursor.update(editor.buffer.items, head, .snap_remain);
+                    }
                 }
                 // TODO: Error if command not recognised.
                 editor.mode = .normal;
@@ -445,7 +450,12 @@ const Cursor = struct {
     ) void {
         assert(buffer.len > 0);
         cursor.offset = @min(offset, buffer.len - 1);
-        if (kind == .snap_update) cursor.line_offset_snap = lineOffset(buffer, cursor.offset);
+        switch (kind) {
+            .snap_update => cursor.line_offset_snap = lineOffset(buffer, cursor.offset),
+            // Remain snapped. Make sure offset is on snap OR line end.
+            .snap_remain => cursor.offset = lineHead(buffer, cursor.offset) +
+                @min(cursor.line_offset_snap, lineSize(buffer, cursor.offset) - 1),
+        }
     }
 
     const Direction = enum { up, down, left, right };
@@ -461,15 +471,8 @@ const Cursor = struct {
                 cursor.update(buffer, lineTail(buffer, cursor.offset), .snap_update);
                 cursor.line_offset_snap = line_offset_max;
             },
-            .down => {
-                const line_head = lineHead(buffer, @intCast(buffer.len - 1)); // last line
-                const line_offset = @min(cursor.line_offset_snap, lineSize(buffer, line_head) - 1);
-                cursor.update(buffer, line_head + line_offset, .snap_remain);
-            },
-            .up => cursor.update(buffer, @min( // stay clamped to snap or line end
-                cursor.line_offset_snap,
-                lineSize(buffer, 0) - 1, // first line
-            ), .snap_remain),
+            .down => cursor.update(buffer, @intCast(buffer.len - 1), .snap_remain), // last line
+            .up => cursor.update(buffer, 0, .snap_remain), // first line
         }
     }
 
@@ -713,6 +716,23 @@ test lineIndentation {
     try std.testing.expectEqual(2, lineIndentation("  badabop\n boom \npow", 9));
     try std.testing.expectEqual(1, lineIndentation("  badabop\n boom \npow", 10));
     try std.testing.expectEqual(0, lineIndentation("  badabop\n boom \npow", 17));
+}
+
+fn lineHeadFromNumber(buffer: []const u8, line_number: u16) ?u32 {
+    var i: u32 = 0;
+    var count: u16 = 0;
+    while (i < buffer.len and count < line_number) : (i += 1) {
+        if (buffer[i] == '\n') count += 1;
+    }
+    return if (i == buffer.len) null else i;
+}
+
+test lineHeadFromNumber {
+    try std.testing.expectEqual(0, lineHeadFromNumber("  yo\n\nhi\n\n", 0));
+    try std.testing.expectEqual(5, lineHeadFromNumber("  yo\n\nhi\n\n", 1));
+    try std.testing.expectEqual(6, lineHeadFromNumber("  yo\n\nhi\n\n", 2));
+    try std.testing.expectEqual(9, lineHeadFromNumber("  yo\n\nhi\n\n", 3));
+    try std.testing.expectEqual(null, lineHeadFromNumber("  yo\n\nhi\n\n", 4));
 }
 
 fn lineOffset(buffer: []const u8, offset: u32) u16 {
