@@ -10,6 +10,7 @@
 // 0x7  p    q    r    s    t    u    v    w    x    y    z    {    |    }    ~    DEL
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const assert = std.debug.assert;
 const Editor = @This();
@@ -390,10 +391,11 @@ fn render(editor: *const Editor, cursor: Position) !void {
 }
 
 fn save(editor: *Editor) !void {
-    try std.Io.Dir.cwd().writeFile(editor.io, .{
+    if (!builtin.is_test) try std.Io.Dir.cwd().writeFile(editor.io, .{
         .data = editor.buffer.items,
         .sub_path = editor.name,
     });
+
     editor.dirty = false;
 }
 
