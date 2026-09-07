@@ -401,16 +401,16 @@ fn render(editor: *const Editor, cursor: Position) !void {
     }
 
     // Restore cursor.
-    const cursor_style: u8 = switch (editor.mode) {
-        .normal => 2, // steady block
+    const cursor_style: Cursor.Style = switch (editor.mode) {
+        .normal => .steady_block,
         .prompt => |prompt| switch (prompt) {
-            .command, .unsaved => 6, // steady vertical bar
-            .message => 2,
+            .command => .steady_bar,
+            .message, .unsaved => .steady_block,
         },
-        .insert => 6,
+        .insert => .steady_bar,
     };
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
-    try writer.print("\x1b[{d}\x20q", .{cursor_style});
+    try writer.print("\x1b[{d}\x20q", .{@backingInt(cursor_style)});
     const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and
         editor.mode.prompt == .command) .{
         .row = editor.viewport.row_count - 1, // final row
@@ -493,6 +493,11 @@ const Cursor = struct {
                 @min(cursor.line_offset_snap, lineSize(buffer, cursor.offset) - 1),
         }
     }
+
+    const Style = enum(u8) {
+        steady_bar = 6,
+        steady_block = 2,
+    };
 
     const Direction = enum { up, down, left, right };
 
@@ -1201,6 +1206,78 @@ const StrippingWriter = struct {
     }
 };
 
+const TestEditor = struct {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    reader: std.Io.Reader,
+    stripping_writer: StrippingWriter,
+    editor: Editor,
+
+    fn init(test_editor: *TestEditor, params: struct {
+        file_path: []const u8,
+        file_bytes: []const u8,
+        input: []const u8,
+    }) !void {
+        test_editor.stripping_writer = try .init(allocator);
+        test_editor.reader = .fixed(params.input);
+        test_editor.editor = try .init(
+            allocator,
+            io,
+            &test_editor.reader,
+            test_editor.stripping_writer.writer(),
+            params.file_path,
+            params.file_bytes,
+        );
+    }
+
+    fn deinit(test_editor: *TestEditor) void {
+        test_editor.stripping_writer.deinit();
+        test_editor.editor.deinit(allocator);
+    }
+
+    fn tick(test_editor: *TestEditor) !void {
+        try std.testing.expect(try test_editor.editor.tick());
+    }
+
+    fn expectQuit(test_editor: *TestEditor) !void {
+        try std.testing.expect(try test_editor.editor.tick()); // process :
+        try std.testing.expect(try test_editor.editor.tick()); // process q
+        try std.testing.expect(try test_editor.editor.tick()); // process !
+        try std.testing.expect(!try test_editor.editor.tick()); // process enter, returns false
+    }
+
+    fn clearRenderBuffer(test_editor: *TestEditor) void {
+        test_editor.stripping_writer.out.clearRetainingCapacity();
+    }
+
+    fn expectRender(
+        test_editor: *TestEditor,
+        viewport: []const u8,
+        cursor_cell: Viewport.Cell,
+        cursor_style: Cursor.Style,
+    ) !void {
+        const expected = try std.fmt.allocPrint(
+            allocator,
+            "\x1b[?2026h" ++ // begin synchronised update
+                "\x1b[2J" ++ // clear screen
+                "\x1b[H" ++ // place cursor at top left
+                "{s}" ++
+                "\x1b[{d}\x20q" ++ // cursor style
+                "\x1b[{d};{d}H" ++ // cursor coordinates (indexed from 1)
+                "\x1b[?2026l", // end synchronised update
+            .{
+                viewport,
+                @backingInt(cursor_style),
+                cursor_cell.row + 1,
+                cursor_cell.col + 1,
+            },
+        );
+        defer allocator.free(expected);
+        try std.testing.expectEqualSlices(u8, expected, test_editor.stripping_writer.written());
+    }
+};
+
 const hello_c =
     \\#include <stdio.h>
     \\
@@ -1212,19 +1289,16 @@ const hello_c =
 ;
 
 test "rendering: hello_c" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        ":q!\r"); // quit after first render
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1237,31 +1311,22 @@ test "rendering: hello_c" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process quit
 }
 
 test "rendering: empty" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "empty.zig",
+        .file_bytes = "\n",
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        ":q!\r"); // quit after first render
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "empty.zig", "\n");
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 
         \\ 2 ~
         \\ 3 ~
@@ -1274,95 +1339,69 @@ test "rendering: empty" {
         \\10 ~
         \\11 ~
         \\empty.zig                        1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
-test "go to start/end of file" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+test "vertical scroll: go to start/end of file" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;5;36;0;0t" ++ // dimensions: 5 rows by 36 cols
+            "G" ++ // go to end of file
+            "g" ++ // go to start of file
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;5;36;0;0t" ++ // dimensions: 5 rows by 36 cols
-        "G" ++ // go to end of file
-        "g" ++ // go to start of file
-        ":q!\r"); // quit
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\1 #include <stdio.h>
         \\2 
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;3H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 2 }, .steady_block);
 
-    stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the G
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process G
+
+    try test_editor.expectRender(
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\5   return 0;
         \\6 }
         \\hello.c                          6,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[4;3H" // cursor coordinates at end of file: 3, 2 (but indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 3, .col = 2 }, .steady_block);
 
-    stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the g
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process g
+
+    try test_editor.expectRender(
         \\1 #include <stdio.h>
         \\2 
         \\3 int main() {
         \\4   printf("Hello, world!\n");
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;3H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 2 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
-test "go to start/end of line" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+test "horizontal scroll: go to start/end of line" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;12;0;0t" ++ // dimensions: 12 rows by 12 cols
+            "$" ++ // go to end of line
+            "0" ++ // go to start of line
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;12;0;0t" ++ // dimensions: 12 rows by 12 cols
-        "$" ++ // go to end of line
-        "0" ++ // go to start of line
-        ":q!\r"); // quit
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include 
         \\ 2 
         \\ 3 int main(
@@ -1375,16 +1414,12 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c  1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the $
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process $
+
+    try test_editor.expectRender(
         \\ 1 stdio.h>
         \\ 2 
         \\ 3  {
@@ -1397,16 +1432,12 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c 1,19
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;12H" // cursor coordinates at end of line: 0, 11 (but indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 11 }, .steady_block);
 
-    stripping.out.clearRetainingCapacity(); // clear what we've written
-    try std.testing.expect(try editor.tick() == true); // process the 0
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process 0
+
+    try test_editor.expectRender(
         \\ 1 #include 
         \\ 2 
         \\ 3 int main(
@@ -1419,40 +1450,30 @@ test "go to start/end of line" {
         \\10 ~
         \\11 ~
         \\hello.c  1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "insert mode" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "i" ++ // enter insert mode
+            "a" ++ // insert text
+            "b" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            "$" ++ // move to end of line
+            "i" ++ // enter insert mode
+            "\x08" ++ // backspace
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "i" ++ // enter insert mode
-        "a" ++ // insert text
-        "b" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        "$" ++ // move to end of line
-        "i" ++ // enter insert mode
-        "\x08" ++ // backspace
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1465,17 +1486,12 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process i
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process i
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1488,17 +1504,12 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[6\x20q" // cursor style (steady block -> steady bar)
-    ++ "\x1b[1;4H" // cursor remains at start of file
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_bar); // changed to steady bar
 
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process a
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process a
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 a#include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1511,17 +1522,13 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,2
-    ++ "\x1b[6\x20q" // cursor style (steady bar)
-    ++ "\x1b[1;5H" // cursor moves after inserted character
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+        //         ^ dirty buffer indicator
+    , .{ .row = 0, .col = 4 }, .steady_bar);
 
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process b
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process b
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 ab#include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1534,17 +1541,12 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,3
-    ++ "\x1b[6\x20q" // cursor style (steady bar)
-    ++ "\x1b[1;6H" // cursor moves after second inserted character
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 5 }, .steady_bar);
 
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 ab#include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1557,20 +1559,15 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,3
-    ++ "\x1b[2\x20q" // restore normal cursor style
-    ++ "\x1b[1;6H" // cursor remains after inserted text
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 5 }, .steady_block); // back to steady block
 
-    try std.testing.expect(try editor.tick() == true); // process $
-    try std.testing.expect(try editor.tick() == true); // process i
-    try std.testing.expect(try editor.tick() == true); // process backspace
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process $
+    try test_editor.tick(); // process i
+    try test_editor.tick(); // process backspace
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 ab#include <stdio.h
         \\ 2 
         \\ 3 int main() {
@@ -1583,36 +1580,26 @@ test "insert mode" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                     1,20
-    ++ "\x1b[2\x20q" // cursor style
-    ++ "\x1b[1;23H" // cursor coordinates (indexed from 0)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 22 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "new line with o preserves indentation" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to printf line
+            "o" ++ // open new line below
+            "x" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "jjj" ++ // move to printf line
-        "o" ++ // open new line below
-        "x" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1625,22 +1612,17 @@ test "new line with o preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process o
-    try std.testing.expect(try editor.tick() == true); // process x
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process o
+    try test_editor.tick(); // process x
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1653,36 +1635,26 @@ test "new line with o preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      5,4
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[5;7H" // cursor after x
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 4, .col = 6 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "new line with O preserves indentation" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to printf line
+            "O" ++ // open new line above
+            "x" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "jjj" ++ // move to printf line
-        "O" ++ // open new line above
-        "x" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1695,22 +1667,17 @@ test "new line with O preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process O
-    try std.testing.expect(try editor.tick() == true); // process x
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process O
+    try test_editor.tick(); // process x
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1723,36 +1690,26 @@ test "new line with O preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      4,4
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[4;7H" // cursor after x
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 3, .col = 6 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "insert with I goes to start of line after indentation" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to printf line
+            "I" ++ // insert at first non-whitespace character
+            "x" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "jjj" ++ // move to printf line
-        "I" ++ // insert at first non-whitespace character
-        "x" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1765,22 +1722,17 @@ test "insert with I goes to start of line after indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process I
-    try std.testing.expect(try editor.tick() == true); // process x
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process I
+    try test_editor.tick(); // process x
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1793,36 +1745,26 @@ test "insert with I goes to start of line after indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      4,4
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[4;7H" // cursor after y
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 3, .col = 6 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "A inserts at end of line" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to printf line
+            "A" ++ // insert at end of line
+            "x" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "jjj" ++ // move to printf line
-        "A" ++ // insert at end of line
-        "x" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1835,22 +1777,17 @@ test "A inserts at end of line" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process A
-    try std.testing.expect(try editor.tick() == true); // process x
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process A
+    try test_editor.tick(); // process x
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1863,36 +1800,26 @@ test "A inserts at end of line" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                     4,30
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[4;33H" // cursor after x
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 3, .col = 32 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "tab inserts four spaces" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "i" ++ // enter insert mode
+            "\t" ++ // insert four spaces
+            "x" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "i" ++ // enter insert mode
-        "\t" ++ // insert four spaces
-        "x" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1905,20 +1832,15 @@ test "tab inserts four spaces" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process i
-    try std.testing.expect(try editor.tick() == true); // process tab
-    try std.testing.expect(try editor.tick() == true); // process x
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process i
+    try test_editor.tick(); // process tab
+    try test_editor.tick(); // process x
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1     x#include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1931,38 +1853,28 @@ test "tab inserts four spaces" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,6
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;9H" // cursor after x
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 8 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "enter preserves indentation" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to printf line
+            "I" ++ // insert at first non-whitespace character
+            "x" ++ // insert text
+            "\r" ++ // enter
+            "y" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "jjj" ++ // move to printf line
-        "I" ++ // insert at first non-whitespace character
-        "x" ++ // insert text
-        "\r" ++ // enter
-        "y" ++ // insert text
-        "\x1b[27u" ++ // ESC: return to normal mode
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -1975,24 +1887,19 @@ test "enter preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process I
-    try std.testing.expect(try editor.tick() == true); // process x
-    try std.testing.expect(try editor.tick() == true); // process enter
-    try std.testing.expect(try editor.tick() == true); // process y
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process escape
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process I
+    try test_editor.tick(); // process x
+    try test_editor.tick(); // process enter
+    try test_editor.tick(); // process y
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process escape
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -2005,38 +1912,28 @@ test "enter preserves indentation" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      5,4
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[5;7H" // cursor after y
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 4, .col = 6 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "delete" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "d" ++ // delete first character
+            "$" ++ // move to end of line
+            "d" ++ // delete newline (character at end of line)
+            "G" ++ // move to last line
+            "$" ++ // move to end of line
+            "d" ++ // move to end of line
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        "d" ++ // delete first character
-        "$" ++ // move to end of line
-        "d" ++ // delete newline (character at end of line)
-        "G" ++ // move to last line
-        "$" ++ // move to end of line
-        "d" ++ // move to end of line
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -2049,17 +1946,12 @@ test "delete" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process d
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -2072,19 +1964,13 @@ test "delete" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,1
-        //         ^ file edited
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process $
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process d
+    try test_editor.tick(); // process $
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 include <stdio.h>
         \\ 2 int main() {
         \\ 3   printf("Hello, world!\n");
@@ -2097,20 +1983,15 @@ test "delete" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                     1,18
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;21H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 20 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process G
-    try std.testing.expect(try editor.tick() == true); // process $
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process d
+    try test_editor.tick(); // process G
+    try test_editor.tick(); // process $
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
 
     // Same as last time. You can't delete the final newline.
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 include <stdio.h>
         \\ 2 int main() {
         \\ 3   printf("Hello, world!\n");
@@ -2123,44 +2004,34 @@ test "delete" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      5,2
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[5;5H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 4, .col = 4 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
 
 test "delete selection" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            // Delete first line with anchor trailing cursor offset.
+            "$" ++ // move to end of line
+            "v" ++ // start selection
+            "0" ++ // move to start of file
+            "d" ++ // delete selection
+            "j" ++ // move down a line
+            "e" ++ // move to end of word
+            // Delete multiline selection with anchor leading cursor offset.
+            "v" ++ // start selection
+            "G" ++ // move to last line
+            "$" ++ // move to end of line
+            "d" ++ // delete selection
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
 
-    var reader: std.Io.Reader = .fixed("\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
-        // Delete first line with anchor trailing cursor offset.
-        "$" ++ // move to end of line
-        "v" ++ // start selection
-        "0" ++ // move to start of file
-        "d" ++ // delete selection
-        "j" ++ // move down a line
-        "e" ++ // move to end of word
-        // Delete multiline selection with anchor leading cursor offset.
-        "v" ++ // start selection
-        "G" ++ // move to last line
-        "$" ++ // move to end of line
-        "d" ++ // delete selection
-        ":q!\r"); // quit
-
-    var stripping: StrippingWriter = try .init(allocator);
-    defer stripping.deinit();
-    var editor: Editor = try .init(allocator, io, &reader, stripping.writer(), "hello.c", hello_c);
-    defer editor.deinit(allocator);
-
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 #include <stdio.h>
         \\ 2 
         \\ 3 int main() {
@@ -2173,20 +2044,15 @@ test "delete selection" {
         \\10 ~
         \\11 ~
         \\hello.c                          1,1
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process $
-    try std.testing.expect(try editor.tick() == true); // process v
-    try std.testing.expect(try editor.tick() == true); // process 0
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process d
+    try test_editor.tick(); // process $
+    try test_editor.tick(); // process v
+    try test_editor.tick(); // process 0
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 
         \\ 2 int main() {
         \\ 3   printf("Hello, world!\n");
@@ -2199,23 +2065,17 @@ test "delete selection" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      1,1
-        //         ^ file edited
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[1;4H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process j
-    try std.testing.expect(try editor.tick() == true); // process e
-    try std.testing.expect(try editor.tick() == true); // process v
-    try std.testing.expect(try editor.tick() == true); // process G
-    try std.testing.expect(try editor.tick() == true); // process $
-    stripping.out.clearRetainingCapacity();
-    try std.testing.expect(try editor.tick() == true); // process d
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process e
+    try test_editor.tick(); // process v
+    try test_editor.tick(); // process G
+    try test_editor.tick(); // process $
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
 
-    try std.testing.expectEqualSlices(u8, "\x1b[?2026h" ++ // begin synchronised update
-        "\x1b[2J" ++ // clear screen
-        "\x1b[H" ++ // place cursor at top left
+    try test_editor.expectRender(
         \\ 1 
         \\ 2 in
         \\ 3 ~
@@ -2228,13 +2088,7 @@ test "delete selection" {
         \\10 ~
         \\11 ~
         \\hello.c [+]                      2,3
-    ++ "\x1b[2\x20q" // cursor style (steady block)
-    ++ "\x1b[2;6H" // cursor coordinates (indexed from 1)
-    ++ "\x1b[?2026l" // end synchronised update
-    , stripping.written());
+    , .{ .row = 1, .col = 5 }, .steady_block);
 
-    try std.testing.expect(try editor.tick() == true); // process :
-    try std.testing.expect(try editor.tick() == true); // process q
-    try std.testing.expect(try editor.tick() == true); // process !
-    try std.testing.expect(try editor.tick() == false); // process enter
+    try test_editor.expectQuit(); // process :q!\r
 }
