@@ -197,8 +197,10 @@ pub fn tick(editor: *Editor) !bool {
         .prompt => |*prompt| switch (prompt.*) {
             .command => |*command| switch (input) {
                 .escape => editor.mode = .normal,
+                // Keep entering text as long as we've got room in the buffer and on the row. The
+                // -2 below (aside from count->index) is to account for the prompt prefix, ':'.
                 .ascii => |c| if (command.cursor_offset < command.buffer.capacity and
-                    command.cursor_offset < editor.viewport.col_count - 1)
+                    command.cursor_offset < editor.viewport.col_count - 2)
                 {
                     assert(command.cursor_offset == command.buffer.items.len);
                     try command.buffer.insertBounded(command.cursor_offset, c);
