@@ -21,9 +21,15 @@ const line_offset_max = 1_000;
 const row_count_max = 2_000;
 const col_count_max = 500;
 const terminal_init =
-    "\x1b[?1049h" ++ // use alt screen: stores screen and cursor state and has no scrollback
-    "\x1b[>1u" ++ // initialise Kitty Keyboard Protocol (KKP) mode 1 (disambiguate escape codes)
-    "\x1b[?2048h"; // enable in-band resize notifications
+    // Use alternate screen. Stores original screen and cursor state and has no scrollback. See
+    // https://terminfo.dev/modes/decset-1049-alt-screen-enter.
+    "\x1b[?1049h" ++
+    // Initialise Kitty Keyboard Protocol (KKP) in mode 1: disambiguate escape codes: See
+    // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes.
+    "\x1b[>1u" ++
+    // Enable in-band resize notifications. See
+    // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
+    "\x1b[?2048h";
 const terminal_deinit =
     "\x1b[?2048l" ++ // disable in-band resize notifications
     "\x1b[<u" ++ // pop KKP flags
