@@ -147,12 +147,12 @@ pub fn tick(editor: *Editor) !bool {
                 'v' => editor.cursor.anchor =
                     if (editor.cursor.anchor != null) null else editor.cursor.offset,
                 'd' => {
-                    const selection_head = if (editor.cursor.anchor) |anchor| @min(
-                        editor.cursor.offset,
-                        anchor,
-                    ) else editor.cursor.offset;
+                    const cursor_offset = if (editor.cursor.selection()) |selection|
+                        selection.head
+                    else
+                        editor.cursor.offset;
                     try editor.delete();
-                    editor.cursor.update(editor.buffer.items, selection_head, .snap_update);
+                    editor.cursor.update(editor.buffer.items, cursor_offset, .snap_update);
                 },
                 ':' => editor.mode = .{
                     .prompt = .{
@@ -629,6 +629,20 @@ const Cursor = struct {
             }), .snap_remain),
         }
     }
+
+    fn selection(cursor: *const Cursor) ?struct {
+        head: u32,
+        tail: u32,
+
+        fn size(sel: @This()) u32 {
+            return sel.tail - sel.head + 1; // +1: offset -> size
+        }
+    } {
+        if (cursor.anchor) |anchor| return .{
+            .head = @min(anchor, cursor.offset),
+            .tail = @max(anchor, cursor.offset),
+        } else return null;
+    }
 };
 
 const Error = error{
@@ -825,12 +839,9 @@ fn insert(editor: *Editor, text: []const u8) !void {
 
 /// Delete text under cursor.
 fn delete(editor: *Editor) !void {
-    if (editor.cursor.anchor) |anchor| {
-        const selection_head = @min(anchor, editor.cursor.offset);
-        const selection_tail = @max(anchor, editor.cursor.offset);
-        const selection_size = selection_tail - selection_head + 1; // +1: offset -> size
+    if (editor.cursor.selection()) |selection| {
         // We're removing text here so this should never return an error.
-        editor.buffer.replaceRangeAssumeCapacity(selection_head, selection_size, "");
+        editor.buffer.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
         editor.cursor.anchor = null;
     } else _ = editor.buffer.orderedRemove(editor.cursor.offset);
     // File must always end in a newline.
