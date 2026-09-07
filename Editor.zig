@@ -47,7 +47,7 @@ io: std.Io,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
-prompt_buffer: [std.math.maxInt(u8)]u8 = undefined,
+prompt_command_buffer: [std.math.maxInt(u8)]u8 = undefined,
 mode: union(enum) {
     normal,
     insert,
@@ -157,7 +157,7 @@ pub fn tick(editor: *Editor) !bool {
                 ':' => editor.mode = .{
                     .prompt = .{
                         .command = .{
-                            .buffer = .initBuffer(&editor.prompt_buffer),
+                            .buffer = .initBuffer(&editor.prompt_command_buffer),
                             .cursor_offset = 0,
                         },
                     },
