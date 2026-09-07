@@ -8,27 +8,22 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const mod = b.createModule(.{
+        .root_source_file = b.path("Editor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     test_step.dependOn(blk: {
         const run = b.addRunArtifact(b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/Editor.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
-            // .use_llvm = true, // when using a debugger
+            .root_module = mod,
+            // .use_llvm = true, // when using debugger
         }));
         break :blk &run.step;
     });
 
     run_step.dependOn(blk: {
-        const main = b.addExecutable(.{
-            .name = "edit",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("src/main.zig"),
-                .target = target,
-                .optimize = optimize,
-            }),
-        });
+        const main = b.addExecutable(.{ .name = "edit", .root_module = mod });
         b.installArtifact(main);
         const run = b.addRunArtifact(main);
         run.step.dependOn(install_step); // run from prefix
