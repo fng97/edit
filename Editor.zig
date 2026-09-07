@@ -59,6 +59,8 @@ mode: union(enum) {
 },
 dirty: bool = false,
 
+clipboard_buffer: std.ArrayList(u8),
+
 // Viewport state:
 viewport: Viewport,
 cursor: Cursor,
@@ -131,16 +133,16 @@ pub fn tick(editor: *Editor) !bool {
                 'o' => {
                     editor.cursor.moveMax(.right, editor.buffer.items);
                     const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    try editor.insert("\n");
-                    for (0..indentation) |_| try editor.insert(" ");
+                    try editor.insertAndMoveCursor("\n");
+                    for (0..indentation) |_| try editor.insertAndMoveCursor(" ");
                     editor.mode = .insert;
                 },
                 'O' => {
                     editor.cursor.moveMax(.left, editor.buffer.items);
                     const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    try editor.insert("\n");
+                    try editor.insertAndMoveCursor("\n");
                     editor.cursor.move(.up, 1, editor.buffer.items);
-                    for (0..indentation) |_| try editor.insert(" ");
+                    for (0..indentation) |_| try editor.insertAndMoveCursor(" ");
                     editor.mode = .insert;
                 },
                 // Enable/disable selection.
@@ -151,8 +153,14 @@ pub fn tick(editor: *Editor) !bool {
                         selection.head
                     else
                         editor.cursor.offset;
-                    try editor.delete();
+                    editor.yank();
+                    editor.delete();
                     editor.cursor.update(editor.buffer.items, cursor_offset, .snap_update);
+                },
+                'p' => if (editor.clipboard_buffer.items.len != 0) {
+                    editor.cursor.move(.right, 1, editor.buffer.items);
+                    try editor.insertAndMoveCursor(editor.clipboard_buffer.items);
+                    editor.cursor.move(.left, 1, editor.buffer.items);
                 },
                 ':' => editor.mode = .{
                     .prompt = .{
@@ -185,16 +193,16 @@ pub fn tick(editor: *Editor) !bool {
             editor.cursor.anchor = null;
             switch (input) {
                 .escape => editor.mode = .normal,
-                .ascii => |c| try editor.insert(&.{c}),
+                .ascii => |c| try editor.insertAndMoveCursor(&.{c}),
                 .backspace => if (editor.cursor.offset != 0) {
                     editor.cursor.move(.left, 1, editor.buffer.items);
-                    try editor.delete();
+                    editor.delete();
                 },
-                .tab => try editor.insert("    "),
+                .tab => try editor.insertAndMoveCursor("    "),
                 .enter => {
                     const indent_count = lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    try editor.insert("\n");
-                    for (0..indent_count) |_| try editor.insert(" ");
+                    try editor.insertAndMoveCursor("\n");
+                    for (0..indent_count) |_| try editor.insertAndMoveCursor(" ");
                 },
                 .chord => {}, // do nothing
                 .resize => unreachable,
@@ -634,8 +642,12 @@ const Cursor = struct {
         head: u32,
         tail: u32,
 
-        fn size(sel: @This()) u32 {
-            return sel.tail - sel.head + 1; // +1: offset -> size
+        fn size(this: @This()) u32 {
+            return this.tail - this.head + 1; // +1: offset -> size
+        }
+
+        fn bytes(this: @This(), buffer: []const u8) []const u8 {
+            return buffer[this.head..this.size()];
         }
     } {
         if (cursor.anchor) |anchor| return .{
@@ -681,6 +693,9 @@ pub fn init(
     errdefer buffer.deinit(allocator);
     buffer.appendSliceAssumeCapacity(file_bytes);
 
+    var clipboard_buffer: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
+    errdefer clipboard_buffer.deinit(allocator);
+
     var editor: Editor = .{
         .io = io,
         .reader = reader,
@@ -694,6 +709,7 @@ pub fn init(
         },
         .name = file_name,
         .buffer = buffer,
+        .clipboard_buffer = clipboard_buffer,
         .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
     };
 
@@ -707,6 +723,7 @@ pub fn init(
 
 pub fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
     editor.buffer.deinit(allocator);
+    editor.clipboard_buffer.deinit(allocator);
 }
 
 /// Kitty Keyboard Protocol modifiers:
@@ -833,12 +850,16 @@ fn insert(editor: *Editor, text: []const u8) !void {
     assert(text.len > 0);
     assert(editor.cursor.offset < editor.buffer.items.len);
     try editor.buffer.insertSliceBounded(editor.cursor.offset, text);
-    editor.cursor.move(.right, @intCast(text.len), editor.buffer.items);
     editor.dirty = true;
 }
 
+fn insertAndMoveCursor(editor: *Editor, text: []const u8) !void {
+    try editor.insert(text);
+    editor.cursor.move(.right, @intCast(text.len), editor.buffer.items);
+}
+
 /// Delete text under cursor.
-fn delete(editor: *Editor) !void {
+fn delete(editor: *Editor) void {
     if (editor.cursor.selection()) |selection| {
         // We're removing text here so this should never return an error.
         editor.buffer.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
@@ -848,6 +869,16 @@ fn delete(editor: *Editor) !void {
     if (editor.buffer.items.len == 0 or editor.buffer.last() != '\n')
         editor.buffer.appendAssumeCapacity('\n');
     editor.dirty = true;
+}
+
+fn yank(editor: *Editor) void {
+    editor.clipboard_buffer.clearRetainingCapacity();
+    if (editor.cursor.selection()) |s|
+        // Since the clipboard buffer is the same size as the file buffer and we clear every time we
+        // yank, this should never fail.
+        editor.clipboard_buffer.appendSliceAssumeCapacity(s.bytes(editor.buffer.items))
+    else
+        editor.clipboard_buffer.appendAssumeCapacity(editor.buffer.items[editor.cursor.offset]);
 }
 
 fn lineIndentation(buffer: []const u8, offset: u32) u16 {
