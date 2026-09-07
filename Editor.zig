@@ -34,6 +34,9 @@ const terminal_deinit =
     "\x1b[?2048l" ++ // disable in-band resize notifications
     "\x1b[<u" ++ // pop KKP flags
     "\x1b[?1049l"; // exit alt screen
+const esc_highlight_foreground = "\x1b[38;2;40;40;40m"; // dark foreground
+const esc_highlight_background = "\x1b[48;2;200;200;200m"; // light gray background
+const esc_colour_reset = "\x1b[0m";
 
 // Calculating last visible line or offset should never overflow.
 comptime {
@@ -348,12 +351,9 @@ fn render(editor: *const Editor, cursor: Position) !void {
             const cropped_head = @min(line_head + line_offset_start, line_tail);
             const cropped_tail = @min(line_tail, cropped_head + text_width);
 
-            // Handle selection highlighting.
-            if (editor.cursor.anchor) |anchor| {
-                const esc_highlight =
-                    "\x1b[38;2;40;40;40m" ++ // dark foreground
-                    "\x1b[48;2;200;200;200m"; // light gray background
-                const esc_reset = "\x1b[0m"; // reset
+            if (line_head == line_tail) {} // empty line
+            else if (editor.cursor.anchor) |anchor| { // handle selection highlighting
+                const esc_highlight = esc_highlight_foreground ++ esc_highlight_background;
                 const highlight_head = @min(anchor, editor.cursor.offset);
                 const highlight_tail = @max(anchor, editor.cursor.offset);
 
@@ -374,13 +374,13 @@ fn render(editor: *const Editor, cursor: Position) !void {
 
                     if (offset == highlight_tail) {
                         highlight = false;
-                        try writer.writeAll(esc_reset);
+                        try writer.writeAll(esc_colour_reset);
                     }
                 }
 
                 // Reset before printing the next line so that line numbers aren't highlighted.
-                if (highlight) try writer.writeAll(esc_reset);
-            } else try writer.writeAll(buffer[cropped_head..cropped_tail]); // strips newline
+                if (highlight) try writer.writeAll(esc_colour_reset);
+            } else try writer.writeAll(buffer[cropped_head..cropped_tail]); // normal line
 
             line_head = line_tail + 1;
         } else try writer.writeByte('~');
@@ -2204,5 +2204,397 @@ test "delete selection" {
         \\hello.c [+]                      2,3
     , .{ .row = 1, .col = 5 }, .steady_block);
 
+    try test_editor.expectQuit(); // process :q!\r
+}
+
+test "save file" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "d" ++ // delete first character
+            ":w\r" ++ // save file
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
+
+    try test_editor.expectRender(
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process :
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process w
+
+    try test_editor.expectRender(
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\:w
+    , .{ .row = 11, .col = 2 }, .steady_bar);
+
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process \r
+
+    try test_editor.expectRender(
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.expectQuit(); // process :q!\r
+}
+
+test "save file and quit" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "d" ++ // delete first character
+            ":wq\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
+
+    try test_editor.expectRender(
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process :
+    try test_editor.tick(); // process w
+    try test_editor.tick(); // process q
+    try std.testing.expect(!try test_editor.editor.tick()); // process \r
+}
+
+test "quit" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            ":q\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process :
+    try test_editor.tick(); // process q
+    try std.testing.expect(!try test_editor.editor.tick()); // process \r
+}
+
+test "quit without saving" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "d" ++ // delete first character
+            ":q\r" ++ // try quit
+            "y", // respond to unsaved prompt: save and quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process d
+
+    try test_editor.expectRender(
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c [+]                      1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process :
+    try test_editor.tick(); // process q
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process \r
+
+    try test_editor.expectRender(
+        \\ 1 include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\Save changes to hello.c (y/n)?
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try std.testing.expect(!try test_editor.editor.tick()); // process \r
+}
+
+test "go to line" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "$" ++ // go to end of line
+            ":5\r" ++ // go to line 5
+            ":wq\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process $
+    try test_editor.tick(); // process :
+    try test_editor.tick(); // process 5
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process \r
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                         5,12
+    , .{ .row = 4, .col = 14 }, .steady_block);
+
+    try test_editor.expectQuit(); // process :q!\r
+}
+
+test "user message" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            ":a1\r" ++ // some invalid command
+            "\x1b[27u" ++ // ESC: dismiss command and return to normal mode
+            ":wq\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process :
+    try test_editor.tick(); // process a
+    try test_editor.tick(); // process 1
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process \r
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\invalid command
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process escape
+    try test_editor.expectQuit(); // process :q!\r
+}
+
+test "selection highlighting" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "v" ++ // start selection
+            "jj" ++ // multi-line selection
+            "v" ++ // toggle selection
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process v
+    try test_editor.tick(); // process j
+    test_editor.clearRenderBuffer();
+    try test_editor.tick(); // process j
+
+    try test_editor.expectRender(
+        \\ 1 
+    ++ esc_highlight_foreground ++ esc_highlight_background ++
+        "#include <stdio.h>" ++ esc_colour_reset ++ "\n" ++
+        \\ 2 
+        \\ 3 
+    ++ esc_highlight_foreground ++ esc_highlight_background ++
+        "i" ++ esc_colour_reset ++ "nt main() {\n" ++
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\ 7 ~
+        \\ 8 ~
+        \\ 9 ~
+        \\10 ~
+        \\11 ~
+        \\hello.c                          3,1
+    , .{ .row = 2, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process v
     try test_editor.expectQuit(); // process :q!\r
 }

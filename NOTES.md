@@ -6,13 +6,6 @@
 
 ## TODO
 
-- Add tests for ":w", ":wq", and "q".
-- Add test for exit without saving promopt.
-- Add test for go to line number.
-- Add test for user message.
-- Add test for file save.
-- Add test for select (highlighting escape codes).
-
 - Yank, cut, and paste using local buffer.
 - Yank, cut, and paste using global buffer.
 - Format on save.
@@ -22,6 +15,8 @@
   (implement `TerminalEvent.reader()`?).
 - Go through all functions and try think of more invariants. Aim for at least
   two assertions per function.
+- Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
+  passing options on the command line, e.g. if we wanna open a huge file.
 - Handle opening empty file. Just insert a single newline.
 - Handle tabs.
 - Support mouse scroll.
