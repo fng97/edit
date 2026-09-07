@@ -234,7 +234,8 @@ pub fn tick(editor: *Editor) !bool {
                         return false;
                     } else if (std.fmt.parseInt(u16, command.buffer.items, 10) catch null) |number| {
                         // Line number given is indexed from 1.
-                        if (lineHeadFromNumber(editor.buffer.items, number - 1)) |head| {
+                        const line_number = @max(number, 1) - 1;
+                        if (lineHeadFromNumber(editor.buffer.items, line_number)) |head| {
                             editor.cursor.update(editor.buffer.items, head, .snap_remain);
                         }
                         editor.mode = .normal;
