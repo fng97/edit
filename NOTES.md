@@ -6,22 +6,28 @@
 
 ## TODO
 
-- Remove `'q' => return false` and fix tests.
 - Add tests for ":w", ":wq", and "q".
+- Add test for exit without saving promopt.
 - Add test for go to line number.
 - Add test for user message.
-- Add test harness.
+- Add test for file save.
+- Add test for select (highlighting escape codes).
 
-- Prompt when quitting without saving.
+- Yank, cut, and paste using local buffer.
+- Yank, cut, and paste using global buffer.
 - Format on save.
+- Add `{`, `}`, `_`, and `%` motions.
 - Whole line selection mode.
-- Separate parser fuzzing and do editor fuzzing with only valid inputs.
-  - `TerminalEvent.reader()`?
+- Separate parser fuzzing and do editor fuzzing with only valid inputs
+  (implement `TerminalEvent.reader()`?).
+- Go through all functions and try think of more invariants. Aim for at least
+  two assertions per function.
+- Handle opening empty file. Just insert a single newline.
 - Handle tabs.
 - Support mouse scroll.
 - Support --goto={line_number}:{line_offset} arg.
+- Insert mode terminal-like keybinds (e.g. CTRL+W to delete word).
 - Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
-- Add metrics to fuzzer: show live metrics and optionally include in
-  `trace.json`.
 - Add timing instrumentation. Is 2ms max reasonable per-tick?
+- Find reference links for all escape sequences.
