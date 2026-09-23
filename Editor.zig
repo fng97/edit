@@ -50,7 +50,9 @@ io: std.Io,
 reader: *std.Io.Reader,
 writer: *std.Io.Writer,
 
-prompt_command_buffer: [std.math.maxInt(u8)]u8 = undefined,
+file_path: []const u8,
+viewport: Viewport,
+cursor: Cursor,
 mode: union(enum) {
     normal,
     insert,
@@ -60,15 +62,9 @@ mode: union(enum) {
         unsaved,
     },
 },
-dirty: bool = false,
-
-// Viewport state:
-viewport: Viewport,
-cursor: Cursor,
-
-// File state:
-name: []const u8,
 buffer: std.ArrayList(u8),
+dirty: bool = false,
+prompt_command_buffer: [std.math.maxInt(u8)]u8 = undefined,
 
 pub fn tick(editor: *Editor) !bool {
     const input = try parseOne(editor.reader);
@@ -319,7 +315,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
     const line_number_start = editor.viewport.line_number_start;
     const line_offset_start = editor.viewport.line_offset_start;
     const buffer = editor.buffer.items;
-    const file_name = editor.name;
+    const file_name = editor.file_path;
 
     // Begin synchronised update. See
     // https://contour-terminal.org/vt-extensions/synchronized-output.
@@ -412,7 +408,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
                 try writer.writeByte(':');
                 try writer.writeAll(command.buffer.items);
             },
-            .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.name}),
+            .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
             .message => |message| switch (message) {
                 .command_not_recognised => try writer.writeAll("invalid command"),
             },
@@ -530,7 +526,7 @@ pub const panic = std.debug.FullPanic(struct {
 fn save(editor: *Editor) !void {
     if (!builtin.is_test) try std.Io.Dir.cwd().writeFile(editor.io, .{
         .data = editor.buffer.items,
-        .sub_path = editor.name,
+        .sub_path = editor.file_path,
     });
 
     editor.dirty = false;
@@ -692,7 +688,7 @@ pub fn init(
             .line_number_start = 0,
             .line_offset_start = 0,
         },
-        .name = file_name,
+        .file_path = file_name,
         .buffer = buffer,
         .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
     };
