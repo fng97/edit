@@ -8,13 +8,13 @@
 
 - Yank, cut, and paste using local buffer.
 - Yank, cut, and paste using global buffer.
-- Format on save.
 - Add `{`, `}`, `_`, and `%` motions.
 - Whole line selection mode.
 - Separate parser fuzzing and do editor fuzzing with only valid inputs
   (implement `TerminalEvent.reader()`?).
 - Go through all functions and try think of more invariants. Aim for at least
   two assertions per function.
+- Try reusing buffers in fuzzer. Much faster?
 - Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
   passing options on the command line, e.g. if we wanna open a huge file.
 - Handle opening empty file. Just insert a single newline.
@@ -25,4 +25,3 @@
 - Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
 - Add timing instrumentation. Is 2ms max reasonable per-tick?
-- Find reference links for all escape sequences.

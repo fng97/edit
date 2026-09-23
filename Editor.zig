@@ -58,13 +58,14 @@ mode: union(enum) {
     insert,
     prompt: union(enum) {
         command: struct { buffer: std.ArrayList(u8), cursor_offset: u8 },
-        message: enum { command_not_recognised },
+        message: enum { command_not_recognised, formatting_failed },
         unsaved,
     },
 },
 buffer: std.ArrayList(u8),
 dirty: bool = false,
 prompt_command_buffer: [std.math.maxInt(u8)]u8 = undefined,
+formatting_buffer: [file_size_max]u8 = undefined,
 
 pub fn tick(editor: *Editor) !bool {
     const input = try parseOne(editor.reader);
@@ -220,8 +221,12 @@ pub fn tick(editor: *Editor) !bool {
                 },
                 .enter => {
                     if (std.mem.eql(u8, "w", command.buffer.items)) {
-                        try editor.save();
-                        editor.mode = .normal;
+                        if (try editor.formatBuffer()) {
+                            try editor.save();
+                            editor.mode = .normal;
+                        } else {
+                            editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
+                        }
                     } else if (std.mem.eql(u8, "q", command.buffer.items)) {
                         if (!editor.dirty) return false; // exit!
                         // Trying to exit without saving. Prompt user to save.
@@ -411,6 +416,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
             .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
             .message => |message| switch (message) {
                 .command_not_recognised => try writer.writeAll("invalid command"),
+                .formatting_failed => try writer.writeAll("formatting failed"),
             },
         },
     }
@@ -523,11 +529,46 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.panic);
 
-fn save(editor: *Editor) !void {
-    if (!builtin.is_test) try std.Io.Dir.cwd().writeFile(editor.io, .{
-        .data = editor.buffer.items,
-        .sub_path = editor.file_path,
+fn formatBuffer(editor: *Editor) !bool {
+    if (builtin.is_test) return true;
+
+    const io = editor.io;
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ "zig", "fmt", "--stdin" },
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
     });
+    defer child.kill(io);
+
+    // Write the buffer to stdin.
+    try child.stdin.?.writeStreamingAll(io, editor.buffer.items);
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    // Resulting stdout is new buffer.
+    var stdout_reader = child.stdout.?.reader(io, &.{});
+    var buffer_writer: std.Io.Writer = .fixed(&editor.formatting_buffer);
+    const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
+
+    const term = try child.wait(io);
+
+    if (!term.success()) return false;
+
+    editor.buffer.clearRetainingCapacity();
+    editor.buffer.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
+    assert(editor.buffer.items.len > 0);
+    return true;
+}
+
+fn save(editor: *Editor) !void {
+    if (!builtin.is_test) {
+        try std.Io.Dir.cwd().writeFile(editor.io, .{
+            .data = editor.buffer.items,
+            .sub_path = editor.file_path,
+        });
+    }
 
     editor.dirty = false;
 }
