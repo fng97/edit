@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const mod = b.createModule(.{
-        .root_source_file = b.path("Editor.zig"),
+        .root_source_file = b.path("editor.zig"),
         .target = target,
         .optimize = optimize,
     });
