@@ -42,8 +42,8 @@ const esc_colour_reset = "\x1b[0m";
 comptime {
     const line_number_max = line_count_max - 1;
     // row_count-1 is the last visible row but that's for the status line so use row_count-2.
-    assert(line_number_max + row_count_max - 2 <= std.math.maxInt(u16));
-    assert(line_offset_max - 1 + row_count_max - 2 <= std.math.maxInt(u16));
+    assert(line_number_max + row_count_max - 2 <= std.math.maxInt(u32));
+    assert(line_offset_max - 1 + row_count_max - 2 <= std.math.maxInt(u32));
 }
 
 io: std.Io,
@@ -236,7 +236,7 @@ pub fn tick(editor: *Editor) !bool {
                     } else if (std.mem.eql(u8, "wq", command.buffer.items)) {
                         try editor.save();
                         return false;
-                    } else if (std.fmt.parseInt(u16, command.buffer.items, 10) catch null) |number| {
+                    } else if (std.fmt.parseInt(u32, command.buffer.items, 10) catch null) |number| {
                         // Line number given is indexed from 1.
                         const line_number = @max(number, 1) - 1;
                         if (lineHeadFromNumber(editor.buffer.items, line_number)) |head| {
@@ -573,28 +573,28 @@ fn save(editor: *Editor) !void {
     editor.dirty = false;
 }
 
-const Position = struct { line_number: u16, line_offset: u16 };
+const Position = struct { line_number: u32, line_offset: u32 };
 
 const Viewport = struct {
-    row_count: u16,
-    col_count: u16,
-    line_number_start: u16, // line number of the top line
-    line_offset_start: u16, // viewport offset into lines (for horizontal scroll)
+    row_count: u32,
+    col_count: u32,
+    line_number_start: u32, // line number of the top line
+    line_offset_start: u32, // viewport offset into lines (for horizontal scroll)
 
     /// Coordinate in the viewport.
     const Cell = struct {
-        row: u16,
-        col: u16,
+        row: u32,
+        col: u32,
     };
 
     /// Last line offset visible in the viewport.
-    fn lastOffset(viewport: Viewport) u16 {
+    fn lastOffset(viewport: Viewport) u32 {
         const text_width = viewport.col_count - viewport.gutterWidth();
         return viewport.line_offset_start + text_width - 1;
     }
 
     /// Last line number visible in the viewport.
-    fn lastLine(viewport: Viewport) u16 {
+    fn lastLine(viewport: Viewport) u32 {
         // The extra -1 is for the status line.
         return viewport.line_number_start + viewport.row_count - 2;
     }
@@ -602,14 +602,14 @@ const Viewport = struct {
     /// Determine gutter width: enough digits for the greatest visible line number plus one for
     /// padding.
     fn gutterWidth(viewport: Viewport) u8 {
-        return digitCount(@intCast(viewport.line_number_start + viewport.row_count - 1)) + 1;
+        return digitCount(viewport.line_number_start + viewport.row_count - 1) + 1;
     }
 };
 
 const Cursor = struct {
     offset: u32,
     anchor: ?u32,
-    line_offset_snap: u16,
+    line_offset_snap: u32,
 
     fn update(
         cursor: *Cursor,
@@ -656,12 +656,12 @@ const Cursor = struct {
             .right => cursor.update(buffer, cursor.offset +| count, .snap_update),
             .up => cursor.update(buffer, moveLineUp(buffer, .{
                 .offset = cursor.offset,
-                .count = @intCast(count),
+                .count = count,
                 .line_offset_snap = cursor.line_offset_snap,
             }), .snap_remain),
             .down => cursor.update(buffer, moveLineDown(buffer, .{
                 .offset = cursor.offset,
-                .count = @intCast(count),
+                .count = count,
                 .line_offset_snap = cursor.line_offset_snap,
             }), .snap_remain),
         }
@@ -788,7 +788,7 @@ fn parseCsiInt(text: []const u8) !u32 {
 }
 
 const Event = union(enum) {
-    resize: struct { row_count: u16, col_count: u16 },
+    resize: struct { row_count: u32, col_count: u32 },
     ascii: u8,
     chord: struct { ascii: u8, modifiers: Modifiers },
     backspace,
@@ -855,12 +855,8 @@ fn parseOne(reader: *std.Io.Reader) !Event {
                     // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
                     48 => return .{
                         .resize = .{
-                            .row_count = @intCast(
-                                try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
-                            ),
-                            .col_count = @intCast(
-                                try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
-                            ),
+                            .row_count = try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
+                            .col_count = try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
                         },
                     },
                     else => return Error.CsiSequenceNotRecognised,
@@ -924,12 +920,12 @@ fn delete(editor: *Editor) !void {
     editor.dirty = true;
 }
 
-fn lineIndentation(buffer: []const u8, offset: u32) u16 {
+fn lineIndentation(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
     const line_head = lineHead(buffer, offset);
     var i = line_head;
     while (buffer[i] == ' ') i += 1;
-    return @intCast(i - line_head);
+    return i - line_head;
 }
 
 test lineIndentation {
@@ -940,9 +936,9 @@ test lineIndentation {
     try std.testing.expectEqual(0, lineIndentation("  badabop\n boom \npow", 17));
 }
 
-fn lineHeadFromNumber(buffer: []const u8, line_number: u16) ?u32 {
+fn lineHeadFromNumber(buffer: []const u8, line_number: u32) ?u32 {
     var i: u32 = 0;
-    var count: u16 = 0;
+    var count: u32 = 0;
     while (i < buffer.len and count < line_number) : (i += 1) {
         if (buffer[i] == '\n') count += 1;
     }
@@ -957,9 +953,9 @@ test lineHeadFromNumber {
     try std.testing.expectEqual(null, lineHeadFromNumber("  yo\n\nhi\n\n", 4));
 }
 
-fn lineOffset(buffer: []const u8, offset: u32) u16 {
+fn lineOffset(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
-    return @intCast(offset - lineHead(buffer, offset));
+    return offset - lineHead(buffer, offset);
 }
 
 test lineOffset {
@@ -979,7 +975,7 @@ test lineOffset {
     try std.testing.expectEqual(0, lineOffset(file, 9)); // line 3: * (end of file newline)
 }
 
-fn lineNumber(buffer: []const u8, offset: u32) u16 {
+fn lineNumber(buffer: []const u8, offset: u32) u32 {
     return @intCast(std.mem.countScalar(u8, buffer[0..offset], '\n'));
 }
 
@@ -1034,7 +1030,7 @@ test lineSize {
 
 fn moveLineUp(
     buffer: []const u8,
-    options: struct { offset: u32, count: u16, line_offset_snap: u16 },
+    options: struct { offset: u32, count: u32, line_offset_snap: u32 },
 ) u32 {
     assert(options.offset < buffer.len);
     var i: u32 = lineHead(buffer, options.offset);
@@ -1065,7 +1061,7 @@ test moveLineUp {
 
 fn moveLineDown(
     buffer: []const u8,
-    options: struct { offset: u32, count: u16, line_offset_snap: u16 },
+    options: struct { offset: u32, count: u32, line_offset_snap: u32 },
 ) u32 {
     assert(options.offset < buffer.len);
     var i: u32 = lineHead(buffer, options.offset);
@@ -1228,7 +1224,7 @@ test tokenHeadNext {
 }
 
 // This trick gets us the number of digits in a positive number: log_10(x) + 1.
-fn digitCount(number: u16) u8 {
+fn digitCount(number: u32) u8 {
     return std.math.log10_int(number) + 1;
 }
 
@@ -1252,15 +1248,15 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     defer allocator.free(file_name_buffer);
     smith.bytes(file_name_buffer);
 
-    const row_count = smith.valueRangeAtMost(u16, 0, row_count_max);
-    const col_count = smith.valueRangeAtMost(u16, 0, col_count_max);
+    const row_count = smith.valueRangeAtMost(u32, 0, row_count_max);
+    const col_count = smith.valueRangeAtMost(u32, 0, col_count_max);
 
     var input: std.Io.Writer.Allocating = .init(allocator);
     defer input.deinit();
     // TODO: Sometimes don't generate resize?
     // First input must be resize (parsed during init below for dimensions).
     try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
-    const input_size = smith.valueRangeAtMost(u16, 0, 4 * 1024); // 4 KiB input max
+    const input_size = smith.valueRangeAtMost(u32, 0, 4 * 1024); // 4 KiB input max
     for (0..input_size) |_| try input.writer.writeByte(smith.value(u8));
     try input.writer.writeByte('q'); // clean exit
     var reader: std.Io.Reader = .fixed(input.written());
