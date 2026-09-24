@@ -774,6 +774,7 @@ const Modifiers = packed struct(u8) {
         // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
         const value = try parseCsiInt(encoded);
         assert(value != 0);
+        if (value - 1 > std.math.maxInt(u8)) return Error.CsiSequenceInvalid;
         const byte: u8 = @intCast(value - 1);
         return @bitCast(byte);
     }
@@ -854,8 +855,12 @@ fn parseOne(reader: *std.Io.Reader) !Event {
                     // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
                     48 => return .{
                         .resize = .{
-                            .row_count = @intCast(try parseCsiInt(iter.next().?)),
-                            .col_count = @intCast(try parseCsiInt(iter.next().?)),
+                            .row_count = @intCast(
+                                try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
+                            ),
+                            .col_count = @intCast(
+                                try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
+                            ),
                         },
                     },
                     else => return Error.CsiSequenceNotRecognised,
