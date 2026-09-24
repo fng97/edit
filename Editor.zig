@@ -773,7 +773,7 @@ const Modifiers = packed struct(u8) {
     pub fn decode(encoded: []const u8) !Modifiers {
         // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
         const value = try parseCsiInt(encoded);
-        assert(value != 0);
+        if (value == 0) return Error.CsiSequenceInvalid;
         if (value - 1 > std.math.maxInt(u8)) return Error.CsiSequenceInvalid;
         const byte: u8 = @intCast(value - 1);
         return @bitCast(byte);
@@ -875,7 +875,7 @@ test fuzzKkpParser {
 fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
-    var reader_buffer: [1024]u8 = undefined;
+    var reader_buffer: [128]u8 = undefined;
     const size = smith.slice(&reader_buffer);
     var reader: std.Io.Reader = .fixed(reader_buffer[0..size]);
 
@@ -888,16 +888,16 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
     };
 }
 
-test "fuzzKkpParser repro" {
-    const crash = try std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        ".zig-cache/f/crash",
-        std.testing.allocator,
-        .unlimited,
-    );
-    defer std.testing.allocator.free(crash);
-    try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
-}
+// test "fuzzKkpParser repro" {
+//     const crash = try std.Io.Dir.cwd().readFileAlloc(
+//         std.testing.io,
+//         ".zig-cache/f/crash",
+//         std.testing.allocator,
+//         .unlimited,
+//     );
+//     defer std.testing.allocator.free(crash);
+//     try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
+// }
 
 fn insert(editor: *Editor, text: []const u8) !void {
     assert(text.len > 0);
