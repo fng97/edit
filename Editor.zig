@@ -57,14 +57,14 @@ mode: union(enum) {
     normal,
     insert,
     prompt: union(enum) {
-        command: struct { buffer: std.ArrayList(u8), cursor_offset: u8 },
+        command: struct { text: std.ArrayList(u8), cursor_offset: u8 },
         message: enum { command_not_recognised, formatting_failed },
         unsaved,
     },
 },
-buffer: std.ArrayList(u8),
+document: std.ArrayList(u8),
 dirty: bool = false,
-prompt_command_buffer: [std.math.maxInt(u8)]u8 = undefined,
+prompt_text_buffer: [std.math.maxInt(u8)]u8 = undefined,
 formatting_buffer: [file_size_max]u8 = undefined,
 
 pub fn tick(editor: *Editor) !bool {
@@ -75,71 +75,71 @@ pub fn tick(editor: *Editor) !bool {
     } else switch (editor.mode) {
         .normal => switch (input) {
             .ascii => |c| switch (c) {
-                'h' => editor.cursor.move(.left, 1, editor.buffer.items),
-                'l' => editor.cursor.move(.right, 1, editor.buffer.items),
-                'j' => editor.cursor.move(.down, 1, editor.buffer.items),
-                'k' => editor.cursor.move(.up, 1, editor.buffer.items),
-                '0' => editor.cursor.moveMax(.left, editor.buffer.items),
-                '$' => editor.cursor.moveMax(.right, editor.buffer.items),
-                'G' => editor.cursor.moveMax(.down, editor.buffer.items),
-                'g' => editor.cursor.moveMax(.up, editor.buffer.items),
+                'h' => editor.cursor.move(.left, 1, editor.document.items),
+                'l' => editor.cursor.move(.right, 1, editor.document.items),
+                'j' => editor.cursor.move(.down, 1, editor.document.items),
+                'k' => editor.cursor.move(.up, 1, editor.document.items),
+                '0' => editor.cursor.moveMax(.left, editor.document.items),
+                '$' => editor.cursor.moveMax(.right, editor.document.items),
+                'G' => editor.cursor.moveMax(.down, editor.document.items),
+                'g' => editor.cursor.moveMax(.up, editor.document.items),
                 'e' => editor.cursor.update(
-                    editor.buffer.items,
-                    wordTailNext(editor.buffer.items, editor.cursor.offset),
+                    editor.document.items,
+                    wordTailNext(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'E' => editor.cursor.update(
-                    editor.buffer.items,
-                    tokenTailNext(editor.buffer.items, editor.cursor.offset),
+                    editor.document.items,
+                    tokenTailNext(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'b' => editor.cursor.update(
-                    editor.buffer.items,
-                    wordHeadPrev(editor.buffer.items, editor.cursor.offset),
+                    editor.document.items,
+                    wordHeadPrev(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'B' => editor.cursor.update(
-                    editor.buffer.items,
-                    tokenHeadPrev(editor.buffer.items, editor.cursor.offset),
+                    editor.document.items,
+                    tokenHeadPrev(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'w' => editor.cursor.update(
-                    editor.buffer.items,
-                    wordHeadNext(editor.buffer.items, editor.cursor.offset),
+                    editor.document.items,
+                    wordHeadNext(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'W' => editor.cursor.update(
-                    editor.buffer.items,
-                    tokenHeadNext(editor.buffer.items, editor.cursor.offset),
+                    editor.document.items,
+                    tokenHeadNext(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
                 'i' => editor.mode = .insert,
                 'I' => {
-                    const offset = lineHead(editor.buffer.items, editor.cursor.offset) +
-                        lineIndentation(editor.buffer.items, editor.cursor.offset);
-                    editor.cursor.update(editor.buffer.items, offset, .snap_update);
+                    const offset = lineHead(editor.document.items, editor.cursor.offset) +
+                        lineIndentation(editor.document.items, editor.cursor.offset);
+                    editor.cursor.update(editor.document.items, offset, .snap_update);
                     editor.mode = .insert;
                 },
                 'a' => {
-                    editor.cursor.move(.right, 1, editor.buffer.items);
+                    editor.cursor.move(.right, 1, editor.document.items);
                     editor.mode = .insert;
                 },
                 'A' => {
-                    editor.cursor.moveMax(.right, editor.buffer.items);
+                    editor.cursor.moveMax(.right, editor.document.items);
                     editor.mode = .insert;
                 },
                 'o' => {
-                    editor.cursor.moveMax(.right, editor.buffer.items);
-                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    editor.cursor.moveMax(.right, editor.document.items);
+                    const indentation = lineIndentation(editor.document.items, editor.cursor.offset);
                     try editor.insert("\n");
                     for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
                 'O' => {
-                    editor.cursor.moveMax(.left, editor.buffer.items);
-                    const indentation = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    editor.cursor.moveMax(.left, editor.document.items);
+                    const indentation = lineIndentation(editor.document.items, editor.cursor.offset);
                     try editor.insert("\n");
-                    editor.cursor.move(.up, 1, editor.buffer.items);
+                    editor.cursor.move(.up, 1, editor.document.items);
                     for (0..indentation) |_| try editor.insert(" ");
                     editor.mode = .insert;
                 },
@@ -152,12 +152,12 @@ pub fn tick(editor: *Editor) !bool {
                     else
                         editor.cursor.offset;
                     try editor.delete();
-                    editor.cursor.update(editor.buffer.items, cursor_offset, .snap_update);
+                    editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
                 },
                 ':' => editor.mode = .{
                     .prompt = .{
                         .command = .{
-                            .buffer = .initBuffer(&editor.prompt_command_buffer),
+                            .text = .initBuffer(&editor.prompt_text_buffer),
                             .cursor_offset = 0,
                         },
                     },
@@ -169,8 +169,8 @@ pub fn tick(editor: *Editor) !bool {
                 const ctrl: Modifiers = .{ .ctrl = true };
                 const mod = chord.modifiers;
                 switch (chord.ascii) {
-                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.buffer.items),
-                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.buffer.items),
+                    'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.document.items),
+                    'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.document.items),
                     else => {},
                 }
             },
@@ -187,12 +187,12 @@ pub fn tick(editor: *Editor) !bool {
                 .escape => editor.mode = .normal,
                 .ascii => |c| try editor.insert(&.{c}),
                 .backspace => if (editor.cursor.offset != 0) {
-                    editor.cursor.move(.left, 1, editor.buffer.items);
+                    editor.cursor.move(.left, 1, editor.document.items);
                     try editor.delete();
                 },
                 .tab => try editor.insert("    "),
                 .enter => {
-                    const indent_count = lineIndentation(editor.buffer.items, editor.cursor.offset);
+                    const indent_count = lineIndentation(editor.document.items, editor.cursor.offset);
                     try editor.insert("\n");
                     for (0..indent_count) |_| try editor.insert(" ");
                 },
@@ -203,44 +203,44 @@ pub fn tick(editor: *Editor) !bool {
         .prompt => |*prompt| switch (prompt.*) {
             .command => |*command| switch (input) {
                 .escape => editor.mode = .normal,
-                // Keep entering text as long as we've got room in the buffer and on the row. The
+                // Keep entering text as long as we've got room in the document and on the row. The
                 // -2 below (aside from count->index) is to account for the prompt prefix, ':'.
-                .ascii => |c| if (command.cursor_offset < command.buffer.capacity and
+                .ascii => |c| if (command.cursor_offset < command.text.capacity and
                     command.cursor_offset < editor.viewport.col_count - 2)
                 {
-                    assert(command.cursor_offset == command.buffer.items.len);
-                    try command.buffer.insertBounded(command.cursor_offset, c);
+                    assert(command.cursor_offset == command.text.items.len);
+                    try command.text.insertBounded(command.cursor_offset, c);
                     command.cursor_offset += 1;
-                    assert(command.cursor_offset == command.buffer.items.len);
+                    assert(command.cursor_offset == command.text.items.len);
                 },
                 .backspace => if (command.cursor_offset != 0) {
-                    assert(command.cursor_offset == command.buffer.items.len);
-                    _ = command.buffer.orderedRemove(command.cursor_offset - 1);
+                    assert(command.cursor_offset == command.text.items.len);
+                    _ = command.text.orderedRemove(command.cursor_offset - 1);
                     command.cursor_offset -= 1;
-                    assert(command.cursor_offset == command.buffer.items.len);
+                    assert(command.cursor_offset == command.text.items.len);
                 },
                 .enter => {
-                    if (std.mem.eql(u8, "w", command.buffer.items)) {
-                        if (try editor.formatBuffer()) {
+                    if (std.mem.eql(u8, "w", command.text.items)) {
+                        if (try editor.formatDocument()) {
                             try editor.save();
                             editor.mode = .normal;
                         } else {
                             editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
                         }
-                    } else if (std.mem.eql(u8, "q", command.buffer.items)) {
+                    } else if (std.mem.eql(u8, "q", command.text.items)) {
                         if (!editor.dirty) return false; // exit!
                         // Trying to exit without saving. Prompt user to save.
                         editor.mode = .{ .prompt = .unsaved };
-                    } else if (std.mem.eql(u8, "q!", command.buffer.items)) {
+                    } else if (std.mem.eql(u8, "q!", command.text.items)) {
                         return false; // exit, for real!
-                    } else if (std.mem.eql(u8, "wq", command.buffer.items)) {
+                    } else if (std.mem.eql(u8, "wq", command.text.items)) {
                         try editor.save();
                         return false;
-                    } else if (std.fmt.parseInt(u32, command.buffer.items, 10) catch null) |number| {
+                    } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
                         // Line number given is indexed from 1.
                         const line_number = @max(number, 1) - 1;
-                        if (lineHeadFromNumber(editor.buffer.items, line_number)) |head| {
-                            editor.cursor.update(editor.buffer.items, head, .snap_remain);
+                        if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
+                            editor.cursor.update(editor.document.items, head, .snap_remain);
                         }
                         editor.mode = .normal;
                     } else editor.mode = .{ .prompt = .{ .message = .command_not_recognised } };
@@ -269,10 +269,10 @@ pub fn tick(editor: *Editor) !bool {
         },
     }
 
-    const buffer = editor.buffer.items;
+    const document = editor.document.items;
     const offset = editor.cursor.offset;
-    const line_number = lineNumber(buffer, offset);
-    const line_offset = lineOffset(buffer, offset);
+    const line_number = lineNumber(document, offset);
+    const line_offset = lineOffset(document, offset);
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
 
@@ -298,7 +298,7 @@ pub fn tick(editor: *Editor) !bool {
     }
 
     // Cursor is always at snap line offset or line end.
-    assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(buffer, offset) - 1));
+    assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(document, offset) - 1));
     assert(line_offset <= editor.cursor.line_offset_snap);
 
     // Make sure cursor is within the viewport's bounds.
@@ -319,7 +319,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
     const gutter_width = editor.viewport.gutterWidth();
     const line_number_start = editor.viewport.line_number_start;
     const line_offset_start = editor.viewport.line_offset_start;
-    const buffer = editor.buffer.items;
+    const document = editor.document.items;
     const file_name = editor.file_path;
 
     // Begin synchronised update. See
@@ -330,11 +330,11 @@ fn render(editor: *const Editor, cursor: Position) !void {
     // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
     try writer.writeAll("\x1b[H");
 
-    // Render the buffer.
-    assert(buffer.len > 0);
+    // Render the document.
+    assert(document.len > 0);
     var line_head = blk: {
-        var i: u32 = lineHead(buffer, editor.cursor.offset);
-        for (0..cursor.line_number - line_number_start) |_| i = lineHead(buffer, i - 1);
+        var i: u32 = lineHead(document, editor.cursor.offset);
+        for (0..cursor.line_number - line_number_start) |_| i = lineHead(document, i - 1);
         break :blk i;
     };
     var highlight = false;
@@ -344,8 +344,8 @@ fn render(editor: *const Editor, cursor: Position) !void {
             .gutter_width = gutter_width - 1, // space suffix already in format string
         });
 
-        if (line_head < buffer.len) {
-            const line_tail = lineTail(buffer, line_head);
+        if (line_head < document.len) {
+            const line_tail = lineTail(document, line_head);
 
             // Handle horizontal scroll.
             const text_width = col_count - gutter_width;
@@ -371,7 +371,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
                         try writer.writeAll(esc_highlight);
                     }
 
-                    try writer.writeByte(buffer[offset]);
+                    try writer.writeByte(document[offset]);
 
                     if (offset == highlight_tail) {
                         highlight = false;
@@ -381,7 +381,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
 
                 // Reset before printing the next line so that line numbers aren't highlighted.
                 if (highlight) try writer.writeAll(esc_colour_reset);
-            } else try writer.writeAll(buffer[cropped_head..cropped_tail]); // normal line
+            } else try writer.writeAll(document[cropped_head..cropped_tail]); // normal line
 
             line_head = line_tail + 1;
         } else try writer.writeByte('~');
@@ -411,7 +411,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
         .prompt => |prompt| switch (prompt) {
             .command => |command| {
                 try writer.writeByte(':');
-                try writer.writeAll(command.buffer.items);
+                try writer.writeAll(command.text.items);
             },
             .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
             .message => |message| switch (message) {
@@ -456,7 +456,6 @@ pub fn main(juice: std.process.Init) !void {
     const io = juice.io;
     const allocator = juice.arena.allocator();
 
-    // Load and process buffer.
     var args_iterator = std.process.Args.Iterator.init(juice.minimal.args);
     assert(args_iterator.skip()); // first arg is executable path
     const file_name = args_iterator.next() orelse @panic("missing file path arg");
@@ -469,13 +468,11 @@ pub fn main(juice: std.process.Init) !void {
     defer allocator.free(file_bytes);
 
     const stdin = std.Io.File.stdin();
-    var stdin_buffer: [128]u8 = undefined; // TODO: What's a reasonable size here?
+    var stdin_buffer: [1024]u8 = undefined;
     var stdin_reader = stdin.reader(io, &stdin_buffer);
     const reader: *std.Io.Reader = &stdin_reader.interface;
 
-    // Ideally this buffer is big enough to buffer everything rendered so that flush is only ever
-    // called once per render.
-    const stdout_buffer = try allocator.alloc(u8, Editor.file_size_max);
+    const stdout_buffer = try allocator.alloc(u8, 16 * 1024);
     defer allocator.free(stdout_buffer);
     const stdout = std.Io.File.stdout();
     var stdout_writer = stdout.writer(io, stdout_buffer);
@@ -529,7 +526,7 @@ pub const panic = std.debug.FullPanic(struct {
     }
 }.panic);
 
-fn formatBuffer(editor: *Editor) !bool {
+fn formatDocument(editor: *Editor) !bool {
     if (builtin.is_test) return true;
 
     const io = editor.io;
@@ -543,7 +540,7 @@ fn formatBuffer(editor: *Editor) !bool {
     defer child.kill(io);
 
     // Write the buffer to stdin.
-    try child.stdin.?.writeStreamingAll(io, editor.buffer.items);
+    try child.stdin.?.writeStreamingAll(io, editor.document.items);
     child.stdin.?.close(io);
     child.stdin = null;
 
@@ -556,16 +553,16 @@ fn formatBuffer(editor: *Editor) !bool {
 
     if (!term.success()) return false;
 
-    editor.buffer.clearRetainingCapacity();
-    editor.buffer.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
-    assert(editor.buffer.items.len > 0);
+    editor.document.clearRetainingCapacity();
+    editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
+    assert(editor.document.items.len > 0);
     return true;
 }
 
 fn save(editor: *Editor) !void {
     if (!builtin.is_test) {
         try std.Io.Dir.cwd().writeFile(editor.io, .{
-            .data = editor.buffer.items,
+            .data = editor.document.items,
             .sub_path = editor.file_path,
         });
     }
@@ -714,9 +711,9 @@ pub fn init(
     if (file_bytes[file_bytes.len - 1] != '\n') return Error.FileNotNewlineTerminated;
 
     assert(file_bytes.len <= file_size_max);
-    var buffer: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
-    errdefer buffer.deinit(allocator);
-    buffer.appendSliceAssumeCapacity(file_bytes);
+    var document: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
+    errdefer document.deinit(allocator);
+    document.appendSliceAssumeCapacity(file_bytes);
 
     var editor: Editor = .{
         .io = io,
@@ -730,7 +727,7 @@ pub fn init(
             .line_offset_start = 0,
         },
         .file_path = file_name,
-        .buffer = buffer,
+        .document = document,
         .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
     };
 
@@ -743,7 +740,7 @@ pub fn init(
 }
 
 pub fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
-    editor.buffer.deinit(allocator);
+    editor.document.deinit(allocator);
 }
 
 /// Kitty Keyboard Protocol modifiers:
@@ -901,9 +898,9 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
 
 fn insert(editor: *Editor, text: []const u8) !void {
     assert(text.len > 0);
-    assert(editor.cursor.offset < editor.buffer.items.len);
-    try editor.buffer.insertSliceBounded(editor.cursor.offset, text);
-    editor.cursor.move(.right, @intCast(text.len), editor.buffer.items);
+    assert(editor.cursor.offset < editor.document.items.len);
+    try editor.document.insertSliceBounded(editor.cursor.offset, text);
+    editor.cursor.move(.right, @intCast(text.len), editor.document.items);
     editor.dirty = true;
 }
 
@@ -911,12 +908,12 @@ fn insert(editor: *Editor, text: []const u8) !void {
 fn delete(editor: *Editor) !void {
     if (editor.cursor.selection()) |selection| {
         // We're removing text here so this should never return an error.
-        editor.buffer.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
+        editor.document.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
         editor.cursor.anchor = null;
-    } else _ = editor.buffer.orderedRemove(editor.cursor.offset);
+    } else _ = editor.document.orderedRemove(editor.cursor.offset);
     // File must always end in a newline.
-    if (editor.buffer.items.len == 0 or editor.buffer.last() != '\n')
-        editor.buffer.appendAssumeCapacity('\n');
+    if (editor.document.items.len == 0 or editor.document.last() != '\n')
+        editor.document.appendAssumeCapacity('\n');
     editor.dirty = true;
 }
 
