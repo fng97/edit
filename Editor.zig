@@ -772,7 +772,7 @@ const Modifiers = packed struct(u8) {
     /// 0b101 = 6 and so on."
     pub fn decode(encoded: []const u8) !Modifiers {
         // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
-        const value = try std.fmt.parseInt(u9, encoded, 10);
+        const value = try parseCsiInt(encoded);
         assert(value != 0);
         const byte: u8 = @intCast(value - 1);
         return @bitCast(byte);
@@ -786,8 +786,7 @@ fn parseCsiInt(text: []const u8) !u32 {
     };
 }
 
-/// Handle input: parse Kitty Keyboard Protocol events.
-fn parseOne(reader: *std.Io.Reader) !union(enum) {
+const Event = union(enum) {
     resize: struct { row_count: u16, col_count: u16 },
     ascii: u8,
     chord: struct { ascii: u8, modifiers: Modifiers },
@@ -795,7 +794,10 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
     enter,
     escape,
     tab,
-} {
+};
+
+/// Handle input: parse Kitty Keyboard Protocol events.
+fn parseOne(reader: *std.Io.Reader) !Event {
     switch (try reader.takeByte()) {
         0x08, 0x7F => return .backspace,
         0x09 => return .tab,
@@ -864,6 +866,36 @@ fn parseOne(reader: *std.Io.Reader) !union(enum) {
         },
         else => return Error.CsiSequenceNotRecognised,
     }
+}
+
+test fuzzKkpParser {
+    return std.testing.fuzz({}, fuzzKkpParser, .{});
+}
+fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
+    @disableInstrumentation();
+
+    var reader_buffer: [1024]u8 = undefined;
+    const size = smith.slice(&reader_buffer);
+    var reader: std.Io.Reader = .fixed(reader_buffer[0..size]);
+
+    while (true) _ = parseOne(&reader) catch |err| switch (err) {
+        error.EndOfStream => return,
+        Error.CsiSequenceNotRecognised,
+        Error.CsiSequenceInvalid,
+        => continue,
+        else => return err,
+    };
+}
+
+test "fuzzKkpParser repro" {
+    const crash = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        ".zig-cache/f/crash",
+        std.testing.allocator,
+        .unlimited,
+    );
+    defer std.testing.allocator.free(crash);
+    try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
 }
 
 fn insert(editor: *Editor, text: []const u8) !void {
@@ -1195,10 +1227,10 @@ fn digitCount(number: u16) u8 {
     return std.math.log10_int(number) + 1;
 }
 
-test fuzzer {
-    return std.testing.fuzz({}, fuzzer, .{});
+test fuzzEditor {
+    return std.testing.fuzz({}, fuzzEditor, .{});
 }
-fn fuzzer(_: void, smith: *std.testing.Smith) !void {
+fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
     const allocator = std.testing.allocator;
@@ -1260,7 +1292,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
     }) continue;
 }
 
-// test "fuzz repro" {
+// test "fuzzEditor repro" {
 //     const crash = try std.Io.Dir.cwd().readFileAlloc(
 //         std.testing.io,
 //         ".zig-cache/f/crash",
@@ -1268,7 +1300,7 @@ fn fuzzer(_: void, smith: *std.testing.Smith) !void {
 //         .unlimited,
 //     );
 //     defer std.testing.allocator.free(crash);
-//     try std.testing.fuzz({}, fuzzer, .{ .corpus = &.{crash} });
+//     try std.testing.fuzz({}, fuzzEditor, .{ .corpus = &.{crash} });
 // }
 
 test Modifiers {
