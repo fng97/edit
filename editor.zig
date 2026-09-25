@@ -47,7 +47,6 @@ comptime {
 
 const Editor = struct {
     io: std.Io,
-    reader: *std.Io.Reader,
     writer: *std.Io.Writer,
 
     file_path: []const u8,
@@ -67,13 +66,12 @@ const Editor = struct {
     prompt_text_buffer: [std.math.maxInt(u8)]u8 = undefined,
     formatting_buffer: [file_size_max]u8 = undefined,
 
-    pub fn tick(editor: *Editor) !bool {
-        const input = try parseOne(editor.reader);
-        if (input == .resize) {
-            editor.viewport.row_count = input.resize.row_count;
-            editor.viewport.col_count = input.resize.col_count;
+    pub fn tick(editor: *Editor, event: Event) !bool {
+        if (event == .resize) {
+            editor.viewport.row_count = event.resize.row_count;
+            editor.viewport.col_count = event.resize.col_count;
         } else switch (editor.mode) {
-            .normal => switch (input) {
+            .normal => switch (event) {
                 .ascii => |c| switch (c) {
                     'h' => editor.cursor.move(.left, 1, editor.document.items),
                     'l' => editor.cursor.move(.right, 1, editor.document.items),
@@ -183,7 +181,7 @@ const Editor = struct {
             },
             .insert => {
                 editor.cursor.anchor = null;
-                switch (input) {
+                switch (event) {
                     .escape => editor.mode = .normal,
                     .ascii => |c| try editor.insert(&.{c}),
                     .backspace => if (editor.cursor.offset != 0) {
@@ -201,7 +199,7 @@ const Editor = struct {
                 }
             },
             .prompt => |*prompt| switch (prompt.*) {
-                .command => |*command| switch (input) {
+                .command => |*command| switch (event) {
                     .escape => editor.mode = .normal,
                     // Keep entering text as long as we've got room in the document and on the row. The
                     // -2 below (aside from count->index) is to account for the prompt prefix, ':'.
@@ -248,12 +246,12 @@ const Editor = struct {
                     .tab, .chord => {}, // do nothing
                     .resize => unreachable,
                 },
-                .message => switch (input) {
+                .message => switch (event) {
                     .enter, .escape => editor.mode = .normal,
                     .ascii, .tab, .chord, .backspace => {}, // do nothing
                     .resize => unreachable,
                 },
-                .unsaved => switch (input) {
+                .unsaved => switch (event) {
                     .escape => editor.mode = .normal,
                     .ascii => |c| switch (c) {
                         'y' => {
@@ -269,12 +267,24 @@ const Editor = struct {
             },
         }
 
-        const document = editor.document.items;
-        const offset = editor.cursor.offset;
-        const line_number = lineNumber(document, offset);
-        const line_offset = lineOffset(document, offset);
+        const cursor_position: Position = .{
+            .line_number = lineNumber(editor.document.items, editor.cursor.offset),
+            .line_offset = lineOffset(editor.document.items, editor.cursor.offset),
+        };
+
+        try editor.focus(cursor_position);
+        editor.validate(cursor_position);
+        try editor.render(cursor_position);
+
+        return true;
+    }
+
+    /// Focus viewport: Ensure the cursor is in the viewport.
+    fn focus(editor: *Editor, cursor: Position) Error!void {
         const row_count = editor.viewport.row_count;
         const col_count = editor.viewport.col_count;
+        const line_number = cursor.line_number;
+        const line_offset = cursor.line_offset;
 
         // Check viewport dimensions.
         if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
@@ -283,7 +293,6 @@ const Editor = struct {
             return Error.ViewportTooSmall; // at least one char
         if (col_count > col_count_max) return Error.ViewportTooLarge;
 
-        // If cursor moved out of viewport, move viewport.
         const last_line = editor.viewport.lastLine();
         if (line_number < editor.viewport.line_number_start) {
             editor.viewport.line_number_start = line_number;
@@ -296,6 +305,13 @@ const Editor = struct {
         } else if (line_offset > last_offset) {
             editor.viewport.line_offset_start += line_offset - last_offset;
         }
+    }
+
+    fn validate(editor: *const Editor, cursor: Position) void {
+        const document = editor.document.items;
+        const offset = editor.cursor.offset;
+        const line_number = cursor.line_number;
+        const line_offset = cursor.line_offset;
 
         // Cursor is always at snap line offset or line end.
         assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(document, offset) - 1));
@@ -306,10 +322,6 @@ const Editor = struct {
         assert(line_number <= editor.viewport.lastLine());
         assert(line_offset >= editor.viewport.line_offset_start);
         assert(line_offset <= editor.viewport.lastOffset());
-
-        try editor.render(.{ .line_number = line_number, .line_offset = line_offset });
-
-        return true;
     }
 
     fn render(editor: *const Editor, cursor: Position) !void {
@@ -455,10 +467,10 @@ const Editor = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        reader: *std.Io.Reader,
         writer: *std.Io.Writer,
         file_name: []const u8,
         file_bytes: []const u8,
+        viewport_dimensions: ViewportDimensions,
     ) !Editor {
         // File must not be empty, contain only ASCII, and end in newline.
         if (file_bytes.len == 0) return Error.FileEmpty;
@@ -477,12 +489,11 @@ const Editor = struct {
 
         var editor: Editor = .{
             .io = io,
-            .reader = reader,
             .writer = writer,
             .mode = .normal,
             .viewport = .{
-                .row_count = 0,
-                .col_count = 0,
+                .row_count = viewport_dimensions.row_count,
+                .col_count = viewport_dimensions.col_count,
                 .line_number_start = 0,
                 .line_offset_start = 0,
             },
@@ -491,10 +502,10 @@ const Editor = struct {
             .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
         };
 
-        // First input must be viewport dimensions.
-        assert(try editor.tick());
-        assert(editor.viewport.row_count != 0);
-        assert(editor.viewport.col_count != 0);
+        const cursor_position_start: Position = .{ .line_number = 0, .line_offset = 0 };
+        try editor.focus(cursor_position_start);
+        editor.validate(cursor_position_start);
+        try editor.render(cursor_position_start);
 
         return editor;
     }
@@ -618,10 +629,25 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
     try stdout.writeStreamingAll(io, terminal_init);
 
-    var editor: Editor = try .init(allocator, io, reader, writer, file_name, file_bytes);
+    const dimensions = switch (try parseOne(reader)) {
+        .resize => |dimensions| dimensions,
+        else => return Error.FirstEventMustBeResize,
+    };
+
+    var editor: Editor = try .init(
+        allocator,
+        io,
+        writer,
+        file_name,
+        file_bytes,
+        dimensions,
+    );
     defer editor.deinit(allocator);
 
-    while (try editor.tick()) {}
+    while (true) {
+        const event = try parseOne(reader);
+        if (!try editor.tick(event)) return;
+    }
 }
 
 var termios_original: ?std.posix.termios = null;
@@ -760,6 +786,7 @@ const Error = error{
     FileEmpty,
     FileNotNewlineTerminated,
     FileTooManyLines,
+    FirstEventMustBeResize,
     LineTooLong,
     ViewportTooLarge,
     ViewportTooSmall,
@@ -806,8 +833,10 @@ fn parseCsiInt(text: []const u8) !u32 {
     };
 }
 
+const ViewportDimensions = struct { row_count: u32, col_count: u32 };
+
 const Event = union(enum) {
-    resize: struct { row_count: u32, col_count: u32 },
+    resize: ViewportDimensions,
     ascii: u8,
     chord: struct { ascii: u8, modifiers: Modifiers },
     backspace,
@@ -1263,10 +1292,10 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     var editor = Editor.init(
         allocator,
         io,
-        &reader,
         &writer.writer,
         file_name_buffer,
         file_buffer,
+        .{ .row_count = row_count, .col_count = col_count },
     ) catch |err| switch (err) {
         Error.FileContainsInvalidCharacter,
         Error.FileEmpty,
@@ -1280,15 +1309,17 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     };
     defer editor.deinit(allocator);
 
-    while (editor.tick() catch |err| switch (err) {
-        Error.CsiSequenceInvalid,
-        Error.CsiSequenceNotRecognised,
-        Error.ViewportTooLarge,
-        Error.ViewportTooSmall,
-        error.EndOfStream, // probably won't show up in normal usage so handle it here instead
-        => return,
-        else => return err,
-    }) continue;
+    while (true) {
+        const event = try parseOne(&reader);
+        if (editor.tick(event) catch |err| switch (err) {
+            Error.CsiSequenceInvalid,
+            Error.CsiSequenceNotRecognised,
+            Error.ViewportTooLarge,
+            Error.ViewportTooSmall,
+            => return,
+            else => return err,
+        }) continue else return;
+    }
 }
 
 // test "fuzzEditor repro" {
@@ -1403,13 +1434,19 @@ const TestEditor = struct {
     }) !void {
         test_editor.stripping_writer = try .init(allocator);
         test_editor.reader = .fixed(params.input);
+
+        const dimensions = switch (try parseOne(&test_editor.reader)) {
+            .resize => |dimensions| dimensions,
+            else => return Error.FirstEventMustBeResize,
+        };
+
         test_editor.editor = try .init(
             allocator,
             io,
-            &test_editor.reader,
             test_editor.stripping_writer.writer(),
             params.file_path,
             params.file_bytes,
+            dimensions,
         );
     }
 
@@ -1419,14 +1456,36 @@ const TestEditor = struct {
     }
 
     fn tick(test_editor: *TestEditor) !void {
-        try std.testing.expect(try test_editor.editor.tick());
+        const event = try parseOne(&test_editor.reader);
+        try std.testing.expect(try test_editor.editor.tick(event) == true);
     }
 
-    fn expectQuit(test_editor: *TestEditor) !void {
-        try std.testing.expect(try test_editor.editor.tick()); // process :
-        try std.testing.expect(try test_editor.editor.tick()); // process q
-        try std.testing.expect(try test_editor.editor.tick()); // process !
-        try std.testing.expect(!try test_editor.editor.tick()); // process enter, returns false
+    fn expectTickExit(test_editor: *TestEditor) !void {
+        const event = try parseOne(&test_editor.reader);
+        try std.testing.expect(try test_editor.editor.tick(event) == false);
+    }
+
+    fn expectQuit(
+        test_editor: *TestEditor,
+        comptime save: enum { save, no_save },
+        comptime force: enum { force, no_force },
+    ) !void {
+        // Process exit inputs: ":[w]q[!]".
+        const input = ":" ++
+            (if (save == .save) "w" else "") ++
+            "q" ++
+            (if (force == .force) "!" else "");
+        for (input) |c| {
+            const event = try parseOne(&test_editor.reader);
+            try std.testing.expect(event == .ascii);
+            try std.testing.expectEqual(c, event.ascii);
+            try std.testing.expect(try test_editor.editor.tick(event) == true); // no exit yet
+        }
+
+        // Process the return (enter) keypress.
+        const event = try parseOne(&test_editor.reader);
+        try std.testing.expectEqual(.enter, event);
+        try std.testing.expect(try test_editor.editor.tick(event) == false); // exit
     }
 
     fn clearRenderBuffer(test_editor: *TestEditor) void {
@@ -1495,7 +1554,7 @@ test "rendering: hello_c" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try test_editor.expectQuit(); // process quit
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "rendering: empty" {
@@ -1523,7 +1582,7 @@ test "rendering: empty" {
         \\empty.zig                        1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "vertical scroll: go to start/end of file" {
@@ -1568,7 +1627,7 @@ test "vertical scroll: go to start/end of file" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 2 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "horizontal scroll: go to start/end of line" {
@@ -1634,7 +1693,7 @@ test "horizontal scroll: go to start/end of line" {
         \\hello.c  1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "insert mode" {
@@ -1764,7 +1823,7 @@ test "insert mode" {
         \\hello.c [+]                     1,20
     , .{ .row = 0, .col = 22 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "new line with o preserves indentation" {
@@ -1819,7 +1878,7 @@ test "new line with o preserves indentation" {
         \\hello.c [+]                      5,4
     , .{ .row = 4, .col = 6 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "new line with O preserves indentation" {
@@ -1874,7 +1933,7 @@ test "new line with O preserves indentation" {
         \\hello.c [+]                      4,4
     , .{ .row = 3, .col = 6 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "insert with I goes to start of line after indentation" {
@@ -1929,7 +1988,7 @@ test "insert with I goes to start of line after indentation" {
         \\hello.c [+]                      4,4
     , .{ .row = 3, .col = 6 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "A inserts at end of line" {
@@ -1984,7 +2043,7 @@ test "A inserts at end of line" {
         \\hello.c [+]                     4,30
     , .{ .row = 3, .col = 32 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "tab inserts four spaces" {
@@ -2037,7 +2096,7 @@ test "tab inserts four spaces" {
         \\hello.c [+]                      1,6
     , .{ .row = 0, .col = 8 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "enter preserves indentation" {
@@ -2096,7 +2155,7 @@ test "enter preserves indentation" {
         \\hello.c [+]                      5,4
     , .{ .row = 4, .col = 6 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "delete" {
@@ -2188,7 +2247,7 @@ test "delete" {
         \\hello.c [+]                      5,2
     , .{ .row = 4, .col = 4 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "delete selection" {
@@ -2272,7 +2331,7 @@ test "delete selection" {
         \\hello.c [+]                      2,3
     , .{ .row = 1, .col = 5 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "save file" {
@@ -2357,7 +2416,7 @@ test "save file" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "save file and quit" {
@@ -2404,10 +2463,8 @@ test "save file and quit" {
         \\hello.c [+]                      1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try test_editor.tick(); // process :
-    try test_editor.tick(); // process w
-    try test_editor.tick(); // process q
-    try std.testing.expect(!try test_editor.editor.tick()); // process \r
+    for (":wq") |_| try test_editor.tick();
+    try test_editor.expectTickExit(); // process \r
 }
 
 test "quit" {
@@ -2435,9 +2492,7 @@ test "quit" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try test_editor.tick(); // process :
-    try test_editor.tick(); // process q
-    try std.testing.expect(!try test_editor.editor.tick()); // process \r
+    try test_editor.expectQuit(.no_save, .no_force); // process :q\r
 }
 
 test "quit without saving" {
@@ -2505,7 +2560,7 @@ test "quit without saving" {
         \\Save changes to hello.c (y/n)?
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    try std.testing.expect(!try test_editor.editor.tick()); // process \r
+    try test_editor.expectTickExit(); // process y
 }
 
 test "go to line" {
@@ -2556,7 +2611,7 @@ test "go to line" {
         \\hello.c                         5,12
     , .{ .row = 4, .col = 14 }, .steady_block);
 
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.save, .no_force); // process :wq\r
 }
 
 test "user message" {
@@ -2608,7 +2663,7 @@ test "user message" {
     , .{ .row = 0, .col = 3 }, .steady_block);
 
     try test_editor.tick(); // process escape
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.save, .no_force); // process :wq\r
 }
 
 test "selection highlighting" {
@@ -2664,5 +2719,5 @@ test "selection highlighting" {
     , .{ .row = 2, .col = 3 }, .steady_block);
 
     try test_editor.tick(); // process v
-    try test_editor.expectQuit(); // process :q!\r
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
