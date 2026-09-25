@@ -1278,15 +1278,6 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     const row_count = smith.valueRangeAtMost(u32, 0, row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, col_count_max);
 
-    var input: std.Io.Writer.Allocating = .init(allocator);
-    defer input.deinit();
-    // TODO: Sometimes don't generate resize?
-    // First input must be resize (parsed during init below for dimensions).
-    try input.writer.print("\x1b[48;{d};{d};0;0t", .{ row_count, col_count }); // pix values ignored
-    const input_size = smith.valueRangeAtMost(u32, 0, 4 * 1024); // 4 KiB input max
-    for (0..input_size) |_| try input.writer.writeByte(smith.value(u8));
-    try input.writer.writeByte('q'); // clean exit
-    var reader: std.Io.Reader = .fixed(input.written());
     var writer: std.Io.Writer.Discarding = .init(&.{});
 
     var editor = Editor.init(
@@ -1310,8 +1301,7 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     defer editor.deinit(allocator);
 
     while (true) {
-        const event = try parseOne(&reader);
-        if (editor.tick(event) catch |err| switch (err) {
+        if (editor.tick(smith.value(Event)) catch |err| switch (err) {
             Error.CsiSequenceInvalid,
             Error.CsiSequenceNotRecognised,
             Error.ViewportTooLarge,
