@@ -6,19 +6,21 @@
 
 ## TODO
 
-- Yank, cut, and paste using local buffer.
-- Yank, cut, and paste using global buffer.
+- Basic undo/redo. For now just individual modifications.
+
 - Add `{`, `}`, `_`, and `%` motions.
 - Whole line selection mode.
-- Separate parser fuzzing and do editor fuzzing with only valid inputs
-  (implement `TerminalEvent.reader()`?).
+- Handle tabs.
+- Yank, cut, and paste using global buffer.
+- Word motion ergonomics. Remove '_' from `alphanumeric`. Make it recognise
+  camelCase?
 - Go through all functions and try think of more invariants. Aim for at least
   two assertions per function.
-- Try reusing buffers in fuzzer. Much faster?
+- Test if reusing memory in fuzzer is faster? Reuse file buffer, editor struct,
+  etc.
 - Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
   passing options on the command line, e.g. if we wanna open a huge file.
 - Handle opening empty file. Just insert a single newline.
-- Handle tabs.
 - Support mouse scroll.
 - Support --goto={line_number}:{line_offset} arg.
 - Insert mode terminal-like keybinds (e.g. CTRL+W to delete word).

@@ -63,8 +63,9 @@ const Editor = struct {
     },
     document: std.ArrayList(u8),
     dirty: bool = false,
-    prompt_text_buffer: [std.math.maxInt(u8)]u8 = undefined,
+    prompt_text_buffer: [col_count_max - 1]u8 = undefined, // -1 for the ':' in prompt
     formatting_buffer: [file_size_max]u8 = undefined,
+    clipboard: std.ArrayList(u8),
 
     pub fn tick(editor: *Editor, event: Event) !bool {
         if (event == .resize) {
@@ -145,10 +146,9 @@ const Editor = struct {
                     'v' => editor.cursor.anchor =
                         if (editor.cursor.anchor != null) null else editor.cursor.offset,
                     'd' => {
-                        const cursor_offset = if (editor.cursor.selection()) |selection|
-                            selection.head
-                        else
-                            editor.cursor.offset;
+                        // If it's a selection, snap cursor to head after yank.
+                        const cursor_offset = editor.cursor.head();
+                        try editor.yank();
                         try editor.delete();
                         editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
                     },
@@ -159,6 +159,22 @@ const Editor = struct {
                                 .cursor_offset = 0,
                             },
                         },
+                    },
+                    'y' => {
+                        // If it's a selection, snap cursor to head after yank.
+                        const cursor_offset = editor.cursor.head();
+                        try editor.yank();
+                        editor.cursor.anchor = null;
+                        editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
+                    },
+                    // 'P' => {}, // paste before
+                    'p' => {
+                        // If we're on a newline, pasting inserts on the next line. This doesn't
+                        // feel great, so make an exception.
+                        const on_newline = editor.document.items[editor.cursor.offset] == '\n';
+                        if (!on_newline) editor.cursor.move(.right, 1, editor.document.items);
+                        try editor.insert(editor.clipboard.items);
+                        if (!on_newline) editor.cursor.move(.left, 1, editor.document.items);
                     },
                     else => {},
                 },
@@ -500,6 +516,7 @@ const Editor = struct {
             .file_path = file_name,
             .document = document,
             .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
+            .clipboard = try .initCapacity(allocator, file_size_max),
         };
 
         const cursor_position_start: Position = .{ .line_number = 0, .line_offset = 0 };
@@ -512,6 +529,7 @@ const Editor = struct {
 
     pub fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
         editor.document.deinit(allocator);
+        editor.clipboard.deinit(allocator);
     }
 
     fn insert(editor: *Editor, text: []const u8) !void {
@@ -522,6 +540,14 @@ const Editor = struct {
         editor.dirty = true;
     }
 
+    fn yank(editor: *Editor) !void {
+        editor.clipboard.clearRetainingCapacity();
+        if (editor.cursor.selection()) |selection|
+            editor.clipboard.appendSliceAssumeCapacity(selection.slice(editor.document.items))
+        else
+            editor.clipboard.appendAssumeCapacity(editor.document.items[editor.cursor.offset]);
+    }
+
     /// Delete text under cursor.
     fn delete(editor: *Editor) !void {
         if (editor.cursor.selection()) |selection| {
@@ -529,9 +555,11 @@ const Editor = struct {
             editor.document.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
             editor.cursor.anchor = null;
         } else _ = editor.document.orderedRemove(editor.cursor.offset);
+
         // File must always end in a newline.
         if (editor.document.items.len == 0 or editor.document.last() != '\n')
             editor.document.appendAssumeCapacity('\n');
+
         editor.dirty = true;
     }
 
@@ -763,18 +791,26 @@ const Cursor = struct {
         }
     }
 
-    fn selection(cursor: *const Cursor) ?struct {
+    fn selection(cursor: Cursor) ?struct {
         head: u32,
         tail: u32,
 
-        fn size(sel: @This()) u32 {
-            return sel.tail - sel.head + 1; // +1: offset -> size
+        fn size(s: @This()) u32 {
+            return s.tail - s.head + 1; // +1: offset -> size
+        }
+
+        fn slice(s: @This(), buffer: []const u8) []const u8 {
+            return buffer[s.head .. s.tail + 1];
         }
     } {
         if (cursor.anchor) |anchor| return .{
             .head = @min(anchor, cursor.offset),
             .tail = @max(anchor, cursor.offset),
         } else return null;
+    }
+
+    fn head(cursor: Cursor) u32 {
+        return if (cursor.selection()) |s| s.head else cursor.offset;
     }
 };
 
