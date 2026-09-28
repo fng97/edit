@@ -490,12 +490,7 @@ const Editor = struct {
     ) !Editor {
         // File must not be empty, contain only ASCII, and end in newline.
         if (file_bytes.len == 0) return Error.FileEmpty;
-        for (file_bytes) |byte| switch (byte) {
-            0x0A => {}, // newline
-            0x20...0x7E => {}, // printable
-            // TODO: Handle tabs.
-            else => return Error.FileContainsInvalidCharacter,
-        };
+        for (file_bytes) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
         if (file_bytes[file_bytes.len - 1] != '\n') return Error.FileNotNewlineTerminated;
 
         assert(file_bytes.len <= file_size_max);
@@ -992,6 +987,15 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
 //     try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
 // }
 
+fn characterValid(c: u8) bool {
+    // TODO: Handle tabs.
+    return switch (c) {
+        0x0A => true, // newline
+        0x20...0x7E => true, // printable
+        else => false,
+    };
+}
+
 fn lineIndentation(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
     const line_head = lineHead(buffer, offset);
@@ -1346,7 +1350,11 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     defer editor.deinit(allocator);
 
     while (true) {
-        if (editor.tick(smith.value(Event)) catch |err| switch (err) {
+        const event: Event = smith.value(Event);
+
+        if (event == .ascii and !characterValid(event.ascii)) continue; // valid ascii only
+
+        if (editor.tick(event) catch |err| switch (err) {
             Error.CsiSequenceInvalid,
             Error.CsiSequenceNotRecognised,
             Error.ViewportTooLarge,
