@@ -168,7 +168,7 @@ const Editor = struct {
                         editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
                     },
                     // 'P' => {}, // paste before
-                    'p' => {
+                    'p' => if (editor.clipboard.items.len > 0) {
                         // If we're on a newline, pasting inserts on the next line. This doesn't
                         // feel great, so make an exception.
                         const on_newline = editor.document.items[editor.cursor.offset] == '\n';
