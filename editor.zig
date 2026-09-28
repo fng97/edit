@@ -730,7 +730,11 @@ const Viewport = struct {
     /// Determine gutter width: enough digits for the greatest visible line number plus one for
     /// padding.
     fn gutterWidth(viewport: Viewport) u8 {
-        return digitCount(viewport.line_number_start + viewport.row_count - 1) + 1;
+        // Going from count to index: subtract 1.
+        const line_number_last = viewport.line_number_start + viewport.row_count - 1;
+        // Displayed line numbers indexed from 1, so add 1.
+        const line_number_last_width = digitCount(line_number_last + 1);
+        return line_number_last_width + 1; // +1: padding
     }
 };
 
