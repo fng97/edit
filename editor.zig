@@ -593,9 +593,9 @@ const Editor = struct {
         assert(editor.document.items.len > 0);
 
         // Move cursor to start of line.
-        const line_head = lineHead(editor.document.items, editor.cursor.offset);
-        const line_start = wordHeadNext(editor.document.items, line_head);
-        editor.cursor.update(editor.document.items, line_start, .snap_update);
+        const offset = lineHead(editor.document.items, editor.cursor.offset) +
+            lineIndentation(editor.document.items, editor.cursor.offset);
+        editor.cursor.update(editor.document.items, offset, .snap_update);
 
         return true;
     }
