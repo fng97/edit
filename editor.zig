@@ -593,6 +593,12 @@ const Editor = struct {
         editor.document.clearRetainingCapacity();
         editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
         assert(editor.document.items.len > 0);
+
+        // Move cursor to start of line.
+        const line_head = lineHead(editor.document.items, editor.cursor.offset);
+        const line_start = wordHeadNext(editor.document.items, line_head);
+        editor.cursor.update(editor.document.items, line_start, .snap_update);
+
         return true;
     }
 
