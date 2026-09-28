@@ -503,6 +503,9 @@ const Editor = struct {
         errdefer document.deinit(allocator);
         document.appendSliceAssumeCapacity(file_bytes);
 
+        var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
+        errdefer clipboard.deinit(allocator);
+
         var editor: Editor = .{
             .io = io,
             .writer = writer,
@@ -516,7 +519,7 @@ const Editor = struct {
             .file_path = file_name,
             .document = document,
             .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
-            .clipboard = try .initCapacity(allocator, file_size_max),
+            .clipboard = clipboard,
         };
 
         const cursor_position_start: Position = .{ .line_number = 0, .line_offset = 0 };
