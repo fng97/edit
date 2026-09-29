@@ -601,9 +601,10 @@ const Editor = struct {
         editor.dirty = true;
 
         // Move cursor to start of line.
-        const offset = lineHead(editor.document.items, editor.cursor.offset) +
-            lineIndentation(editor.document.items, editor.cursor.offset);
-        editor.cursor.update(editor.document.items, offset, .snap_update);
+        const offset = @min(editor.cursor.offset, editor.document.items.len - 1);
+        const offset_new = lineHead(editor.document.items, offset) +
+            lineIndentation(editor.document.items, offset);
+        editor.cursor.update(editor.document.items, offset_new, .snap_update);
 
         return true;
     }
