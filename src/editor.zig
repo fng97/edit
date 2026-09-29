@@ -48,6 +48,7 @@ comptime {
 const Editor = struct {
     io: std.Io,
     writer: *std.Io.Writer,
+    is_test: bool = builtin.is_test,
 
     file_path: []const u8,
     viewport: Viewport,
@@ -562,7 +563,7 @@ const Editor = struct {
     }
 
     fn formatDocument(editor: *Editor) !bool {
-        if (builtin.is_test) {
+        if (editor.is_test) {
             const formatted =
                 try formatDocumentWithTestFormatter(editor.document.items, &editor.formatting_buffer);
 
@@ -610,7 +611,7 @@ const Editor = struct {
     }
 
     fn save(editor: *Editor) !void {
-        if (!builtin.is_test) {
+        if (!editor.is_test) {
             try std.Io.Dir.cwd().writeFile(editor.io, .{
                 .data = editor.document.items,
                 .sub_path = editor.file_path,
@@ -989,16 +990,19 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
     };
 }
 
-// test "fuzzKkpParser repro" {
-//     const crash = try std.Io.Dir.cwd().readFileAlloc(
-//         std.testing.io,
-//         ".zig-cache/f/crash",
-//         std.testing.allocator,
-//         .unlimited,
-//     );
-//     defer std.testing.allocator.free(crash);
-//     try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
-// }
+test "fuzzKkpParser repro" {
+    const crash = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        ".zig-cache/f/crash",
+        std.testing.allocator,
+        .unlimited,
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer std.testing.allocator.free(crash);
+    try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
+}
 
 /// Fake formatter for testing. Double all blank lines. Remove all indentation.
 fn formatDocumentWithTestFormatter(document: []const u8, formatting_buffer: []u8) ![]const u8 {
@@ -1360,14 +1364,21 @@ fn digitCount(number: u32) u8 {
     return std.math.log10_int(number) + 1;
 }
 
+const FuzzContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+};
+
 test fuzzEditor {
-    return std.testing.fuzz({}, fuzzEditor, .{});
+    const ctx: FuzzContext = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    return std.testing.fuzz(ctx, fuzzEditor, .{});
 }
-fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
+
+pub fn fuzzEditor(ctx: FuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
+    const allocator = ctx.allocator;
+    const io = ctx.io;
 
     const file_size = smith.valueRangeAtMost(u32, 0, file_size_max);
     const file_buffer = try allocator.alloc(u8, file_size);
@@ -1403,6 +1414,7 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
         => return,
         else => return err,
     };
+    editor.is_test = true; // for repro
     defer editor.deinit(allocator);
 
     while (true) {
@@ -1421,16 +1433,20 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
-// test "fuzzEditor repro" {
-//     const crash = try std.Io.Dir.cwd().readFileAlloc(
-//         std.testing.io,
-//         ".zig-cache/f/crash",
-//         std.testing.allocator,
-//         .unlimited,
-//     );
-//     defer std.testing.allocator.free(crash);
-//     try std.testing.fuzz({}, fuzzEditor, .{ .corpus = &.{crash} });
-// }
+test "fuzzEditor repro" {
+    const crash = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        ".zig-cache/f/crash",
+        std.testing.allocator,
+        .unlimited,
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer std.testing.allocator.free(crash);
+    const ctx: FuzzContext = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    try std.testing.fuzz(ctx, fuzzEditor, .{ .corpus = &.{crash} });
+}
 
 test Modifiers {
     try std.testing.expect(try Modifiers.decode("1") == Modifiers{
