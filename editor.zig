@@ -562,35 +562,43 @@ const Editor = struct {
     }
 
     fn formatDocument(editor: *Editor) !bool {
-        if (builtin.is_test) return true;
+        if (builtin.is_test) {
+            const formatted =
+                try formatDocumentWithTestFormatter(editor.document.items, &editor.formatting_buffer);
 
-        const io = editor.io;
+            editor.document.clearRetainingCapacity();
+            editor.document.appendSliceAssumeCapacity(formatted);
+        } else {
+            const io = editor.io;
 
-        var child = try std.process.spawn(io, .{
-            .argv = &.{ "zig", "fmt", "--stdin" },
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = .ignore,
-        });
-        defer child.kill(io);
+            var child = try std.process.spawn(io, .{
+                .argv = &.{ "zig", "fmt", "--stdin" },
+                .stdin = .pipe,
+                .stdout = .pipe,
+                .stderr = .ignore,
+            });
+            defer child.kill(io);
 
-        // Write the buffer to stdin.
-        try child.stdin.?.writeStreamingAll(io, editor.document.items);
-        child.stdin.?.close(io);
-        child.stdin = null;
+            // Write the buffer to stdin.
+            try child.stdin.?.writeStreamingAll(io, editor.document.items);
+            child.stdin.?.close(io);
+            child.stdin = null;
 
-        // Resulting stdout is new buffer.
-        var stdout_reader = child.stdout.?.reader(io, &.{});
-        var buffer_writer: std.Io.Writer = .fixed(&editor.formatting_buffer);
-        const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
+            // Resulting stdout is new buffer.
+            var stdout_reader = child.stdout.?.reader(io, &.{});
+            var buffer_writer: std.Io.Writer = .fixed(&editor.formatting_buffer);
+            const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
 
-        const term = try child.wait(io);
+            const term = try child.wait(io);
 
-        if (!term.success()) return false;
+            if (!term.success()) return false;
 
-        editor.document.clearRetainingCapacity();
-        editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
+            editor.document.clearRetainingCapacity();
+            editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
+        }
+
         assert(editor.document.items.len > 0);
+        editor.dirty = true;
 
         // Move cursor to start of line.
         const offset = lineHead(editor.document.items, editor.cursor.offset) +
@@ -990,6 +998,49 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
 //     defer std.testing.allocator.free(crash);
 //     try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
 // }
+
+/// Fake formatter for testing. Double all blank lines. Remove all indentation.
+fn formatDocumentWithTestFormatter(document: []const u8, formatting_buffer: []u8) ![]const u8 {
+    // Double all blank lines ("\n\n" -> "\n\n\n").
+    const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", formatting_buffer);
+    const with_newlines_doubled = formatting_buffer[0 .. document.len + replacement_count];
+
+    var formatted: std.ArrayList(u8) = .fromOwnedSlice(with_newlines_doubled);
+
+    // Remove all indentation. Start with first line.
+    while (formatted.items.len != 0 and formatted.items[0] == ' ') _ = formatted.orderedRemove(0);
+    // Remove remaining indentation (e.g. following newlines). Replace "\n " with "\n" until "\n "
+    // no longer found.
+    while (std.mem.find(u8, formatted.items, "\n ")) |index|
+        // Safe to assume capacity because we are shrinking the slice.
+        formatted.replaceRangeAssumeCapacity(index, "\n ".len, "\n");
+
+    return formatted.items;
+}
+
+test formatDocumentWithTestFormatter {
+    var buffer: [128]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        \\#include <stdio.h>
+        \\
+        \\
+        \\int main() {
+        \\printf("Hello, world!\n");
+        \\return 0;
+        \\}
+        \\
+    , try formatDocumentWithTestFormatter(hello_c, &buffer));
+
+    try std.testing.expectEqualStrings(
+        "hello\n\n\n\n\n\nworld!\n",
+        try formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer),
+    );
+
+    try std.testing.expectEqualStrings("", try formatDocumentWithTestFormatter("", &buffer));
+    try std.testing.expectEqualStrings("", try formatDocumentWithTestFormatter(" ", &buffer));
+    try std.testing.expectEqualStrings("\n\n\n", try formatDocumentWithTestFormatter(" \n\n", &buffer));
+}
 
 fn characterValid(c: u8) bool {
     // TODO: Handle tabs.
@@ -2448,14 +2499,16 @@ test "save file" {
     test_editor.clearRenderBuffer();
     try test_editor.tick(); // process \r
 
+    // This looks different because saving also runs formatting. There is a dedicated testing
+    // formatter (see `formatDocumentWithTestFormatter`) to avoid calling a real one.
     try test_editor.expectRender(
         \\ 1 include <stdio.h>
         \\ 2 
-        \\ 3 int main() {
-        \\ 4   printf("Hello, world!\n");
-        \\ 5   return 0;
-        \\ 6 }
-        \\ 7 ~
+        \\ 3 
+        \\ 4 int main() {
+        \\ 5 printf("Hello, world!\n");
+        \\ 6 return 0;
+        \\ 7 }
         \\ 8 ~
         \\ 9 ~
         \\10 ~
