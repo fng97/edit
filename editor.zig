@@ -1357,25 +1357,30 @@ fn digitCount(number: u32) u8 {
     return std.math.log10_int(number) + 1;
 }
 
-test fuzzEditor {
-    return std.testing.fuzz({}, fuzzEditor, .{});
-}
-fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
+const EditorFuzzContext = struct {
+    file_buffer: []u8,
+    file_path_buffer: [256]u8 = undefined,
+
+    fn init(allocator: std.mem.Allocator) !EditorFuzzContext {
+        return .{ .file_buffer = try allocator.alloc(u8, file_size_max) };
+    }
+
+    fn deinit(ctx: *@This(), allocator: std.mem.Allocator) void {
+        allocator.free(ctx.file_buffer);
+    }
+};
+
+fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const file_size = smith.valueRangeAtMost(u32, 0, file_size_max);
-    const file_buffer = try allocator.alloc(u8, file_size);
-    defer allocator.free(file_buffer);
-    smith.bytes(file_buffer);
+    const file_size = smith.slice(ctx.file_buffer);
+    const file = ctx.file_buffer[0..file_size];
 
-    // TODO: Is this big enough? Make it look more like a path?
-    const file_name_size = smith.value(u8);
-    const file_name_buffer = try allocator.alloc(u8, file_name_size);
-    defer allocator.free(file_name_buffer);
-    smith.bytes(file_name_buffer);
+    const file_path_size = smith.slice(&ctx.file_path_buffer);
+    const file_path = ctx.file_path_buffer[0..file_path_size];
 
     const row_count = smith.valueRangeAtMost(u32, 0, row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, col_count_max);
@@ -1386,8 +1391,8 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
         allocator,
         io,
         &writer.writer,
-        file_name_buffer,
-        file_buffer,
+        file_path,
+        file,
         .{ .row_count = row_count, .col_count = col_count },
     ) catch |err| switch (err) {
         Error.FileContainsInvalidCharacter,
@@ -1418,6 +1423,12 @@ fn fuzzEditor(_: void, smith: *std.testing.Smith) !void {
     }
 }
 
+test fuzzEditor {
+    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    return std.testing.fuzz(&ctx, fuzzEditor, .{});
+}
+
 test "fuzzEditor repro" {
     const crash = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
@@ -1426,7 +1437,9 @@ test "fuzzEditor repro" {
         .unlimited,
     ) catch return;
     defer std.testing.allocator.free(crash);
-    try std.testing.fuzz({}, fuzzEditor, .{ .corpus = &.{crash} });
+    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
+    return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }
 
 test Modifiers {

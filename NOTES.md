@@ -18,6 +18,8 @@
   two assertions per function.
 - Test if reusing memory in fuzzer is faster? Reuse file buffer, editor struct,
   etc.
+- Bring back weighting strategies. Swarm the strategies themselves. Make the
+  file look like a file. Same for file name.
 - Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
   passing options on the command line, e.g. if we wanna open a huge file.
 - Handle opening empty file. Just insert a single newline.
