@@ -7,11 +7,13 @@
 ## TODO
 
 - Basic undo/redo. For now just individual modifications.
+- Basic search.
+- Handle tabs: convert to 8 spaces.
 
 - Add `{`, `}`, `_`, and `%` motions.
 - Whole line selection mode.
-- Handle tabs.
 - Yank, cut, and paste using global buffer.
+- Regex search.
 - Word motion ergonomics. Remove '_' from `alphanumeric`. Make it recognise
   camelCase?
 - Go through all functions and try think of more invariants. Aim for at least

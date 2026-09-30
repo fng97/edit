@@ -15,10 +15,9 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 
 const file_size_max = 1 * 1024 * 1024;
-const line_count_max = 10_000;
-const line_offset_max = 1_000;
-const row_count_max = 2_000;
-const col_count_max = 500;
+const col_count_max = 400;
+const row_count_max = 300;
+
 const terminal_init =
     // Use alternate screen. Stores original screen and cursor state and has no scrollback. See
     // https://terminfo.dev/modes/decset-1049-alt-screen-enter.
@@ -36,14 +35,6 @@ const terminal_deinit =
 const esc_highlight_foreground = "\x1b[38;2;40;40;40m"; // dark foreground
 const esc_highlight_background = "\x1b[48;2;200;200;200m"; // light gray background
 const esc_colour_reset = "\x1b[0m";
-
-// Calculating last visible line or offset should never overflow.
-comptime {
-    const line_number_max = line_count_max - 1;
-    // row_count-1 is the last visible row but that's for the status line so use row_count-2.
-    assert(line_number_max + row_count_max - 2 <= std.math.maxInt(u32));
-    assert(line_offset_max - 1 + row_count_max - 2 <= std.math.maxInt(u32));
-}
 
 const Editor = struct {
     io: std.Io,
@@ -784,7 +775,7 @@ const Cursor = struct {
             .left => cursor.update(buffer, lineHead(buffer, cursor.offset), .snap_update),
             .right => {
                 cursor.update(buffer, lineTail(buffer, cursor.offset), .snap_update);
-                cursor.line_offset_snap = line_offset_max;
+                cursor.line_offset_snap = std.math.maxInt(u32);
             },
             .down => cursor.update(buffer, @intCast(buffer.len - 1), .snap_remain), // last line
             .up => cursor.update(buffer, 0, .snap_remain), // first line
