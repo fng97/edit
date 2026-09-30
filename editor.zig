@@ -880,10 +880,7 @@ const Modifiers = packed struct(u8) {
 };
 
 fn parseCsiInt(text: []const u8) !u32 {
-    return std.fmt.parseInt(u32, text, 10) catch |err| switch (err) {
-        error.InvalidCharacter => return Error.CsiSequenceInvalid,
-        else => return err,
-    };
+    return std.fmt.parseInt(u32, text, 10) catch return Error.CsiSequenceInvalid;
 }
 
 const ViewportDimensions = struct { row_count: u32, col_count: u32 };
