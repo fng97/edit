@@ -1364,46 +1364,63 @@ fn digitCount(number: u32) u8 {
     return std.math.log10_int(number) + 1;
 }
 
-const FuzzContext = struct {
+pub const FuzzContext = struct {
+    // FIXME: Remove me. Shouldn't allocate in the fuzzer.
     allocator: std.mem.Allocator,
     io: std.Io,
+    discarding_writer: std.Io.Writer.Discarding = .init(&.{}),
+    file_buffer: []u8,
+    file_path_buffer: [std.math.maxInt(u8)]u8 = undefined,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !FuzzContext {
+        const file_buffer = try allocator.alloc(u8, file_size_max);
+        errdefer allocator.free(file_buffer);
+        return .{ .allocator = allocator, .io = io, .file_buffer = file_buffer };
+    }
+
+    pub fn deinit(ctx: *FuzzContext, allocator: std.mem.Allocator) void {
+        allocator.free(ctx.file_buffer);
+    }
+
+    pub fn editor(ctx: *FuzzContext, smith: *std.testing.Smith) !Editor {
+        const file_size = smith.slice(ctx.file_buffer);
+        const file = ctx.file_buffer[0..file_size];
+
+        const file_path_size = smith.slice(&ctx.file_path_buffer);
+        const file_path = ctx.file_path_buffer[0..file_path_size];
+
+        return .init(
+            ctx.allocator,
+            ctx.io,
+            &ctx.discarding_writer.writer,
+            file_path,
+            file,
+            .{
+                .row_count = smith.valueRangeAtMost(u32, 0, row_count_max),
+                .col_count = smith.valueRangeAtMost(u32, 0, col_count_max),
+            },
+        );
+    }
 };
 
-test fuzzEditor {
-    const ctx: FuzzContext = .{ .allocator = std.testing.allocator, .io = std.testing.io };
-    return std.testing.fuzz(ctx, fuzzEditor, .{});
+pub fn nextEvent(smith: *std.testing.Smith) Event {
+    while (true) {
+        const e = smith.value(Event);
+        if (e == .ascii and !characterValid(e.ascii)) continue; // valid ascii only
+        return e;
+    }
 }
 
-pub fn fuzzEditor(ctx: FuzzContext, smith: *std.testing.Smith) !void {
+test fuzzEditor {
+    var ctx: FuzzContext = try .init(std.testing.allocator, std.testing.io);
+    defer ctx.deinit(std.testing.allocator);
+    return std.testing.fuzz(&ctx, fuzzEditor, .{});
+}
+
+pub fn fuzzEditor(ctx: *FuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
-    const allocator = ctx.allocator;
-    const io = ctx.io;
-
-    const file_size = smith.valueRangeAtMost(u32, 0, file_size_max);
-    const file_buffer = try allocator.alloc(u8, file_size);
-    defer allocator.free(file_buffer);
-    smith.bytes(file_buffer);
-
-    // TODO: Is this big enough? Make it look more like a path?
-    const file_name_size = smith.value(u8);
-    const file_name_buffer = try allocator.alloc(u8, file_name_size);
-    defer allocator.free(file_name_buffer);
-    smith.bytes(file_name_buffer);
-
-    const row_count = smith.valueRangeAtMost(u32, 0, row_count_max);
-    const col_count = smith.valueRangeAtMost(u32, 0, col_count_max);
-
-    var writer: std.Io.Writer.Discarding = .init(&.{});
-
-    var editor = Editor.init(
-        allocator,
-        io,
-        &writer.writer,
-        file_name_buffer,
-        file_buffer,
-        .{ .row_count = row_count, .col_count = col_count },
-    ) catch |err| switch (err) {
+    var editor = ctx.editor(smith) catch |err| switch (err) {
         Error.FileContainsInvalidCharacter,
         Error.FileEmpty,
         Error.FileNotNewlineTerminated,
@@ -1414,38 +1431,33 @@ pub fn fuzzEditor(ctx: FuzzContext, smith: *std.testing.Smith) !void {
         => return,
         else => return err,
     };
-    editor.is_test = true; // for repro
-    defer editor.deinit(allocator);
+    defer editor.deinit(ctx.allocator);
 
-    while (true) {
-        const event: Event = smith.value(Event);
-
-        if (event == .ascii and !characterValid(event.ascii)) continue; // valid ascii only
-
-        if (editor.tick(event) catch |err| switch (err) {
-            Error.CsiSequenceInvalid,
-            Error.CsiSequenceNotRecognised,
-            Error.ViewportTooLarge,
-            Error.ViewportTooSmall,
-            => return,
-            else => return err,
-        }) continue else return;
-    }
+    while (true) if (editor.tick(nextEvent(smith)) catch |err| switch (err) {
+        Error.CsiSequenceInvalid,
+        Error.CsiSequenceNotRecognised,
+        Error.ViewportTooLarge,
+        Error.ViewportTooSmall,
+        => return,
+        else => return err,
+    }) continue else return;
 }
 
 test "fuzzEditor repro" {
+    const allocator = std.testing.allocator;
     const crash = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         ".zig-cache/f/crash",
-        std.testing.allocator,
+        allocator,
         .unlimited,
     ) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
-    defer std.testing.allocator.free(crash);
-    const ctx: FuzzContext = .{ .allocator = std.testing.allocator, .io = std.testing.io };
-    try std.testing.fuzz(ctx, fuzzEditor, .{ .corpus = &.{crash} });
+    defer allocator.free(crash);
+    var ctx: FuzzContext = try .init(allocator, std.testing.io);
+    defer ctx.deinit(allocator);
+    try std.testing.fuzz(&ctx, fuzzEditor, .{ .corpus = &.{crash} });
 }
 
 test Modifiers {
