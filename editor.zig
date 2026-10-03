@@ -476,18 +476,23 @@ const Editor = struct {
         io: std.Io,
         writer: *std.Io.Writer,
         file_path: []const u8,
-        file_bytes: []const u8,
+        file_reader: *std.Io.Reader,
         viewport_dimensions: ViewportDimensions,
     ) !Editor {
-        // File must not be empty, contain only ASCII, and end in newline.
-        if (file_bytes.len == 0) return Error.FileEmpty;
-        for (file_bytes) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
-        if (file_bytes[file_bytes.len - 1] != '\n') return Error.FileNotNewlineTerminated;
+        const document_buffer = try allocator.alloc(u8, file_size_max);
+        errdefer allocator.free(document_buffer);
+        var document_writer: std.Io.Writer = .fixed(document_buffer);
+        _ = file_reader.streamRemaining(&document_writer) catch |err| switch (err) {
+            error.WriteFailed => return Error.FileTooLong,
+            error.ReadFailed => return err,
+        };
+        // Error handling already frees document_buffer via errdefer above. Don't double free.
+        var document: std.ArrayList(u8) = document_writer.toArrayList();
 
-        assert(file_bytes.len <= file_size_max);
-        var document: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
-        errdefer document.deinit(allocator);
-        document.appendSliceAssumeCapacity(file_bytes);
+        // File must not be empty, contain only ASCII, and end in newline.
+        if (document.items.len == 0) document.appendAssumeCapacity('\n');
+        if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
+        for (document.items) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
 
         var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
         errdefer clipboard.deinit(allocator);
@@ -619,13 +624,8 @@ pub fn main(init: std.process.Init) !void {
     var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
     assert(args_iterator.skip()); // first arg is executable path
     const file_path = args_iterator.next() orelse @panic("missing file path arg");
-    const file_bytes = try std.Io.Dir.cwd().readFileAlloc(
-        io,
-        file_path,
-        allocator,
-        .limited(file_size_max),
-    );
-    defer allocator.free(file_bytes);
+    const file = try std.Io.Dir.cwd().openFile(io, file_path, .{}); // closed after Editor.init()
+    var file_reader = file.reader(io, &.{});
 
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [1024]u8 = undefined;
@@ -671,9 +671,10 @@ pub fn main(init: std.process.Init) !void {
         io,
         writer,
         file_path,
-        file_bytes,
+        &file_reader.interface,
         dimensions,
     );
+    file.close(io);
     defer editor.deinit(allocator);
 
     while (true) {
@@ -827,11 +828,8 @@ const Error = error{
     CsiSequenceNotRecognised,
     CsiSequenceTooLong,
     FileContainsInvalidCharacter,
-    FileEmpty,
-    FileNotNewlineTerminated,
-    FileTooManyLines,
+    FileTooLong,
     FirstEventMustBeResize,
-    LineTooLong,
     ViewportTooLarge,
     ViewportTooSmall,
 };
@@ -978,6 +976,7 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
 }
 
 test "fuzzKkpParser repro" {
+    if (builtin.fuzz) return error.SkipZigTest;
     const crash = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         ".zig-cache/f/crash",
@@ -1368,7 +1367,7 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     const io = std.testing.io;
 
     const file_size = smith.slice(ctx.file_buffer);
-    const file = ctx.file_buffer[0..file_size];
+    var file_reader: std.Io.Reader = .fixed(ctx.file_buffer[0..file_size]);
 
     const file_path_size = smith.slice(&ctx.file_path_buffer);
     const file_path = ctx.file_path_buffer[0..file_path_size];
@@ -1383,14 +1382,10 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         io,
         &writer.writer,
         file_path,
-        file,
+        &file_reader,
         .{ .row_count = row_count, .col_count = col_count },
     ) catch |err| switch (err) {
         Error.FileContainsInvalidCharacter,
-        Error.FileEmpty,
-        Error.FileNotNewlineTerminated,
-        Error.FileTooManyLines,
-        Error.LineTooLong,
         Error.ViewportTooLarge,
         Error.ViewportTooSmall,
         => return,
@@ -1421,6 +1416,7 @@ test fuzzEditor {
 }
 
 test "fuzzEditor repro" {
+    if (builtin.fuzz) return error.SkipZigTest;
     const crash = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         ".zig-cache/f/crash",
@@ -1532,6 +1528,8 @@ const TestEditor = struct {
         file_bytes: []const u8,
         input: []const u8,
     }) !void {
+        var file_reader: std.Io.Reader = .fixed(params.file_bytes);
+
         test_editor.stripping_writer = try .init(allocator);
         test_editor.reader = .fixed(params.input);
 
@@ -1545,7 +1543,7 @@ const TestEditor = struct {
             io,
             test_editor.stripping_writer.writer(),
             params.file_path,
-            params.file_bytes,
+            &file_reader,
             dimensions,
         );
     }

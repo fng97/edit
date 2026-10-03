@@ -3,6 +3,7 @@
 - Rendering optimisation ideas:
   - Use repeat (REP) when implementing splat?
   - Move cursor instead of sending multiple spaces (splat special case)?
+  - Faster if everything fits in render buffer? 16K is not enough at 400x300.
 
 ## TODO
 
