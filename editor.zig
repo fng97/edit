@@ -58,7 +58,7 @@ const Editor = struct {
     formatting_buffer: [file_size_max]u8 = undefined,
     clipboard: std.ArrayList(u8),
 
-    pub fn tick(editor: *Editor, event: Event) !bool {
+    fn tick(editor: *Editor, event: Event) !bool {
         if (event == .resize) {
             editor.viewport.row_count = event.resize.row_count;
             editor.viewport.col_count = event.resize.col_count;
@@ -471,7 +471,7 @@ const Editor = struct {
         try writer.flush();
     }
 
-    pub fn init(
+    fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         writer: *std.Io.Writer,
@@ -516,7 +516,7 @@ const Editor = struct {
         return editor;
     }
 
-    pub fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
+    fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
         editor.document.deinit(allocator);
         editor.clipboard.deinit(allocator);
     }
@@ -860,7 +860,7 @@ const Modifiers = packed struct(u8) {
     /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
     /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
     /// 0b101 = 6 and so on."
-    pub fn decode(encoded: []const u8) !Modifiers {
+    fn decode(encoded: []const u8) !Modifiers {
         // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
         const value = try parseCsiInt(encoded);
         if (value == 0) return Error.CsiSequenceInvalid;
@@ -1510,11 +1510,11 @@ const StrippingWriter = struct {
         return write_size + splat_slice.len * splat;
     }
 
-    pub fn writer(stripping: *StrippingWriter) *std.Io.Writer {
+    fn writer(stripping: *StrippingWriter) *std.Io.Writer {
         return &stripping.interface;
     }
 
-    pub fn written(stripping: *StrippingWriter) []const u8 {
+    fn written(stripping: *StrippingWriter) []const u8 {
         return stripping.out.written();
     }
 };
