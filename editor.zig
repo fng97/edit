@@ -339,7 +339,7 @@ const Editor = struct {
         const line_number_start = editor.viewport.line_number_start;
         const line_offset_start = editor.viewport.line_offset_start;
         const document = editor.document.items;
-        const file_name = editor.file_path;
+        const file_path = editor.file_path;
 
         // Begin synchronised update. See
         // https://contour-terminal.org/vt-extensions/synchronized-output.
@@ -415,13 +415,13 @@ const Editor = struct {
                     digitCount(cursor.line_number + 1) +
                     digitCount(cursor.line_offset + 1) +
                     1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-                var min_size = file_name.len;
+                var min_size = file_path.len;
                 const dirty_indicator = " [+]";
                 if (editor.dirty) min_size += dirty_indicator.len;
                 min_size += cursor_coordinates_col_count + 1; // 1 for padding
                 if (min_size > col_count) return Error.ViewportTooSmall;
 
-                try writer.writeAll(file_name);
+                try writer.writeAll(file_path);
                 if (editor.dirty) try writer.writeAll(dirty_indicator);
                 try writer.splatByteAll(' ', col_count - min_size);
                 try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
@@ -475,7 +475,7 @@ const Editor = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         writer: *std.Io.Writer,
-        file_name: []const u8,
+        file_path: []const u8,
         file_bytes: []const u8,
         viewport_dimensions: ViewportDimensions,
     ) !Editor {
@@ -502,7 +502,7 @@ const Editor = struct {
                 .line_number_start = 0,
                 .line_offset_start = 0,
             },
-            .file_path = file_name,
+            .file_path = file_path,
             .document = document,
             .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
             .clipboard = clipboard,
@@ -618,10 +618,10 @@ pub fn main(init: std.process.Init) !void {
 
     var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
     assert(args_iterator.skip()); // first arg is executable path
-    const file_name = args_iterator.next() orelse @panic("missing file path arg");
+    const file_path = args_iterator.next() orelse @panic("missing file path arg");
     const file_bytes = try std.Io.Dir.cwd().readFileAlloc(
         io,
-        file_name,
+        file_path,
         allocator,
         .limited(file_size_max),
     );
@@ -670,7 +670,7 @@ pub fn main(init: std.process.Init) !void {
         allocator,
         io,
         writer,
-        file_name,
+        file_path,
         file_bytes,
         dimensions,
     );
