@@ -14,10 +14,6 @@ const builtin = @import("builtin");
 
 const assert = std.debug.assert;
 
-const file_size_max = 1 * 1024 * 1024;
-const col_count_max = 400;
-const row_count_max = 300;
-
 const terminal_init =
     // Use alternate screen. Stores original screen and cursor state and has no scrollback. See
     // https://terminfo.dev/modes/decset-1049-alt-screen-enter.
@@ -40,6 +36,9 @@ const Editor = struct {
     io: std.Io,
     writer: *std.Io.Writer,
 
+    col_count_max: u32,
+    row_count_max: u32,
+
     file_path: []const u8,
     viewport: Viewport,
     cursor: Cursor,
@@ -54,8 +53,8 @@ const Editor = struct {
     },
     document: std.ArrayList(u8),
     dirty: bool = false,
-    prompt_text_buffer: [col_count_max - 1]u8 = undefined, // -1 for the ':' in prompt
-    formatting_buffer: [file_size_max]u8 = undefined,
+    prompt_text_buffer: []u8,
+    formatting_buffer: []u8,
     clipboard: std.ArrayList(u8),
 
     fn tick(editor: *Editor, event: Event) !bool {
@@ -146,7 +145,7 @@ const Editor = struct {
                     ':' => editor.mode = .{
                         .prompt = .{
                             .command = .{
-                                .text = .initBuffer(&editor.prompt_text_buffer),
+                                .text = .initBuffer(editor.prompt_text_buffer),
                                 .cursor_offset = 0,
                             },
                         },
@@ -289,7 +288,9 @@ const Editor = struct {
     /// Focus viewport: Ensure the cursor is in the viewport.
     fn focus(editor: *Editor, cursor: Position) Error!void {
         const row_count = editor.viewport.row_count;
+        const row_count_max = editor.row_count_max;
         const col_count = editor.viewport.col_count;
+        const col_count_max = editor.col_count_max;
         const line_number = cursor.line_number;
         const line_offset = cursor.line_offset;
 
@@ -478,8 +479,13 @@ const Editor = struct {
         file_path: []const u8,
         file_reader: *std.Io.Reader,
         viewport_dimensions: ViewportDimensions,
+        bounds: struct {
+            file_size_max: u32,
+            col_count_max: u32,
+            row_count_max: u32,
+        },
     ) !Editor {
-        const document_buffer = try allocator.alloc(u8, file_size_max);
+        const document_buffer = try allocator.alloc(u8, bounds.file_size_max);
         errdefer allocator.free(document_buffer);
         var document_writer: std.Io.Writer = .fixed(document_buffer);
         _ = file_reader.streamRemaining(&document_writer) catch |err| switch (err) {
@@ -494,8 +500,13 @@ const Editor = struct {
         if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
         for (document.items) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
 
-        var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, file_size_max);
+        var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, bounds.file_size_max);
         errdefer clipboard.deinit(allocator);
+        // -1 accounts for the ':' shown when the prompt is active.
+        const prompt_text_buffer = try allocator.alloc(u8, bounds.col_count_max - 1);
+        errdefer allocator.free(prompt_text_buffer);
+        const formatting_buffer = try allocator.alloc(u8, bounds.file_size_max);
+        errdefer allocator.free(formatting_buffer);
 
         var editor: Editor = .{
             .io = io,
@@ -511,6 +522,10 @@ const Editor = struct {
             .document = document,
             .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
             .clipboard = clipboard,
+            .prompt_text_buffer = prompt_text_buffer,
+            .formatting_buffer = formatting_buffer,
+            .col_count_max = bounds.col_count_max,
+            .row_count_max = bounds.row_count_max,
         };
 
         const cursor_position_start: Position = .{ .line_number = 0, .line_offset = 0 };
@@ -524,6 +539,8 @@ const Editor = struct {
     fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
         editor.document.deinit(allocator);
         editor.clipboard.deinit(allocator);
+        allocator.free(editor.prompt_text_buffer);
+        allocator.free(editor.formatting_buffer);
     }
 
     fn insert(editor: *Editor, text: []const u8) !void {
@@ -560,7 +577,7 @@ const Editor = struct {
     fn formatDocument(editor: *Editor) !bool {
         if (builtin.is_test) {
             const formatted =
-                try formatDocumentWithTestFormatter(editor.document.items, &editor.formatting_buffer);
+                try formatDocumentWithTestFormatter(editor.document.items, editor.formatting_buffer);
 
             editor.document.clearRetainingCapacity();
             editor.document.appendSliceAssumeCapacity(formatted);
@@ -582,7 +599,7 @@ const Editor = struct {
 
             // Resulting stdout is new buffer.
             var stdout_reader = child.stdout.?.reader(io, &.{});
-            var buffer_writer: std.Io.Writer = .fixed(&editor.formatting_buffer);
+            var buffer_writer: std.Io.Writer = .fixed(editor.formatting_buffer);
             const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
 
             const term = try child.wait(io);
@@ -673,6 +690,11 @@ pub fn main(init: std.process.Init) !void {
         file_path,
         &file_reader.interface,
         dimensions,
+        .{
+            .file_size_max = 1 * 1024 * 1024, // 1 MB
+            .col_count_max = 400,
+            .row_count_max = 300,
+        },
     );
     file.close(io);
     defer editor.deinit(allocator);
@@ -1348,16 +1370,12 @@ fn digitCount(number: u32) u8 {
 }
 
 const EditorFuzzContext = struct {
-    file_buffer: []u8,
-    file_path_buffer: [256]u8 = undefined,
+    const file_size_max = 512;
+    const col_count_max = 80;
+    const row_count_max = 60;
 
-    fn init(allocator: std.mem.Allocator) !EditorFuzzContext {
-        return .{ .file_buffer = try allocator.alloc(u8, file_size_max) };
-    }
-
-    fn deinit(ctx: *@This(), allocator: std.mem.Allocator) void {
-        allocator.free(ctx.file_buffer);
-    }
+    file_buffer: [file_size_max]u8 = undefined,
+    file_path_buffer: [col_count_max]u8 = undefined,
 };
 
 fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
@@ -1366,14 +1384,14 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    const file_size = smith.slice(ctx.file_buffer);
+    const file_size = smith.slice(&ctx.file_buffer);
     var file_reader: std.Io.Reader = .fixed(ctx.file_buffer[0..file_size]);
 
     const file_path_size = smith.slice(&ctx.file_path_buffer);
     const file_path = ctx.file_path_buffer[0..file_path_size];
 
-    const row_count = smith.valueRangeAtMost(u32, 0, row_count_max);
-    const col_count = smith.valueRangeAtMost(u32, 0, col_count_max);
+    const row_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.row_count_max);
+    const col_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.col_count_max);
 
     var writer: std.Io.Writer.Discarding = .init(&.{});
 
@@ -1384,8 +1402,14 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         file_path,
         &file_reader,
         .{ .row_count = row_count, .col_count = col_count },
+        .{
+            .file_size_max = EditorFuzzContext.file_size_max,
+            .col_count_max = EditorFuzzContext.col_count_max,
+            .row_count_max = EditorFuzzContext.row_count_max,
+        },
     ) catch |err| switch (err) {
         Error.FileContainsInvalidCharacter,
+        Error.FileTooLong,
         Error.ViewportTooLarge,
         Error.ViewportTooSmall,
         => return,
@@ -1410,8 +1434,7 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 }
 
 test fuzzEditor {
-    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
-    defer ctx.deinit(std.testing.allocator);
+    var ctx: EditorFuzzContext = .{};
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }
 
@@ -1424,9 +1447,8 @@ test "fuzzEditor repro" {
         .unlimited,
     ) catch return;
     defer std.testing.allocator.free(crash);
-    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
-    defer ctx.deinit(std.testing.allocator);
-    return std.testing.fuzz(&ctx, fuzzEditor, .{});
+    var ctx: EditorFuzzContext = .{};
+    return std.testing.fuzz(&ctx, fuzzEditor, .{ .corpus = &.{crash} });
 }
 
 test Modifiers {
@@ -1545,6 +1567,7 @@ const TestEditor = struct {
             params.file_path,
             &file_reader,
             dimensions,
+            .{ .file_size_max = 1024, .col_count_max = 80, .row_count_max = 60 },
         );
     }
 
