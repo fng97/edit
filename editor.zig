@@ -527,10 +527,11 @@ const Editor = struct {
         allocator.free(editor.formatting_buffer);
     }
 
-    fn insert(editor: *Editor, text: []const u8) !void {
+    fn insert(editor: *Editor, text: []const u8) Error!void {
         assert(text.len > 0);
         assert(editor.cursor.offset < editor.document.items.len);
-        try editor.document.insertSliceBounded(editor.cursor.offset, text);
+        editor.document.insertSliceBounded(editor.cursor.offset, text) catch
+            return Error.FileTooLong;
         editor.cursor.move(.right, @intCast(text.len), editor.document.items);
         editor.dirty = true;
     }
@@ -1453,6 +1454,7 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         if (ctx.editor.tick(event) catch |err| switch (err) {
             Error.CsiSequenceInvalid,
             Error.CsiSequenceNotRecognised,
+            Error.FileTooLong,
             Error.ViewportTooLarge,
             Error.ViewportTooSmall,
             => return,
