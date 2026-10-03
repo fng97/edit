@@ -1445,7 +1445,6 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 
     const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
     ctx.editor.focus(cursor_position) catch return;
-    try ctx.editor.render(cursor_position);
     while (true) {
         const event: Event = smith.value(Event); // generate input
 
