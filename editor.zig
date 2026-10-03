@@ -967,14 +967,10 @@ fn parseOne(reader: *std.Io.Reader) !Event {
     }
 }
 
-test fuzzKkpParser {
-    return std.testing.fuzz({}, fuzzKkpParser, .{});
-}
-fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
+fn fuzzKkpParser(reader_buffer: *[128]u8, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
-    var reader_buffer: [128]u8 = undefined;
-    const size = smith.slice(&reader_buffer);
+    const size = smith.slice(reader_buffer);
     var reader: std.Io.Reader = .fixed(reader_buffer[0..size]);
 
     while (true) _ = parseOne(&reader) catch |err| switch (err) {
@@ -986,6 +982,11 @@ fn fuzzKkpParser(_: void, smith: *std.testing.Smith) !void {
     };
 }
 
+test fuzzKkpParser {
+    var reader_buffer: [128]u8 = undefined;
+    try std.testing.fuzz(&reader_buffer, fuzzKkpParser, .{});
+}
+
 test "fuzzKkpParser repro" {
     if (builtin.fuzz) return error.SkipZigTest;
     const crash = std.Io.Dir.cwd().readFileAlloc(
@@ -995,7 +996,8 @@ test "fuzzKkpParser repro" {
         .unlimited,
     ) catch return;
     defer std.testing.allocator.free(crash);
-    try std.testing.fuzz({}, fuzzKkpParser, .{ .corpus = &.{crash} });
+    var reader_buffer: [128]u8 = undefined;
+    try std.testing.fuzz(&reader_buffer, fuzzKkpParser, .{ .corpus = &.{crash} });
 }
 
 /// Fake formatter for testing. Double all blank lines. Remove all indentation.
