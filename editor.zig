@@ -278,14 +278,20 @@ const Editor = struct {
             .line_offset = lineOffset(editor.document.items, editor.cursor.offset),
         };
 
+        // Cursor is always at snap line offset or line end.
+        assert(cursor_position.line_offset == @min(
+            editor.cursor.line_offset_snap,
+            lineSize(editor.document.items, editor.cursor.offset) - 1,
+        ));
+        assert(cursor_position.line_offset <= editor.cursor.line_offset_snap);
+
         try editor.focus(cursor_position);
-        editor.validate(cursor_position);
         try editor.render(cursor_position);
 
         return true;
     }
 
-    /// Focus viewport: Ensure the cursor is in the viewport.
+    /// Focus the viewport: Ensure it contains the cursor.
     fn focus(editor: *Editor, cursor: Position) Error!void {
         const row_count = editor.viewport.row_count;
         const row_count_max = editor.row_count_max;
@@ -313,23 +319,12 @@ const Editor = struct {
         } else if (line_offset > last_offset) {
             editor.viewport.line_offset_start += line_offset - last_offset;
         }
-    }
-
-    fn validate(editor: *const Editor, cursor: Position) void {
-        const document = editor.document.items;
-        const offset = editor.cursor.offset;
-        const line_number = cursor.line_number;
-        const line_offset = cursor.line_offset;
-
-        // Cursor is always at snap line offset or line end.
-        assert(line_offset == @min(editor.cursor.line_offset_snap, lineSize(document, offset) - 1));
-        assert(line_offset <= editor.cursor.line_offset_snap);
 
         // Make sure cursor is within the viewport's bounds.
-        assert(line_number >= editor.viewport.line_number_start);
-        assert(line_number <= editor.viewport.lastLine());
-        assert(line_offset >= editor.viewport.line_offset_start);
-        assert(line_offset <= editor.viewport.lastOffset());
+        assert(cursor.line_number >= editor.viewport.line_number_start);
+        assert(cursor.line_number <= editor.viewport.lastLine());
+        assert(cursor.line_offset >= editor.viewport.line_offset_start);
+        assert(cursor.line_offset <= editor.viewport.lastOffset());
     }
 
     fn render(editor: *const Editor, cursor: Position) !void {
@@ -494,11 +489,7 @@ const Editor = struct {
         };
         // Error handling already frees document_buffer via errdefer above. Don't double free.
         var document: std.ArrayList(u8) = document_writer.toArrayList();
-
-        // File must not be empty, contain only ASCII, and end in newline.
-        if (document.items.len == 0) document.appendAssumeCapacity('\n');
-        if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
-        for (document.items) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
+        try ensureDocumentValid(&document);
 
         var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, bounds.file_size_max);
         errdefer clipboard.deinit(allocator);
@@ -508,7 +499,7 @@ const Editor = struct {
         const formatting_buffer = try allocator.alloc(u8, bounds.file_size_max);
         errdefer allocator.free(formatting_buffer);
 
-        var editor: Editor = .{
+        return .{
             .io = io,
             .writer = writer,
             .mode = .normal,
@@ -527,13 +518,6 @@ const Editor = struct {
             .col_count_max = bounds.col_count_max,
             .row_count_max = bounds.row_count_max,
         };
-
-        const cursor_position_start: Position = .{ .line_number = 0, .line_offset = 0 };
-        try editor.focus(cursor_position_start);
-        editor.validate(cursor_position_start);
-        try editor.render(cursor_position_start);
-
-        return editor;
     }
 
     fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
@@ -699,6 +683,10 @@ pub fn main(init: std.process.Init) !void {
     file.close(io);
     defer editor.deinit(allocator);
 
+    // Do the initial render. In event loop we render on every tick.
+    const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
+    try editor.focus(cursor_position);
+    try editor.render(cursor_position);
     while (true) {
         const event = try parseOne(reader);
         if (!try editor.tick(event)) return;
@@ -1052,6 +1040,13 @@ test formatDocumentWithTestFormatter {
     try std.testing.expectEqualStrings("\n\n\n", try formatDocumentWithTestFormatter(" \n\n", &buffer));
 }
 
+/// Document must not be empty, contain only ASCII, and end in newline.
+fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
+    if (document.items.len == 0) document.appendAssumeCapacity('\n');
+    if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
+    for (document.items) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
+}
+
 fn characterValid(c: u8) bool {
     // TODO: Handle tabs.
     return switch (c) {
@@ -1376,53 +1371,86 @@ const EditorFuzzContext = struct {
 
     file_buffer: [file_size_max]u8 = undefined,
     file_path_buffer: [col_count_max]u8 = undefined,
+    editor: Editor,
+
+    fn init(allocator: std.mem.Allocator) !EditorFuzzContext {
+        var editor: Editor = undefined;
+        editor.document = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
+        errdefer editor.document.deinit(allocator);
+        editor.clipboard = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
+        errdefer editor.clipboard.deinit(allocator);
+        editor.formatting_buffer = try allocator.alloc(u8, EditorFuzzContext.file_size_max);
+        errdefer allocator.free(editor.formatting_buffer);
+        editor.prompt_text_buffer = try allocator.alloc(u8, EditorFuzzContext.col_count_max - 1);
+        errdefer allocator.free(editor.prompt_text_buffer);
+
+        return .{ .editor = editor };
+    }
+
+    fn deinit(ctx: *EditorFuzzContext, allocator: std.mem.Allocator) void {
+        ctx.editor.deinit(allocator);
+    }
 };
 
 fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
-    const allocator = std.testing.allocator;
     const io = std.testing.io;
 
+    // Generate editor state.
     const file_size = smith.slice(&ctx.file_buffer);
-    var file_reader: std.Io.Reader = .fixed(ctx.file_buffer[0..file_size]);
-
+    const file = ctx.file_buffer[0..file_size];
     const file_path_size = smith.slice(&ctx.file_path_buffer);
     const file_path = ctx.file_path_buffer[0..file_path_size];
-
     const row_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.col_count_max);
+    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
 
-    var writer: std.Io.Writer.Discarding = .init(&.{});
-
-    var editor = Editor.init(
-        allocator,
-        io,
-        &writer.writer,
-        file_path,
-        &file_reader,
-        .{ .row_count = row_count, .col_count = col_count },
-        .{
-            .file_size_max = EditorFuzzContext.file_size_max,
-            .col_count_max = EditorFuzzContext.col_count_max,
-            .row_count_max = EditorFuzzContext.row_count_max,
+    // The editor is reused for each fuzzing run to avoid memory allocations in the fuzzer. It is
+    // reinitialised using struct initialisation syntax so that we don't forget to update any
+    // fields.
+    ctx.editor = .{
+        .io = io,
+        .writer = &discarding_writer.writer,
+        .col_count_max = EditorFuzzContext.col_count_max,
+        .row_count_max = EditorFuzzContext.row_count_max,
+        .file_path = file_path,
+        .viewport = .{
+            .row_count = row_count,
+            .col_count = col_count,
+            .line_number_start = 0,
+            .line_offset_start = 0,
         },
-    ) catch |err| switch (err) {
-        Error.FileContainsInvalidCharacter,
-        Error.FileTooLong,
-        Error.ViewportTooLarge,
-        Error.ViewportTooSmall,
-        => return,
-        else => return err,
+        .cursor = .{
+            // TODO: Fuzz cursor offset? Would have to use the same value for line_offset_snap.
+            .offset = 0,
+            .anchor = 0,
+            .line_offset_snap = 0,
+        },
+        .mode = .normal,
+        .document = blk: {
+            ctx.editor.document.clearRetainingCapacity();
+            ctx.editor.document.appendSliceAssumeCapacity(file);
+            ensureDocumentValid(&ctx.editor.document) catch return;
+            break :blk ctx.editor.document;
+        },
+        .clipboard = blk: {
+            ctx.editor.clipboard.clearRetainingCapacity();
+            break :blk ctx.editor.clipboard;
+        },
+        .prompt_text_buffer = ctx.editor.prompt_text_buffer,
+        .formatting_buffer = ctx.editor.formatting_buffer,
     };
-    defer editor.deinit(allocator);
 
+    const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
+    ctx.editor.focus(cursor_position) catch return;
+    try ctx.editor.render(cursor_position);
     while (true) {
-        const event: Event = smith.value(Event);
+        const event: Event = smith.value(Event); // generate input
 
         if (event == .ascii and !characterValid(event.ascii)) continue; // valid ascii only
 
-        if (editor.tick(event) catch |err| switch (err) {
+        if (ctx.editor.tick(event) catch |err| switch (err) {
             Error.CsiSequenceInvalid,
             Error.CsiSequenceNotRecognised,
             Error.ViewportTooLarge,
@@ -1434,20 +1462,26 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 }
 
 test fuzzEditor {
-    var ctx: EditorFuzzContext = .{};
+    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
+    defer ctx.deinit(std.testing.allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }
 
 test "fuzzEditor repro" {
+    const allocator = std.testing.allocator;
+
     if (builtin.fuzz) return error.SkipZigTest;
+
     const crash = std.Io.Dir.cwd().readFileAlloc(
         std.testing.io,
         ".zig-cache/f/crash",
-        std.testing.allocator,
+        allocator,
         .unlimited,
     ) catch return;
-    defer std.testing.allocator.free(crash);
-    var ctx: EditorFuzzContext = .{};
+    defer allocator.free(crash);
+
+    var ctx: EditorFuzzContext = try .init(allocator);
+    defer ctx.deinit(allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{ .corpus = &.{crash} });
 }
 
@@ -1569,6 +1603,10 @@ const TestEditor = struct {
             dimensions,
             .{ .file_size_max = 1024, .col_count_max = 80, .row_count_max = 60 },
         );
+
+        const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
+        try test_editor.editor.focus(cursor_position);
+        try test_editor.editor.render(cursor_position);
     }
 
     fn deinit(test_editor: *TestEditor) void {
