@@ -1488,6 +1488,13 @@ test "fuzzEditor repro" {
     return std.testing.fuzz(&ctx, fuzzEditor, .{ .corpus = &.{crash} });
 }
 
+test "fuzzEditor repro2" {
+    const allocator = std.testing.allocator;
+    var ctx: EditorFuzzContext = try .init(allocator);
+    defer ctx.deinit(allocator);
+    return std.testing.fuzz(&ctx, fuzzEditor, .{ .corpus = &.{@embedFile("crash")} });
+}
+
 test Modifiers {
     try std.testing.expect(try Modifiers.decode("1") == Modifiers{
         .shift = false,
