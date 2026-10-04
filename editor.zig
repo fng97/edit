@@ -987,19 +987,6 @@ test fuzzKkpParser {
     try std.testing.fuzz(&reader_buffer, fuzzKkpParser, .{});
 }
 
-test "fuzzKkpParser repro" {
-    if (builtin.fuzz) return error.SkipZigTest;
-    const crash = std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        ".zig-cache/f/crash",
-        std.testing.allocator,
-        .unlimited,
-    ) catch return;
-    defer std.testing.allocator.free(crash);
-    var reader_buffer: [128]u8 = undefined;
-    try std.testing.fuzz(&reader_buffer, fuzzKkpParser, .{ .corpus = &.{crash} });
-}
-
 /// Fake formatter for testing. Double all blank lines. Remove all indentation.
 fn formatDocumentWithTestFormatter(document: []const u8, formatting_buffer: []u8) ![]const u8 {
     // Double all blank lines ("\n\n" -> "\n\n\n").
@@ -1468,24 +1455,6 @@ test fuzzEditor {
     var ctx: EditorFuzzContext = try .init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
-}
-
-test "fuzzEditor repro" {
-    const allocator = std.testing.allocator;
-
-    if (builtin.fuzz) return error.SkipZigTest;
-
-    const crash = std.Io.Dir.cwd().readFileAlloc(
-        std.testing.io,
-        ".zig-cache/f/crash",
-        allocator,
-        .unlimited,
-    ) catch return;
-    defer allocator.free(crash);
-
-    var ctx: EditorFuzzContext = try .init(allocator);
-    defer ctx.deinit(allocator);
-    return std.testing.fuzz(&ctx, fuzzEditor, .{ .corpus = &.{crash} });
 }
 
 test Modifiers {
