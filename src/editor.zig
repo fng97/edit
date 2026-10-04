@@ -36,9 +36,9 @@ const Editor = struct {
     io: std.Io,
     writer: *std.Io.Writer,
 
+    is_test: bool,
     col_count_max: u32,
     row_count_max: u32,
-
     file_path: []const u8,
     viewport: Viewport,
     cursor: Cursor,
@@ -500,6 +500,7 @@ const Editor = struct {
         errdefer allocator.free(formatting_buffer);
 
         return .{
+            .is_test = builtin.is_test,
             .io = io,
             .writer = writer,
             .mode = .normal,
@@ -560,7 +561,7 @@ const Editor = struct {
     }
 
     fn formatDocument(editor: *Editor) !bool {
-        if (builtin.is_test) {
+        if (editor.is_test) {
             const formatted =
                 try formatDocumentWithTestFormatter(editor.document.items, editor.formatting_buffer);
 
@@ -608,7 +609,7 @@ const Editor = struct {
     }
 
     fn save(editor: *Editor) !void {
-        if (!builtin.is_test) {
+        if (!editor.is_test) {
             try std.Io.Dir.cwd().writeFile(editor.io, .{
                 .data = editor.document.items,
                 .sub_path = editor.file_path,
@@ -1354,7 +1355,7 @@ fn digitCount(number: u32) u8 {
     return std.math.log10_int(number) + 1;
 }
 
-const EditorFuzzContext = struct {
+pub const EditorFuzzContext = struct {
     const file_size_max = 512;
     const col_count_max = 80;
     const row_count_max = 60;
@@ -1363,8 +1364,9 @@ const EditorFuzzContext = struct {
     file_path_buffer: [col_count_max]u8 = undefined,
     editor: Editor,
 
-    fn init(allocator: std.mem.Allocator) !EditorFuzzContext {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !EditorFuzzContext {
         var editor: Editor = undefined;
+        editor.io = io;
         editor.document = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
         errdefer editor.document.deinit(allocator);
         editor.clipboard = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
@@ -1377,15 +1379,13 @@ const EditorFuzzContext = struct {
         return .{ .editor = editor };
     }
 
-    fn deinit(ctx: *EditorFuzzContext, allocator: std.mem.Allocator) void {
+    pub fn deinit(ctx: *EditorFuzzContext, allocator: std.mem.Allocator) void {
         ctx.editor.deinit(allocator);
     }
 };
 
-fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
+pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
-
-    const io = std.testing.io;
 
     // Generate editor state.
     const file_size = smith.slice(&ctx.file_buffer);
@@ -1400,7 +1400,8 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     // reinitialised using struct initialisation syntax so that we don't forget to update any
     // fields.
     ctx.editor = .{
-        .io = io,
+        .is_test = true,
+        .io = ctx.editor.io,
         .writer = &discarding_writer.writer,
         .col_count_max = EditorFuzzContext.col_count_max,
         .row_count_max = EditorFuzzContext.row_count_max,
@@ -1452,7 +1453,7 @@ fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 }
 
 test fuzzEditor {
-    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
+    var ctx: EditorFuzzContext = try .init(std.testing.allocator, std.testing.io);
     defer ctx.deinit(std.testing.allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }
