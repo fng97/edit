@@ -14,7 +14,7 @@ const builtin = @import("builtin");
 
 const assert = std.debug.assert;
 
-const terminal_init =
+pub const terminal_init =
     // Use alternate screen. Stores original screen and cursor state and has no scrollback. See
     // https://terminfo.dev/modes/decset-1049-alt-screen-enter.
     "\x1b[?1049h" ++
@@ -24,10 +24,11 @@ const terminal_init =
     // Enable in-band resize notifications. See
     // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
     "\x1b[?2048h";
-const terminal_deinit =
+pub const terminal_deinit =
     "\x1b[?2048l" ++ // disable in-band resize notifications
     "\x1b[<u" ++ // pop KKP flags
     "\x1b[?1049l"; // exit alt screen
+
 const esc_highlight_foreground = "\x1b[38;2;40;40;40m"; // dark foreground
 const esc_highlight_background = "\x1b[48;2;200;200;200m"; // light gray background
 const esc_colour_reset = "\x1b[0m";
@@ -641,24 +642,9 @@ pub fn main(init: std.process.Init) !void {
     var stdout_writer = stdout.writer(io, stdout_buffer);
     const writer: *std.Io.Writer = &stdout_writer.interface;
 
-    // Put terminal in raw mode. Restore original termios on exit.
-    termios_original = try std.posix.tcgetattr(stdin.handle);
+    termios_original = try std.posix.tcgetattr(std.Io.File.stdin().handle);
     defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original.?) catch {}; // restore on exit
-    var termios_raw = termios_original.?;
-    termios_raw.iflag.BRKINT = false;
-    termios_raw.iflag.ICRNL = false;
-    termios_raw.iflag.INPCK = false;
-    termios_raw.iflag.ISTRIP = false;
-    termios_raw.iflag.IXON = false;
-    termios_raw.oflag.OPOST = false;
-    termios_raw.cflag.CSIZE = .CS8;
-    termios_raw.lflag.ECHO = false;
-    termios_raw.lflag.ICANON = false;
-    termios_raw.lflag.IEXTEN = false;
-    termios_raw.lflag.ISIG = false;
-    termios_raw.cc[@backingInt(std.posix.V.MIN)] = 1;
-    termios_raw.cc[@backingInt(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
+    try enableRawMode(termios_original.?);
 
     // Always restore, even if init fails.
     defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
@@ -696,23 +682,43 @@ pub fn main(init: std.process.Init) !void {
 }
 
 var termios_original: ?std.posix.termios = null;
-// Wrap panic handler so that we can restore terminal state first. Calls default panic after
-// cleanup. Cleanup logic runs only once. This prevents jank backtraces when we crash.
-pub const panic = std.debug.FullPanic(struct {
-    pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
-        @branchHint(.cold);
-        // TODO: Worth draining stdin on panic so we don't get garbage input by the terminal cursor
-        // once prior terminal restored?
-        if (termios_original) |t| {
-            termios_original = null; // so we only do this once
-            var threaded: std.Io.Threaded = .init_single_threaded;
-            // Disable KKP (CSI < u) and resize (CSI ? 2048 l) then exit alt screen (CSI ? 1049 l).
-            std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
-            std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
-        }
-        std.debug.defaultPanic(msg, first_trace_addr);
+pub const panic = std.debug.FullPanic(terminalPanic);
+
+// Panic handler wrapper that restores terminal state. Calls default panic after cleanup. Cleanup
+// logic runs only once. Necessary to leave the terminal in working state after a crash.
+pub fn terminalPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {
+    @branchHint(.cold);
+    // TODO: Worth draining stdin on panic so we don't get garbage input by the terminal cursor once
+    // prior terminal restored?
+    if (termios_original) |t| {
+        termios_original = null; // so we only do this once
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        // Disable KKP (CSI < u) and resize (CSI ? 2048 l) then exit alt screen (CSI ? 1049 l).
+        std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
+        std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
     }
-}.panic);
+    std.debug.defaultPanic(msg, first_trace_addr);
+}
+
+/// Put terminal in raw mode. Caller is responsible for restoring termios.
+pub fn enableRawMode(termios: std.c.termios) !void {
+    const stdin = std.Io.File.stdin();
+    var termios_raw = termios;
+    termios_raw.iflag.BRKINT = false;
+    termios_raw.iflag.ICRNL = false;
+    termios_raw.iflag.INPCK = false;
+    termios_raw.iflag.ISTRIP = false;
+    termios_raw.iflag.IXON = false;
+    termios_raw.oflag.OPOST = false;
+    termios_raw.cflag.CSIZE = .CS8;
+    termios_raw.lflag.ECHO = false;
+    termios_raw.lflag.ICANON = false;
+    termios_raw.lflag.IEXTEN = false;
+    termios_raw.lflag.ISIG = false;
+    termios_raw.cc[@backingInt(std.posix.V.MIN)] = 1;
+    termios_raw.cc[@backingInt(std.posix.V.TIME)] = 0;
+    try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
+}
 
 const Position = struct { line_number: u32, line_offset: u32 };
 
@@ -1358,13 +1364,14 @@ fn digitCount(number: u32) u8 {
 pub const EditorFuzzContext = struct {
     const file_size_max = 512;
     const col_count_max = 80;
-    const row_count_max = 60;
+    const row_count_max = 24;
 
     file_buffer: [file_size_max]u8 = undefined,
     file_path_buffer: [col_count_max]u8 = undefined,
+    writer: ?*std.Io.Writer,
     editor: Editor,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !EditorFuzzContext {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, writer: ?*std.Io.Writer) !EditorFuzzContext {
         var editor: Editor = undefined;
         editor.io = io;
         editor.document = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
@@ -1376,7 +1383,7 @@ pub const EditorFuzzContext = struct {
         editor.prompt_text_buffer = try allocator.alloc(u8, EditorFuzzContext.col_count_max - 1);
         errdefer allocator.free(editor.prompt_text_buffer);
 
-        return .{ .editor = editor };
+        return .{ .writer = writer, .editor = editor };
     }
 
     pub fn deinit(ctx: *EditorFuzzContext, allocator: std.mem.Allocator) void {
@@ -1394,7 +1401,9 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     const file_path = ctx.file_path_buffer[0..file_path_size];
     const row_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.col_count_max);
+
     var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
+    const writer: *std.Io.Writer = if (ctx.writer) |writer| writer else &discarding_writer.writer;
 
     // The editor is reused for each fuzzing run to avoid memory allocations in the fuzzer. It is
     // reinitialised using struct initialisation syntax so that we don't forget to update any
@@ -1402,7 +1411,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     ctx.editor = .{
         .is_test = true,
         .io = ctx.editor.io,
-        .writer = &discarding_writer.writer,
+        .writer = writer,
         .col_count_max = EditorFuzzContext.col_count_max,
         .row_count_max = EditorFuzzContext.row_count_max,
         .file_path = file_path,
@@ -1453,7 +1462,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 }
 
 test fuzzEditor {
-    var ctx: EditorFuzzContext = try .init(std.testing.allocator, std.testing.io);
+    var ctx: EditorFuzzContext = try .init(std.testing.allocator, std.testing.io, null);
     defer ctx.deinit(std.testing.allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }

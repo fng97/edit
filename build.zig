@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(blk: {
         const run = b.addRunArtifact(b.addTest(.{
             .root_module = mod,
-            // .use_llvm = true, // when using debugger
+            .use_llvm = true, // when using debugger
         }));
         break :blk &run.step;
     });
