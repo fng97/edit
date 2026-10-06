@@ -1364,9 +1364,8 @@ pub const EditorFuzzContext = struct {
     file_path_buffer: [col_count_max]u8 = undefined,
     editor: Editor,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !EditorFuzzContext {
+    pub fn init(allocator: std.mem.Allocator) !EditorFuzzContext {
         var editor: Editor = undefined;
-        editor.io = io;
         editor.document = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
         errdefer editor.document.deinit(allocator);
         editor.clipboard = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
@@ -1401,7 +1400,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     // fields.
     ctx.editor = .{
         .is_test = true,
-        .io = ctx.editor.io,
+        .io = .failing,
         .writer = &discarding_writer.writer,
         .col_count_max = EditorFuzzContext.col_count_max,
         .row_count_max = EditorFuzzContext.row_count_max,
@@ -1453,7 +1452,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 }
 
 test fuzzEditor {
-    var ctx: EditorFuzzContext = try .init(std.testing.allocator, std.testing.io);
+    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }
@@ -1546,7 +1545,6 @@ const StrippingWriter = struct {
 
 const TestEditor = struct {
     const allocator = std.testing.allocator;
-    const io = std.testing.io;
 
     reader: std.Io.Reader,
     stripping_writer: StrippingWriter,
@@ -1569,7 +1567,7 @@ const TestEditor = struct {
 
         test_editor.editor = try .init(
             allocator,
-            io,
+            .failing,
             test_editor.stripping_writer.writer(),
             params.file_path,
             &file_reader,

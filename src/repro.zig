@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
 
     var smith: std.testing.Smith = .{ .in = crash };
 
-    var ctx: EditorFuzzContext = try .init(allocator, io);
+    var ctx: EditorFuzzContext = try .init(allocator);
     defer ctx.deinit(allocator);
 
     try fuzzEditor(&ctx, &smith);
