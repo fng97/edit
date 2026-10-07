@@ -235,6 +235,9 @@ const Editor = struct {
                             if (!editor.dirty) return false; // exit!
                             // Trying to exit without saving. Prompt user to save.
                             editor.mode = .{ .prompt = .unsaved };
+                        } else if (std.mem.eql(u8, "w!", command.text.items)) { // skip formatting
+                            try editor.save();
+                            editor.mode = .normal;
                         } else if (std.mem.eql(u8, "q!", command.text.items)) {
                             return false; // exit, for real!
                         } else if (std.mem.eql(u8, "wq", command.text.items)) {
