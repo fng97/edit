@@ -564,39 +564,50 @@ const Editor = struct {
     }
 
     fn formatDocument(editor: *Editor) !bool {
-        if (editor.is_test) {
-            const formatted =
-                try formatDocumentWithTestFormatter(editor.document.items, editor.formatting_buffer);
+        const document_kind: enum { zig, testing, unknown } = if (editor.is_test)
+            .testing
+        else if (std.mem.endsWith(u8, editor.file_path, ".zig"))
+            .zig
+        else
+            .unknown;
 
-            editor.document.clearRetainingCapacity();
-            editor.document.appendSliceAssumeCapacity(formatted);
-        } else {
-            const io = editor.io;
+        switch (document_kind) {
+            .testing => {
+                const formatted =
+                    try formatDocumentWithTestFormatter(editor.document.items, editor.formatting_buffer);
 
-            var child = try std.process.spawn(io, .{
-                .argv = &.{ "zig", "fmt", "--stdin" },
-                .stdin = .pipe,
-                .stdout = .pipe,
-                .stderr = .ignore,
-            });
-            defer child.kill(io);
+                editor.document.clearRetainingCapacity();
+                editor.document.appendSliceAssumeCapacity(formatted);
+            },
+            .zig => {
+                const io = editor.io;
 
-            // Write the buffer to stdin.
-            try child.stdin.?.writeStreamingAll(io, editor.document.items);
-            child.stdin.?.close(io);
-            child.stdin = null;
+                var child = try std.process.spawn(io, .{
+                    .argv = &.{ "zig", "fmt", "--stdin" },
+                    .stdin = .pipe,
+                    .stdout = .pipe,
+                    .stderr = .ignore,
+                });
+                defer child.kill(io);
 
-            // Resulting stdout is new buffer.
-            var stdout_reader = child.stdout.?.reader(io, &.{});
-            var buffer_writer: std.Io.Writer = .fixed(editor.formatting_buffer);
-            const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
+                // Write the buffer to stdin.
+                try child.stdin.?.writeStreamingAll(io, editor.document.items);
+                child.stdin.?.close(io);
+                child.stdin = null;
 
-            const term = try child.wait(io);
+                // Resulting stdout is new buffer.
+                var stdout_reader = child.stdout.?.reader(io, &.{});
+                var buffer_writer: std.Io.Writer = .fixed(editor.formatting_buffer);
+                const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
 
-            if (!term.success()) return false;
+                const term = try child.wait(io);
 
-            editor.document.clearRetainingCapacity();
-            editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
+                if (!term.success()) return false;
+
+                editor.document.clearRetainingCapacity();
+                editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
+            },
+            else => {},
         }
 
         assert(editor.document.items.len > 0);
