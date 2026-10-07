@@ -8,7 +8,6 @@
 ## TODO
 
 - WHY DOESN'T REPRO WORK ON AARCH64-DARWIN?!
-- Handle tabs: convert to 8 spaces.
 - Fix all fuzzer bugs.
 - Basic undo/redo. For now just individual modifications.
 - Basic search (check out `std.ascii`).

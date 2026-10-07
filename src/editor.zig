@@ -1035,11 +1035,14 @@ test formatDocumentWithTestFormatter {
 fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
     if (document.items.len == 0) document.appendAssumeCapacity('\n');
     if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
+    while (std.mem.findScalar(u8, document.items, '\t')) |index| {
+        const tab_whitespace: [8]u8 = @splat(' ');
+        document.replaceRangeBounded(index, 1, &tab_whitespace) catch return Error.FileTooLong;
+    }
     for (document.items) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
 }
 
 fn characterValid(c: u8) bool {
-    // TODO: Handle tabs.
     return switch (c) {
         0x0A => true, // newline
         0x20...0x7E => true, // printable
