@@ -7,25 +7,26 @@
 
 ## TODO
 
-- Basic undo/redo. For now just individual modifications.
-- Basic search.
+- WHY DOESN'T REPRO WORK ON AARCH64-DARWIN?!
 - Handle tabs: convert to 8 spaces.
+- Fix all fuzzer bugs.
+- Basic undo/redo. For now just individual modifications.
+- Basic search (check out `std.ascii`).
+- Add visual fuzzing repro replay tool.
+- Find and replace.
+- Whole line selection mode.
 
 - Add `{`, `}`, `_`, and `%` motions.
-- Whole line selection mode.
 - Yank, cut, and paste using global buffer.
 - Regex search.
-- Word motion ergonomics. Remove '_' from `alphanumeric`. Make it recognise
+- Word motion improvements: Remove '_' from `alphanumeric`. Make it recognise
   camelCase?
 - Go through all functions and try think of more invariants. Aim for at least
   two assertions per function.
-- Test if reusing memory in fuzzer is faster? Reuse file buffer, editor struct,
-  etc.
 - Bring back weighting strategies. Swarm the strategies themselves. Make the
   file look like a file. Same for file name.
 - Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
   passing options on the command line, e.g. if we wanna open a huge file.
-- Handle opening empty file. Just insert a single newline.
 - Support mouse scroll.
 - Support --goto={line_number}:{line_offset} arg.
 - Insert mode terminal-like keybinds (e.g. CTRL+W to delete word).
