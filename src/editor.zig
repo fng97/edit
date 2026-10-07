@@ -1053,7 +1053,12 @@ fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
         const tab_whitespace: [8]u8 = @splat(' ');
         document.replaceRangeBounded(index, 1, &tab_whitespace) catch return Error.FileTooLong;
     }
-    for (document.items) |c| if (!characterValid(c)) return Error.FileContainsInvalidCharacter;
+    for (document.items, 0..) |c, i| if (!characterValid(c))
+        std.debug.panic("Invalid character ({x}) at {d}:{d}", .{
+            c,
+            lineNumber(document.items, @intCast(i)),
+            lineOffset(document.items, @intCast(i)),
+        });
 }
 
 fn characterValid(c: u8) bool {
