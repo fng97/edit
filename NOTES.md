@@ -15,6 +15,7 @@
 - Find and replace.
 - Whole line selection mode.
 
+- Paste over selection should replace selection.
 - Add `{`, `}`, `_`, and `%` motions.
 - Yank, cut, and paste using global buffer.
 - Regex search.

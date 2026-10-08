@@ -166,15 +166,20 @@ const Editor = struct {
                         try editor.insert(editor.clipboard.items);
                         if (!on_newline) editor.cursor.move(.left, 1, editor.document.items);
                     },
+                    'z' => editor.centreCursorVertically(),
                     else => {},
                 },
                 .chord => |chord| {
-                    const scroll = editor.viewport.row_count / 2;
                     const ctrl: Modifiers = .{ .ctrl = true };
-                    const mod = chord.modifiers;
                     switch (chord.ascii) {
-                        'u' => if (mod == ctrl) editor.cursor.move(.up, scroll, editor.document.items),
-                        'd' => if (mod == ctrl) editor.cursor.move(.down, scroll, editor.document.items),
+                        'u', 'd' => |c| if (chord.modifiers == ctrl) {
+                            editor.cursor.move(
+                                if (c == 'u') .up else .down,
+                                editor.viewport.row_count / 3,
+                                editor.document.items,
+                            );
+                            editor.centreCursorVertically();
+                        },
                         else => {},
                     }
                 },
@@ -563,6 +568,13 @@ const Editor = struct {
             editor.document.appendAssumeCapacity('\n');
 
         editor.dirty = true;
+    }
+
+    fn centreCursorVertically(editor: *Editor) void {
+        const line_number = lineNumber(editor.document.items, editor.cursor.offset);
+        const rows_to_middle = editor.viewport.row_count / 2 - 1;
+        if (rows_to_middle < line_number)
+            editor.viewport.line_number_start = line_number - rows_to_middle;
     }
 
     fn formatDocument(editor: *Editor) !?bool {
