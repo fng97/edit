@@ -225,12 +225,14 @@ const Editor = struct {
                     },
                     .enter => {
                         if (std.mem.eql(u8, "w", command.text.items)) {
-                            if (try editor.formatDocument()) {
-                                try editor.save();
-                                editor.mode = .normal;
-                            } else {
-                                editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
-                            }
+                            if (try editor.formatDocument()) |success| {
+                                if (success) {
+                                    try editor.save();
+                                    editor.mode = .normal;
+                                } else {
+                                    editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
+                                }
+                            } // else no formatter available
                         } else if (std.mem.eql(u8, "q", command.text.items)) {
                             if (!editor.dirty) return false; // exit!
                             // Trying to exit without saving. Prompt user to save.
@@ -563,52 +565,38 @@ const Editor = struct {
         editor.dirty = true;
     }
 
-    fn formatDocument(editor: *Editor) !bool {
-        const document_kind: enum { zig, testing, unknown } = if (editor.is_test)
+    fn formatDocument(editor: *Editor) !?bool {
+        const document_kind: enum { zig, markdown, testing, unknown } = if (editor.is_test)
             .testing
         else if (std.mem.endsWith(u8, editor.file_path, ".zig"))
             .zig
+        else if (std.mem.endsWith(u8, editor.file_path, ".md"))
+            .markdown
         else
             .unknown;
 
-        switch (document_kind) {
-            .testing => {
-                const formatted =
-                    try formatDocumentWithTestFormatter(editor.document.items, editor.formatting_buffer);
+        const formatted = switch (document_kind) {
+            .testing => try formatDocumentWithTestFormatter(
+                editor.document.items,
+                editor.formatting_buffer,
+            ),
+            .zig => try runFormatter(
+                editor.io,
+                &.{ "zig", "fmt", "--stdin" },
+                editor.document.items,
+                editor.formatting_buffer,
+            ),
+            .markdown => try runFormatter(
+                editor.io,
+                &.{ "prettier", "--parser", "markdown" },
+                editor.document.items,
+                editor.formatting_buffer,
+            ),
+            else => return null,
+        } orelse return false;
 
-                editor.document.clearRetainingCapacity();
-                editor.document.appendSliceAssumeCapacity(formatted);
-            },
-            .zig => {
-                const io = editor.io;
-
-                var child = try std.process.spawn(io, .{
-                    .argv = &.{ "zig", "fmt", "--stdin" },
-                    .stdin = .pipe,
-                    .stdout = .pipe,
-                    .stderr = .ignore,
-                });
-                defer child.kill(io);
-
-                // Write the buffer to stdin.
-                try child.stdin.?.writeStreamingAll(io, editor.document.items);
-                child.stdin.?.close(io);
-                child.stdin = null;
-
-                // Resulting stdout is new buffer.
-                var stdout_reader = child.stdout.?.reader(io, &.{});
-                var buffer_writer: std.Io.Writer = .fixed(editor.formatting_buffer);
-                const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
-
-                const term = try child.wait(io);
-
-                if (!term.success()) return false;
-
-                editor.document.clearRetainingCapacity();
-                editor.document.appendSliceAssumeCapacity(editor.formatting_buffer[0..stdout_size]);
-            },
-            else => {},
-        }
+        editor.document.clearRetainingCapacity();
+        editor.document.appendSliceAssumeCapacity(formatted);
 
         assert(editor.document.items.len > 0);
         editor.dirty = true;
@@ -980,6 +968,35 @@ fn parseOne(reader: *std.Io.Reader) !Event {
         },
         else => return Error.CsiSequenceNotRecognised,
     }
+}
+
+fn runFormatter(
+    io: std.Io,
+    argv: []const []const u8,
+    document: []const u8,
+    formatting_buffer: []u8,
+) !?[]const u8 {
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+
+    // Write the document to stdin.
+    try child.stdin.?.writeStreamingAll(io, document);
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    // Resulting stdout is new document.
+    var stdout_reader = child.stdout.?.reader(io, &.{});
+    var buffer_writer: std.Io.Writer = .fixed(formatting_buffer);
+    const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
+
+    const term = try child.wait(io);
+    if (!term.success()) return null;
+    return formatting_buffer[0..stdout_size];
 }
 
 fn fuzzKkpParser(reader_buffer: *[128]u8, smith: *std.testing.Smith) !void {
