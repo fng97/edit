@@ -255,6 +255,7 @@ const Editor = struct {
                             const line_number = @max(number, 1) - 1;
                             if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
                                 editor.cursor.update(editor.document.items, head, .snap_remain);
+                                editor.centreCursorVertically();
                             }
                             editor.mode = .normal;
                         } else editor.mode = .{ .prompt = .{ .message = .command_not_recognised } };
