@@ -284,10 +284,7 @@ const Editor = struct {
             },
         }
 
-        const cursor_position: Position = .{
-            .line_number = lineNumber(editor.document.items, editor.cursor.offset),
-            .line_offset = lineOffset(editor.document.items, editor.cursor.offset),
-        };
+        const cursor_position = position(editor.document.items, editor.cursor.offset);
 
         // Cursor is always at snap line offset or line end.
         assert(cursor_position.line_offset == @min(
@@ -484,14 +481,17 @@ const Editor = struct {
         writer: *std.Io.Writer,
         file_path: []const u8,
         file_reader: *std.Io.Reader,
-        viewport_dimensions: ViewportDimensions,
-        bounds: struct {
+        options: struct {
+            cursor_line_number: u32,
+            cursor_line_offset: u32,
+            col_count: u32,
+            row_count: u32,
             file_size_max: u32,
             col_count_max: u32,
             row_count_max: u32,
         },
     ) !Editor {
-        const document_buffer = try allocator.alloc(u8, bounds.file_size_max);
+        const document_buffer = try allocator.alloc(u8, options.file_size_max);
         errdefer allocator.free(document_buffer);
         var document_writer: std.Io.Writer = .fixed(document_buffer);
         _ = file_reader.streamRemaining(&document_writer) catch |err| switch (err) {
@@ -502,13 +502,19 @@ const Editor = struct {
         var document: std.ArrayList(u8) = document_writer.toArrayList();
         try ensureDocumentValid(&document);
 
-        var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, bounds.file_size_max);
+        var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, options.file_size_max);
         errdefer clipboard.deinit(allocator);
         // -1 accounts for the ':' shown when the prompt is active.
-        const prompt_text_buffer = try allocator.alloc(u8, bounds.col_count_max - 1);
+        const prompt_text_buffer = try allocator.alloc(u8, options.col_count_max - 1);
         errdefer allocator.free(prompt_text_buffer);
-        const formatting_buffer = try allocator.alloc(u8, bounds.file_size_max);
+        const formatting_buffer = try allocator.alloc(u8, options.file_size_max);
         errdefer allocator.free(formatting_buffer);
+
+        const cursor_offset_start: ?u32 = offsetFromPosition(
+            document.items,
+            options.cursor_line_number,
+            options.cursor_line_offset,
+        ) orelse null;
 
         return .{
             .is_test = builtin.is_test,
@@ -516,19 +522,23 @@ const Editor = struct {
             .writer = writer,
             .mode = .normal,
             .viewport = .{
-                .row_count = viewport_dimensions.row_count,
-                .col_count = viewport_dimensions.col_count,
+                .row_count = options.row_count,
+                .col_count = options.col_count,
                 .line_number_start = 0,
                 .line_offset_start = 0,
             },
             .file_path = file_path,
             .document = document,
-            .cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 },
+            .cursor = .{
+                .offset = cursor_offset_start orelse 0,
+                .anchor = null,
+                .line_offset_snap = if (cursor_offset_start) |_| options.cursor_line_offset else 0,
+            },
             .clipboard = clipboard,
             .prompt_text_buffer = prompt_text_buffer,
             .formatting_buffer = formatting_buffer,
-            .col_count_max = bounds.col_count_max,
-            .row_count_max = bounds.row_count_max,
+            .col_count_max = options.col_count_max,
+            .row_count_max = options.row_count_max,
         };
     }
 
@@ -639,11 +649,19 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
 
-    var args_iterator = std.process.Args.Iterator.init(init.minimal.args);
+    var cursor_line_number: ?u32 = null;
+    var cursor_line_offset: ?u32 = null;
+    var args_iterator = init.minimal.args.iterate();
     assert(args_iterator.skip()); // first arg is executable path
     const file_path = args_iterator.next() orelse @panic("missing file path arg");
-    const file = try std.Io.Dir.cwd().openFile(io, file_path, .{}); // closed after Editor.init()
-    var file_reader = file.reader(io, &.{});
+    while (args_iterator.next()) |arg| {
+        // Option to open editor with cursor at the given Position (indexed from one).
+        if (std.mem.startsWith(u8, arg, "--goto=")) {
+            const colon_index = std.mem.indexOfScalar(u8, arg, ':').?;
+            cursor_line_number = try std.fmt.parseInt(u32, arg["--goto=".len..colon_index], 10);
+            cursor_line_offset = try std.fmt.parseInt(u32, arg[colon_index + 1 ..], 10);
+        } else std.debug.panic("argument not recognised: {s}", .{arg});
+    }
 
     const stdin = std.Io.File.stdin();
     var stdin_buffer: [1024]u8 = undefined;
@@ -684,14 +702,19 @@ pub fn main(init: std.process.Init) !void {
         else => return Error.FirstEventMustBeResize,
     };
 
+    const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
+    var file_reader = file.reader(io, &.{});
     var editor: Editor = try .init(
         allocator,
         io,
         writer,
         file_path,
         &file_reader.interface,
-        dimensions,
         .{
+            .cursor_line_number = if (cursor_line_number) |cln| cln - 1 else 0,
+            .cursor_line_offset = if (cursor_line_offset) |clo| clo - 1 else 0,
+            .row_count = dimensions.row_count,
+            .col_count = dimensions.col_count,
             .file_size_max = 1 * 1024 * 1024, // 1 MB
             .col_count_max = 400,
             .row_count_max = 300,
@@ -701,7 +724,7 @@ pub fn main(init: std.process.Init) !void {
     defer editor.deinit(allocator);
 
     // Do the initial render. In event loop we render on every tick.
-    const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
+    const cursor_position = position(editor.document.items, editor.cursor.offset);
     try editor.focus(cursor_position);
     try editor.render(cursor_position);
     while (true) {
@@ -1094,6 +1117,32 @@ fn characterValid(c: u8) bool {
     };
 }
 
+fn offsetFromPosition(buffer: []const u8, line_number: u32, line_offset: u32) ?u32 {
+    var offset: u32 = 0;
+    // Go to the start of line line_number.
+    for (0..line_number) |_| {
+        const line_tail: u32 =
+            @intCast(std.mem.findScalarPos(u8, buffer, offset, '\n') orelse return null);
+        offset = line_tail + 1;
+        if (offset == buffer.len) return null;
+    }
+    const line_tail = lineTail(buffer, offset);
+    // Line offset must land within the current line.
+    offset += line_offset;
+    if (offset > line_tail or offset >= buffer.len) return null;
+    return offset;
+}
+
+test offsetFromPosition {
+    const buffer = "\n\n \n  \n";
+    try std.testing.expectEqual(0, offsetFromPosition(buffer, 0, 0));
+    try std.testing.expectEqual(4, offsetFromPosition(buffer, 3, 0));
+    try std.testing.expectEqual(null, offsetFromPosition(buffer, 4, 0));
+    try std.testing.expectEqual(5, offsetFromPosition(buffer, 3, 1));
+    try std.testing.expectEqual(6, offsetFromPosition(buffer, 3, 2));
+    try std.testing.expectEqual(null, offsetFromPosition(buffer, 3, 3));
+}
+
 fn lineIndentation(buffer: []const u8, offset: u32) u32 {
     assert(offset < buffer.len);
     const line_head = lineHead(buffer, offset);
@@ -1402,6 +1451,13 @@ fn digitCount(number: u32) u8 {
     return std.math.log10_int(number) + 1;
 }
 
+fn position(buffer: []const u8, offset: u32) Position {
+    return .{
+        .line_number = lineNumber(buffer, offset),
+        .line_offset = lineOffset(buffer, offset),
+    };
+}
+
 pub const EditorFuzzContext = struct {
     const file_size_max = 512;
     const col_count_max = 80;
@@ -1434,13 +1490,18 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
     // Generate editor state.
+    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
     const file_size = smith.slice(&ctx.file_buffer);
     const file = ctx.file_buffer[0..file_size];
     const file_path_size = smith.slice(&ctx.file_path_buffer);
     const file_path = ctx.file_path_buffer[0..file_path_size];
     const row_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.col_count_max);
-    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
+    ctx.editor.document.clearRetainingCapacity();
+    ctx.editor.document.appendSliceAssumeCapacity(file);
+    ensureDocumentValid(&ctx.editor.document) catch return;
+    const cursor_offset_start =
+        smith.valueRangeLessThan(u32, 0, @intCast(ctx.editor.document.items.len));
 
     // The editor is reused for each fuzzing run to avoid memory allocations in the fuzzer. It is
     // reinitialised using struct initialisation syntax so that we don't forget to update any
@@ -1459,18 +1520,12 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
             .line_offset_start = 0,
         },
         .cursor = .{
-            // TODO: Fuzz cursor offset? Would have to use the same value for line_offset_snap.
-            .offset = 0,
+            .offset = cursor_offset_start,
             .anchor = 0,
-            .line_offset_snap = 0,
+            .line_offset_snap = lineOffset(ctx.editor.document.items, cursor_offset_start),
         },
         .mode = .normal,
-        .document = blk: {
-            ctx.editor.document.clearRetainingCapacity();
-            ctx.editor.document.appendSliceAssumeCapacity(file);
-            ensureDocumentValid(&ctx.editor.document) catch return;
-            break :blk ctx.editor.document;
-        },
+        .document = ctx.editor.document,
         .clipboard = blk: {
             ctx.editor.clipboard.clearRetainingCapacity();
             break :blk ctx.editor.clipboard;
@@ -1479,7 +1534,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         .formatting_buffer = ctx.editor.formatting_buffer,
     };
 
-    const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
+    const cursor_position = position(ctx.editor.document.items, ctx.editor.cursor.offset);
     ctx.editor.focus(cursor_position) catch return;
     while (true) {
         const event: Event = smith.value(Event); // generate input
@@ -1618,11 +1673,21 @@ const TestEditor = struct {
             test_editor.stripping_writer.writer(),
             params.file_path,
             &file_reader,
-            dimensions,
-            .{ .file_size_max = 1024, .col_count_max = 80, .row_count_max = 60 },
+            .{
+                .cursor_line_number = 0,
+                .cursor_line_offset = 0,
+                .col_count = dimensions.col_count,
+                .row_count = dimensions.row_count,
+                .file_size_max = 1024,
+                .col_count_max = 80,
+                .row_count_max = 60,
+            },
         );
 
-        const cursor_position: Position = .{ .line_number = 0, .line_offset = 0 };
+        const cursor_position = position(
+            test_editor.editor.document.items,
+            test_editor.editor.cursor.offset,
+        );
         try test_editor.editor.focus(cursor_position);
         try test_editor.editor.render(cursor_position);
     }

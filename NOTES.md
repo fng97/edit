@@ -28,7 +28,6 @@
 - Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
   passing options on the command line, e.g. if we wanna open a huge file.
 - Support mouse scroll.
-- Support --goto={line_number}:{line_offset} arg.
 - Insert mode terminal-like keybinds (e.g. CTRL+W to delete word).
 - Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
