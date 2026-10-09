@@ -33,18 +33,14 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(install_step); // make sure main executable gets built as part of tests
 
-    repro_step.dependOn(blk: {
-        const main = b.addExecutable(.{
+    repro_step.dependOn(&b.addRunArtifact(
+        b.addExecutable(.{
             .name = "fuzz_repro",
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/repro.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
-        });
-        b.installArtifact(main);
-        const run = b.addRunArtifact(main);
-        run.step.dependOn(install_step);
-        break :blk &run.step;
-    });
+        }),
+    ).step);
 }
