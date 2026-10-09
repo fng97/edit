@@ -726,6 +726,7 @@ pub fn main(init: std.process.Init) !void {
     // Do the initial render. In event loop we render on every tick.
     const cursor_position = position(editor.document.items, editor.cursor.offset);
     try editor.focus(cursor_position);
+    editor.centreCursorVertically();
     try editor.render(cursor_position);
     while (true) {
         const event = try parseOne(reader);
@@ -1536,6 +1537,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 
     const cursor_position = position(ctx.editor.document.items, ctx.editor.cursor.offset);
     ctx.editor.focus(cursor_position) catch return;
+    ctx.editor.centreCursorVertically();
     while (true) {
         const event: Event = smith.value(Event); // generate input
 
@@ -1689,6 +1691,7 @@ const TestEditor = struct {
             test_editor.editor.cursor.offset,
         );
         try test_editor.editor.focus(cursor_position);
+        test_editor.editor.centreCursorVertically();
         try test_editor.editor.render(cursor_position);
     }
 
