@@ -12,6 +12,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const root = @This();
 const assert = std.debug.assert;
 
 const terminal_init =
@@ -649,6 +650,14 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const allocator = init.arena.allocator();
 
+    const log_buffer = try allocator.alloc(u8, 256 * 1024);
+    defer allocator.free(log_buffer);
+    var log_writer_fixed: std.Io.Writer = .fixed(log_buffer);
+    log_writer = &log_writer_fixed;
+    // Defer order matters here. The logs should only be printed once the original terminal state
+    // is restored.
+    defer std.debug.print("{s}", .{log_writer_fixed.buffered()});
+
     var cursor_line_number: ?u32 = null;
     var cursor_line_offset: ?u32 = null;
     var args_iterator = init.minimal.args.iterate();
@@ -752,6 +761,30 @@ pub const panic = std.debug.FullPanic(struct {
         std.debug.defaultPanic(msg, first_trace_addr);
     }
 }.panic);
+
+var log_writer: ?*std.Io.Writer = null;
+fn logFnErr(
+    comptime message_level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) !void {
+    if (log_writer) |writer| {
+        try writer.writeAll(message_level.asText());
+        if (scope != .default) try writer.print("({t})", .{scope});
+        try writer.writeAll(": ");
+        try writer.print(format ++ "\n", args);
+    } else @panic("tried to log without initialising log writer");
+}
+fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    logFnErr(message_level, scope, format, args) catch |e| std.debug.panic("log failed: {}", .{e});
+}
+pub const std_options: std.Options = .{ .logFn = logFn };
 
 const Position = struct { line_number: u32, line_offset: u32 };
 
