@@ -14,7 +14,12 @@
 - Add visual fuzzing repro replay tool.
 - Find and replace.
 - Whole line selection mode.
-
+- Fix parser. Implement Paul Williams' ANSI Parser State Machine. See the
+  following:
+  - https://vt100.net/emu/dec_ansi_parser
+  - https://github.com/crossterm-rs/crossterm/tree/master/src/event
+  - https://github.com/rockorager/libvaxis/blob/main/src/Parser.zig
+- Add wrapping functionality (e.g. for git message formatting).
 - Paste over selection should replace selection.
 - Add `{`, `}`, `_`, and `%` motions.
 - Yank, cut, and paste using global buffer.
