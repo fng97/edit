@@ -231,16 +231,7 @@ const Editor = struct {
                     },
                     .enter => {
                         if (std.mem.eql(u8, "w", command.text.items)) {
-                            // Format document if formatter available.
-                            if (try editor.formatDocument()) |success| {
-                                if (success) {
-                                    try editor.save();
-                                    editor.mode = .normal;
-                                } else editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
-                            } else {
-                                try editor.save();
-                                editor.mode = .normal;
-                            }
+                            try editor.formatAndSave();
                         } else if (std.mem.eql(u8, "q", command.text.items)) {
                             if (!editor.dirty) return false; // exit!
                             // Trying to exit without saving. Prompt user to save.
@@ -251,7 +242,7 @@ const Editor = struct {
                         } else if (std.mem.eql(u8, "q!", command.text.items)) {
                             return false; // exit, for real!
                         } else if (std.mem.eql(u8, "wq", command.text.items)) {
-                            try editor.save();
+                            try editor.formatAndSave();
                             return false;
                         } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
                             // Line number given is indexed from 1.
@@ -582,6 +573,19 @@ const Editor = struct {
             editor.document.appendAssumeCapacity('\n');
 
         editor.dirty = true;
+    }
+
+    /// Format document if formatter available then save. Present error message if formatting fails.
+    fn formatAndSave(editor: *Editor) !void {
+        if (try editor.formatDocument()) |success| {
+            if (success) {
+                try editor.save();
+                editor.mode = .normal;
+            } else editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
+        } else {
+            try editor.save();
+            editor.mode = .normal;
+        }
     }
 
     fn centreCursorVertically(editor: *Editor) void {
