@@ -636,6 +636,8 @@ const Editor = struct {
         editor.document.clearRetainingCapacity();
         editor.document.appendSliceAssumeCapacity(formatted);
 
+        try validateDocument(editor.document.items);
+
         assert(editor.document.items.len > 0);
         editor.dirty = true;
 
@@ -1146,6 +1148,27 @@ test formatDocumentWithTestFormatter {
     try std.testing.expectEqualStrings("\n\n\n", try formatDocumentWithTestFormatter(" \n\n", &buffer));
 }
 
+fn validateDocument(document: []const u8) !void {
+    var line_number: u32 = 0;
+    var line_offset: u32 = 0;
+    for (document) |c| {
+        if (!characterValid(c)) {
+            std.log.warn(
+                "file contains invalid character (0x{x}) at {d}:{d}",
+                .{ c, line_number + 1, line_offset + 1 },
+            );
+            return Error.FileContainsInvalidCharacter;
+        }
+
+        line_offset += 1;
+        if (c == '\n') {
+            line_number += 1;
+            line_offset = 0;
+        }
+    }
+}
+
+// FIXME: This should mark the editor as dirty.
 /// Document must not be empty, contain only ASCII, and end in newline.
 fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
     if (document.items.len == 0) {
@@ -1159,23 +1182,7 @@ fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
         document.replaceRangeBounded(index, 1, &tab_whitespace) catch return Error.FileTooLong;
     }
 
-    var line_number: u32 = 0;
-    var line_offset: u32 = 0;
-    for (document.items) |c| {
-        if (!characterValid(c)) {
-            std.log.info(
-                "file contains invalid character (0x{x}) at {d}:{d}",
-                .{ c, line_number + 1, line_offset + 1 },
-            );
-            return Error.FileContainsInvalidCharacter;
-        }
-
-        line_offset += 1;
-        if (c == '\n') {
-            line_number += 1;
-            line_offset = 0;
-        }
-    }
+    try validateDocument(document.items);
 
     if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
 }
