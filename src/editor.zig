@@ -234,11 +234,9 @@ const Editor = struct {
                             // Format document if formatter available.
                             if (try editor.formatDocument()) |success| {
                                 if (success) {
-                                    editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
-                                } else {
                                     try editor.save();
                                     editor.mode = .normal;
-                                }
+                                } else editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
                             } else {
                                 try editor.save();
                                 editor.mode = .normal;
