@@ -626,7 +626,7 @@ const Editor = struct {
             ),
             .sh => try runFormatter(
                 editor.io,
-                &.{"shfmt"},
+                &.{ "shfmt", "--indent", "4" },
                 editor.document.items,
                 editor.formatting_buffer,
             ),
