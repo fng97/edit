@@ -598,7 +598,8 @@ const Editor = struct {
     fn formatDocument(editor: *Editor) !?bool {
         const document_kind: enum { zig, markdown, sh, testing, unknown } = if (editor.is_test)
             .testing
-        else if (std.mem.endsWith(u8, editor.file_path, ".zig"))
+        else if (std.mem.endsWith(u8, editor.file_path, ".zig") or
+            std.mem.endsWith(u8, editor.file_path, ".zon"))
             .zig
         else if (std.mem.endsWith(u8, editor.file_path, ".md"))
             .markdown
