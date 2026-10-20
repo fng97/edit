@@ -231,14 +231,18 @@ const Editor = struct {
                     },
                     .enter => {
                         if (std.mem.eql(u8, "w", command.text.items)) {
+                            // Format document if formatter available.
                             if (try editor.formatDocument()) |success| {
                                 if (success) {
+                                    editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
+                                } else {
                                     try editor.save();
                                     editor.mode = .normal;
-                                } else {
-                                    editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
                                 }
-                            } // else no formatter available
+                            } else {
+                                try editor.save();
+                                editor.mode = .normal;
+                            }
                         } else if (std.mem.eql(u8, "q", command.text.items)) {
                             if (!editor.dirty) return false; // exit!
                             // Trying to exit without saving. Prompt user to save.
@@ -616,7 +620,7 @@ const Editor = struct {
                 editor.document.items,
                 editor.formatting_buffer,
             ),
-            else => return null,
+            .unknown => return null,
         } orelse return false;
 
         editor.document.clearRetainingCapacity();
