@@ -592,12 +592,14 @@ const Editor = struct {
     }
 
     fn formatDocument(editor: *Editor) !?bool {
-        const document_kind: enum { zig, markdown, testing, unknown } = if (editor.is_test)
+        const document_kind: enum { zig, markdown, sh, testing, unknown } = if (editor.is_test)
             .testing
         else if (std.mem.endsWith(u8, editor.file_path, ".zig"))
             .zig
         else if (std.mem.endsWith(u8, editor.file_path, ".md"))
             .markdown
+        else if (std.mem.endsWith(u8, editor.file_path, ".sh"))
+            .sh
         else
             .unknown;
 
@@ -615,6 +617,12 @@ const Editor = struct {
             .markdown => try runFormatter(
                 editor.io,
                 &.{ "prettier", "--parser", "markdown" },
+                editor.document.items,
+                editor.formatting_buffer,
+            ),
+            .sh => try runFormatter(
+                editor.io,
+                &.{"shfmt"},
                 editor.document.items,
                 editor.formatting_buffer,
             ),
