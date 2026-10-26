@@ -1634,6 +1634,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 }
 
 test fuzzEditor {
+    std.testing.log_level = .err;
     var ctx: EditorFuzzContext = try .init(std.testing.allocator);
     defer ctx.deinit(std.testing.allocator);
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
