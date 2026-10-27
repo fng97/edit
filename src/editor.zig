@@ -611,7 +611,9 @@ const Editor = struct {
         else if (std.mem.endsWith(u8, editor.file_path, ".md"))
             .markdown
         else if (std.mem.endsWith(u8, editor.file_path, ".c") or
-            std.mem.endsWith(u8, editor.file_path, ".cpp"))
+            std.mem.endsWith(u8, editor.file_path, ".h") or
+            std.mem.endsWith(u8, editor.file_path, ".cpp") or
+            std.mem.endsWith(u8, editor.file_path, ".hpp"))
             .c
         else if (std.mem.endsWith(u8, editor.file_path, ".sh"))
             .sh
