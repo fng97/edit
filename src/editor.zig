@@ -596,13 +596,23 @@ const Editor = struct {
     }
 
     fn formatDocument(editor: *Editor) !?bool {
-        const document_kind: enum { zig, markdown, sh, testing, unknown } = if (editor.is_test)
+        const document_kind: enum {
+            zig,
+            markdown,
+            sh,
+            testing,
+            c, // C and C++
+            unknown,
+        } = if (editor.is_test)
             .testing
         else if (std.mem.endsWith(u8, editor.file_path, ".zig") or
             std.mem.endsWith(u8, editor.file_path, ".zon"))
             .zig
         else if (std.mem.endsWith(u8, editor.file_path, ".md"))
             .markdown
+        else if (std.mem.endsWith(u8, editor.file_path, ".c") or
+            std.mem.endsWith(u8, editor.file_path, ".cpp"))
+            .c
         else if (std.mem.endsWith(u8, editor.file_path, ".sh"))
             .sh
         else
@@ -628,6 +638,12 @@ const Editor = struct {
             .sh => try runFormatter(
                 editor.io,
                 &.{ "shfmt", "--indent", "4" },
+                editor.document.items,
+                editor.formatting_buffer,
+            ),
+            .c => try runFormatter(
+                editor.io,
+                &.{ "clang-format", "--style=Google" },
                 editor.document.items,
                 editor.formatting_buffer,
             ),
