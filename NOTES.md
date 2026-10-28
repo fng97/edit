@@ -7,7 +7,8 @@
 
 ## TODO
 
-- WHY DOESN'T REPRO WORK ON AARCH64-DARWIN?!
+- Paste over selection should replace selection.
+- Add `{`, `}`, `_`, and `%` motions.
 - Fix all fuzzer bugs.
 - Basic undo/redo. For now just individual modifications.
 - Basic search (check out `std.ascii`).
@@ -20,9 +21,7 @@
   - https://github.com/crossterm-rs/crossterm/tree/master/src/event
   - https://github.com/rockorager/libvaxis/blob/main/src/Parser.zig
 - Add wrapping functionality (e.g. for git message formatting).
-- Paste over selection should replace selection.
-- Add `{`, `}`, `_`, and `%` motions.
-- Yank, cut, and paste using global buffer.
+- Yank, cut, and paste using system clipboard.
 - Regex search.
 - Word motion improvements: Remove '_' from `alphanumeric`. Make it recognise
   camelCase?
@@ -30,10 +29,9 @@
   two assertions per function.
 - Bring back weighting strategies. Swarm the strategies themselves. Make the
   file look like a file. Same for file name.
-- Pass editor limits through init. Lets us vary limits in fuzzer. Also allows
-  passing options on the command line, e.g. if we wanna open a huge file.
 - Support mouse scroll.
 - Insert mode terminal-like keybinds (e.g. CTRL+W to delete word).
 - Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
 - Add timing instrumentation. Is 2ms max reasonable per-tick?
+- The ~ for empty lines should go in the gutter instead of the text section.
