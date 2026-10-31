@@ -32,7 +32,7 @@ const terminal_deinit =
 // FIXME: Use 16-colour palette for all colours.
 const esc_highlight_foreground = "\x1b[38;2;40;40;40m"; // dark foreground
 const esc_highlight_background = "\x1b[48;2;200;200;200m"; // light gray background
-const esc_line_number_foreground = "\x1b[31m"; // red
+const esc_line_number_foreground = "\x1b[33m"; // yellow
 const esc_colour_reset = "\x1b[0m";
 
 const Editor = struct {
