@@ -29,8 +29,10 @@ const terminal_deinit =
     "\x1b[?2048l" ++ // disable in-band resize notifications
     "\x1b[<u" ++ // pop KKP flags
     "\x1b[?1049l"; // exit alt screen
+// FIXME: Use 16-colour palette for all colours.
 const esc_highlight_foreground = "\x1b[38;2;40;40;40m"; // dark foreground
 const esc_highlight_background = "\x1b[48;2;200;200;200m"; // light gray background
+const esc_line_number_foreground = "\x1b[31m"; // red
 const esc_colour_reset = "\x1b[0m";
 
 const Editor = struct {
@@ -356,7 +358,9 @@ const Editor = struct {
         };
         var highlight = false;
         for (line_number_start..line_number_start + row_count - 1) |line_number| {
-            try writer.print("{[line_number]d: >[gutter_width]} ", .{ // draw gutter
+            // Draw gutter: coloured line number and space delimiter.
+            try writer.print(esc_line_number_foreground ++ "{[line_number]d: >[gutter_width]}" ++
+                esc_colour_reset ++ " ", .{
                 .line_number = line_number + 1, // displayed line number indexed from 1
                 .gutter_width = gutter_width - 1, // space suffix already in format string
             });
@@ -1705,18 +1709,23 @@ test Modifiers {
 }
 
 const StrippingWriter = struct {
-    out: std.Io.Writer.Allocating,
+    raw: std.Io.Writer.Allocating, // everything the editor has written since the last takeFrame
+    frame: std.Io.Writer.Allocating, // the last frame, stripped
     interface: std.Io.Writer,
+
+    const Colour = enum { strip_colour, keep_colour };
 
     fn init(allocator: std.mem.Allocator) !StrippingWriter {
         return .{
-            .out = .init(allocator),
+            .raw = .init(allocator),
+            .frame = .init(allocator),
             .interface = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
         };
     }
 
     fn deinit(stripping: *StrippingWriter) void {
-        stripping.out.deinit();
+        stripping.raw.deinit();
+        stripping.frame.deinit();
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
@@ -1724,14 +1733,12 @@ const StrippingWriter = struct {
 
         var write_size: usize = 0;
         for (data[0 .. data.len - 1]) |slice| {
-            for (slice) |byte| if (byte != '\r') try stripping.out.writer.writeByte(byte);
+            try stripping.raw.writer.writeAll(slice);
             write_size += slice.len;
         }
 
         const splat_slice = data[data.len - 1];
-        for (0..splat) |_| {
-            for (splat_slice) |byte| if (byte != '\r') try stripping.out.writer.writeByte(byte);
-        }
+        for (0..splat) |_| try stripping.raw.writer.writeAll(splat_slice);
         return write_size + splat_slice.len * splat;
     }
 
@@ -1739,8 +1746,33 @@ const StrippingWriter = struct {
         return &stripping.interface;
     }
 
-    fn written(stripping: *StrippingWriter) []const u8 {
-        return stripping.out.written();
+    /// Returns the last frame rendered since the previous call. Strips '\r' and optionally colour
+    /// sequences. Discards everything written so far, so a tick that should render but doesn't
+    /// fails the next call instead of returning a stale frame.
+    fn takeFrame(stripping: *StrippingWriter, colour: Colour) ![]const u8 {
+        const raw = stripping.raw.written();
+        // Every frame begins with "begin synchronised update".
+        var i = std.mem.lastIndexOf(u8, raw, "\x1b[?2026h") orelse @panic("no frame rendered");
+        stripping.frame.clearRetainingCapacity();
+        while (i < raw.len) {
+            if (raw[i] == '\r') {
+                i += 1;
+                continue;
+            }
+            // SGR sequence: "\x1b[" then digits and ';' then 'm'.
+            if (colour == .strip_colour and std.mem.startsWith(u8, raw[i..], "\x1b[")) {
+                const tail = std.mem.indexOfNonePos(u8, raw, i + 2, "0123456789;") orelse raw.len;
+                if (tail < raw.len and raw[tail] == 'm') {
+                    i = tail + 1;
+                    continue;
+                }
+            }
+            try stripping.frame.writer.writeByte(raw[i]);
+            i += 1;
+        }
+
+        stripping.raw.clearRetainingCapacity();
+        return stripping.frame.written();
     }
 };
 
@@ -1830,12 +1862,18 @@ const TestEditor = struct {
         try std.testing.expect(try test_editor.editor.tick(event) == false); // exit
     }
 
-    fn clearRenderBuffer(test_editor: *TestEditor) void {
-        test_editor.stripping_writer.out.clearRetainingCapacity();
-    }
-
     fn expectRender(
         test_editor: *TestEditor,
+        viewport: []const u8,
+        cursor_cell: Viewport.Cell,
+        cursor_style: Cursor.Style,
+    ) !void {
+        try test_editor.expectFrame(.strip_colour, viewport, cursor_cell, cursor_style);
+    }
+
+    fn expectFrame(
+        test_editor: *TestEditor,
+        colour: StrippingWriter.Colour,
         viewport: []const u8,
         cursor_cell: Viewport.Cell,
         cursor_style: Cursor.Style,
@@ -1857,7 +1895,7 @@ const TestEditor = struct {
             },
         );
         defer allocator.free(expected);
-        try std.testing.expectEqualSlices(u8, expected, test_editor.stripping_writer.written());
+        try std.testing.expectEqualSlices(u8, expected, try test_editor.stripping_writer.takeFrame(colour));
     }
 };
 
@@ -1895,6 +1933,31 @@ test "rendering: hello_c" {
         \\11 ~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "rendering: line number colour" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;4;36;0;0t" ++ // dimensions: 4 rows by 36 cols
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    const ln = esc_line_number_foreground;
+    const rs = esc_colour_reset;
+    try test_editor.expectFrame(
+        .keep_colour,
+        ln ++ "1" ++ rs ++ " #include <stdio.h>\n" ++
+            ln ++ "2" ++ rs ++ " \n" ++
+            ln ++ "3" ++ rs ++ " int main() {\n" ++
+            "hello.c                          1,1",
+        .{ .row = 0, .col = 2 },
+        .steady_block,
+    );
 
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
@@ -1947,7 +2010,6 @@ test "vertical scroll: go to start/end of file" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 2 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process G
 
     try test_editor.expectRender(
@@ -1958,7 +2020,6 @@ test "vertical scroll: go to start/end of file" {
         \\hello.c                          6,1
     , .{ .row = 3, .col = 2 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process g
 
     try test_editor.expectRender(
@@ -1999,7 +2060,6 @@ test "horizontal scroll: go to start/end of line" {
         \\hello.c  1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process $
 
     try test_editor.expectRender(
@@ -2017,7 +2077,6 @@ test "horizontal scroll: go to start/end of line" {
         \\hello.c 1,19
     , .{ .row = 0, .col = 11 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process 0
 
     try test_editor.expectRender(
@@ -2071,7 +2130,6 @@ test "insert mode" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process i
 
     try test_editor.expectRender(
@@ -2089,7 +2147,6 @@ test "insert mode" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_bar); // changed to steady bar
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process a
 
     try test_editor.expectRender(
@@ -2108,7 +2165,6 @@ test "insert mode" {
         //         ^ dirty buffer indicator
     , .{ .row = 0, .col = 4 }, .steady_bar);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process b
 
     try test_editor.expectRender(
@@ -2126,7 +2182,6 @@ test "insert mode" {
         \\hello.c [+]                      1,3
     , .{ .row = 0, .col = 5 }, .steady_bar);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2147,7 +2202,6 @@ test "insert mode" {
     try test_editor.tick(); // process $
     try test_editor.tick(); // process i
     try test_editor.tick(); // process backspace
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2202,7 +2256,6 @@ test "new line with o preserves indentation" {
     try test_editor.tick(); // process j
     try test_editor.tick(); // process o
     try test_editor.tick(); // process x
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2257,7 +2310,6 @@ test "new line with O preserves indentation" {
     try test_editor.tick(); // process j
     try test_editor.tick(); // process O
     try test_editor.tick(); // process x
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2312,7 +2364,6 @@ test "insert with I goes to start of line after indentation" {
     try test_editor.tick(); // process j
     try test_editor.tick(); // process I
     try test_editor.tick(); // process x
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2367,7 +2418,6 @@ test "A inserts at end of line" {
     try test_editor.tick(); // process j
     try test_editor.tick(); // process A
     try test_editor.tick(); // process x
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2420,7 +2470,6 @@ test "tab inserts four spaces" {
     try test_editor.tick(); // process i
     try test_editor.tick(); // process tab
     try test_editor.tick(); // process x
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2479,7 +2528,6 @@ test "enter preserves indentation" {
     try test_editor.tick(); // process x
     try test_editor.tick(); // process enter
     try test_editor.tick(); // process y
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process escape
 
     try test_editor.expectRender(
@@ -2531,7 +2579,6 @@ test "delete" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2550,7 +2597,6 @@ test "delete" {
     , .{ .row = 0, .col = 3 }, .steady_block);
 
     try test_editor.tick(); // process $
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2570,7 +2616,6 @@ test "delete" {
 
     try test_editor.tick(); // process G
     try test_editor.tick(); // process $
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     // Same as last time. You can't delete the final newline.
@@ -2632,7 +2677,6 @@ test "delete selection" {
     try test_editor.tick(); // process $
     try test_editor.tick(); // process v
     try test_editor.tick(); // process 0
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2655,7 +2699,6 @@ test "delete selection" {
     try test_editor.tick(); // process v
     try test_editor.tick(); // process G
     try test_editor.tick(); // process $
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2703,7 +2746,6 @@ test "save file" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2722,7 +2764,6 @@ test "save file" {
     , .{ .row = 0, .col = 3 }, .steady_block);
 
     try test_editor.tick(); // process :
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process w
 
     try test_editor.expectRender(
@@ -2740,7 +2781,6 @@ test "save file" {
         \\:w
     , .{ .row = 11, .col = 2 }, .steady_bar);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process \r
 
     // This looks different because saving also runs formatting. There is a dedicated testing
@@ -2789,7 +2829,6 @@ test "save file and quit" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2866,7 +2905,6 @@ test "quit without saving" {
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process d
 
     try test_editor.expectRender(
@@ -2886,7 +2924,6 @@ test "quit without saving" {
 
     try test_editor.tick(); // process :
     try test_editor.tick(); // process q
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process \r
 
     try test_editor.expectRender(
@@ -2937,7 +2974,6 @@ test "go to line" {
     try test_editor.tick(); // process $
     try test_editor.tick(); // process :
     try test_editor.tick(); // process 5
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process \r
 
     try test_editor.expectRender(
@@ -2988,7 +3024,6 @@ test "user message" {
     try test_editor.tick(); // process :
     try test_editor.tick(); // process a
     try test_editor.tick(); // process 1
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process \r
 
     try test_editor.expectRender(
@@ -3040,27 +3075,28 @@ test "selection highlighting" {
 
     try test_editor.tick(); // process v
     try test_editor.tick(); // process j
-    test_editor.clearRenderBuffer();
     try test_editor.tick(); // process j
 
-    try test_editor.expectRender(
-        \\ 1 
-    ++ esc_highlight_foreground ++ esc_highlight_background ++
-        "#include <stdio.h>" ++ esc_colour_reset ++ "\n" ++
-        \\ 2 
-        \\ 3 
-    ++ esc_highlight_foreground ++ esc_highlight_background ++
-        "i" ++ esc_colour_reset ++ "nt main() {\n" ++
-        \\ 4   printf("Hello, world!\n");
-        \\ 5   return 0;
-        \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
-        \\hello.c                          3,1
-    , .{ .row = 2, .col = 3 }, .steady_block);
+    const ln = esc_line_number_foreground;
+    const rs = esc_colour_reset;
+    const hl = esc_highlight_foreground ++ esc_highlight_background;
+    try test_editor.expectFrame(
+        .keep_colour,
+        ln ++ " 1" ++ rs ++ " " ++ hl ++ "#include <stdio.h>" ++ rs ++ "\n" ++
+            ln ++ " 2" ++ rs ++ " \n" ++
+            ln ++ " 3" ++ rs ++ " " ++ hl ++ "i" ++ rs ++ "nt main() {\n" ++
+            ln ++ " 4" ++ rs ++ "   printf(\"Hello, world!\\n\");\n" ++
+            ln ++ " 5" ++ rs ++ "   return 0;\n" ++
+            ln ++ " 6" ++ rs ++ " }\n" ++
+            ln ++ " 7" ++ rs ++ " ~\n" ++
+            ln ++ " 8" ++ rs ++ " ~\n" ++
+            ln ++ " 9" ++ rs ++ " ~\n" ++
+            ln ++ "10" ++ rs ++ " ~\n" ++
+            ln ++ "11" ++ rs ++ " ~\n" ++
+            "hello.c                          3,1",
+        .{ .row = 2, .col = 3 },
+        .steady_block,
+    );
 
     try test_editor.tick(); // process v
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
