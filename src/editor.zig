@@ -58,7 +58,10 @@ const Editor = struct {
     dirty: bool = false,
     prompt_text_buffer: []u8,
     formatting_buffer: []u8,
-    clipboard: std.ArrayList(u8),
+    clipboard: struct {
+        text: std.ArrayList(u8),
+        lines: bool,
+    },
 
     fn tick(editor: *Editor, event: Event) !bool {
         if (event == .resize) {
@@ -136,12 +139,18 @@ const Editor = struct {
                         editor.mode = .insert;
                     },
                     // Enable/disable selection.
-                    'v' => editor.cursor.anchor =
-                        if (editor.cursor.anchor != null) null else editor.cursor.offset,
+                    'v' => editor.cursor.anchor = if (editor.cursor.anchor != null) null else .{
+                        .offset = editor.cursor.offset,
+                        .line = false,
+                    },
+                    'V' => editor.cursor.anchor = if (editor.cursor.anchor != null) null else .{
+                        .offset = editor.cursor.offset,
+                        .line = true,
+                    },
                     'd' => {
                         // If it's a selection, snap cursor to head after yank.
-                        const cursor_offset = editor.cursor.head();
-                        try editor.yank();
+                        const cursor_offset = editor.cursor.head(editor.document.items);
+                        try editor.yank(if (editor.cursor.anchor) |anchor| anchor.line else false);
                         try editor.delete();
                         editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
                     },
@@ -155,23 +164,25 @@ const Editor = struct {
                     },
                     'y' => {
                         // If it's a selection, snap cursor to head after yank.
-                        const cursor_offset = editor.cursor.head();
-                        try editor.yank();
+                        const cursor_offset = editor.cursor.head(editor.document.items);
+                        try editor.yank(if (editor.cursor.anchor) |anchor| anchor.line else false);
                         editor.cursor.anchor = null;
                         editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
                     },
                     // 'P' => {}, // TODO: paste before
-                    'p' => if (editor.clipboard.items.len > 0) {
+                    'p' => if (editor.clipboard.text.items.len > 0) {
                         // If there is a selection, paste substitutes selection. Don't need to move
-                        // right before pasting. Pasting on a newline would insert on the next line.
-                        // Make an exception for that too.
+                        // right before pasting. Pasting on a newline would insert on the next line
+                        // so make an exception for that.
                         const on_newline = editor.document.items[editor.cursor.offset] == '\n';
-                        if (editor.cursor.selection()) |selection| {
+                        if (editor.cursor.selection(editor.document.items)) |selection| {
+                            // If we're pasting lines over a non-lines selection, just pretend we
+                            // didn't see the selection and paste on the line after the cursor.
                             try editor.delete();
                             editor.cursor.update(editor.document.items, selection.head, .snap_update);
                         } else if (!on_newline) editor.cursor.move(.right, 1, editor.document.items);
 
-                        try editor.insert(editor.clipboard.items);
+                        try editor.insert(editor.clipboard.text.items);
                         if (!on_newline) editor.cursor.move(.left, 1, editor.document.items);
                     },
                     'z' => editor.centreCursorVertically(),
@@ -379,27 +390,25 @@ const Editor = struct {
                 const cropped_tail = @min(line_tail, cropped_head + text_width);
 
                 if (line_head == line_tail) {} // empty line
-                else if (editor.cursor.anchor) |anchor| { // handle selection highlighting
+                else if (editor.cursor.selection(document)) |selection| { // handle selection highlighting
                     const esc_highlight = esc_highlight_foreground ++ esc_highlight_background;
-                    const highlight_head = @min(anchor, editor.cursor.offset);
-                    const highlight_tail = @max(anchor, editor.cursor.offset);
 
                     // Should we have already started/stopped highlighting? E.g. anchor not within
                     // cropped line.
-                    if (highlight_head < cropped_head) highlight = true;
-                    if (highlight_tail < cropped_head) highlight = false;
+                    if (selection.head < cropped_head) highlight = true;
+                    if (selection.tail < cropped_head) highlight = false;
 
                     if (highlight) try writer.writeAll(esc_highlight);
 
                     for (cropped_head..cropped_tail) |offset| {
-                        if (offset == highlight_head) {
+                        if (offset == selection.head) {
                             highlight = true;
                             try writer.writeAll(esc_highlight);
                         }
 
                         try writer.writeByte(document[offset]);
 
-                        if (offset == highlight_tail) {
+                        if (offset == selection.tail) {
                             highlight = false;
                             try writer.writeAll(esc_colour_reset);
                         }
@@ -537,7 +546,7 @@ const Editor = struct {
                 .anchor = null,
                 .line_offset_snap = if (cursor_offset_start) |_| options.cursor_line_offset else 0,
             },
-            .clipboard = clipboard,
+            .clipboard = .{ .text = clipboard, .lines = false },
             .prompt_text_buffer = prompt_text_buffer,
             .formatting_buffer = formatting_buffer,
             .col_count_max = options.col_count_max,
@@ -547,7 +556,7 @@ const Editor = struct {
 
     fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
         editor.document.deinit(allocator);
-        editor.clipboard.deinit(allocator);
+        editor.clipboard.text.deinit(allocator);
         allocator.free(editor.prompt_text_buffer);
         allocator.free(editor.formatting_buffer);
     }
@@ -561,17 +570,18 @@ const Editor = struct {
         editor.dirty = true;
     }
 
-    fn yank(editor: *Editor) !void {
-        editor.clipboard.clearRetainingCapacity();
-        if (editor.cursor.selection()) |selection|
-            editor.clipboard.appendSliceAssumeCapacity(selection.slice(editor.document.items))
+    fn yank(editor: *Editor, lines: bool) !void {
+        editor.clipboard.text.clearRetainingCapacity();
+        if (editor.cursor.selection(editor.document.items)) |selection|
+            editor.clipboard.text.appendSliceAssumeCapacity(selection.slice(editor.document.items))
         else
-            editor.clipboard.appendAssumeCapacity(editor.document.items[editor.cursor.offset]);
+            editor.clipboard.text.appendAssumeCapacity(editor.document.items[editor.cursor.offset]);
+        editor.clipboard.lines = lines;
     }
 
     /// Delete text under cursor.
     fn delete(editor: *Editor) !void {
-        if (editor.cursor.selection()) |selection| {
+        if (editor.cursor.selection(editor.document.items)) |selection| {
             // We're removing text here so this should never return an error.
             editor.document.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
             editor.cursor.anchor = null;
@@ -869,7 +879,7 @@ const Viewport = struct {
 
 const Cursor = struct {
     offset: u32,
-    anchor: ?u32,
+    anchor: ?struct { offset: u32, line: bool },
     line_offset_snap: u32,
 
     fn update(
@@ -928,7 +938,7 @@ const Cursor = struct {
         }
     }
 
-    fn selection(cursor: Cursor) ?struct {
+    const Selection = struct {
         head: u32,
         tail: u32,
 
@@ -939,15 +949,21 @@ const Cursor = struct {
         fn slice(s: @This(), buffer: []const u8) []const u8 {
             return buffer[s.head .. s.tail + 1];
         }
-    } {
-        if (cursor.anchor) |anchor| return .{
-            .head = @min(anchor, cursor.offset),
-            .tail = @max(anchor, cursor.offset),
+    };
+
+    fn selection(cursor: Cursor, buffer: []const u8) ?Selection {
+        if (cursor.anchor) |anchor| {
+            const selection_head = @min(cursor.anchor.?.offset, cursor.offset);
+            const selection_tail = @max(cursor.anchor.?.offset, cursor.offset);
+            return if (anchor.line) .{
+                .head = lineHead(buffer, selection_head),
+                .tail = lineTail(buffer, selection_tail),
+            } else .{ .head = selection_head, .tail = selection_tail };
         } else return null;
     }
 
-    fn head(cursor: Cursor) u32 {
-        return if (cursor.selection()) |s| s.head else cursor.offset;
+    fn head(cursor: Cursor, buffer: []const u8) u32 {
+        return if (cursor.selection(buffer)) |s| s.head else cursor.offset;
     }
 };
 
@@ -1577,8 +1593,8 @@ pub const EditorFuzzContext = struct {
         var editor: Editor = undefined;
         editor.document = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
         errdefer editor.document.deinit(allocator);
-        editor.clipboard = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
-        errdefer editor.clipboard.deinit(allocator);
+        editor.clipboard.text = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
+        errdefer editor.clipboard.text.deinit(allocator);
         editor.formatting_buffer = try allocator.alloc(u8, EditorFuzzContext.file_size_max);
         errdefer allocator.free(editor.formatting_buffer);
         editor.prompt_text_buffer = try allocator.alloc(u8, EditorFuzzContext.col_count_max - 1);
@@ -1627,13 +1643,16 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         },
         .cursor = .{
             .offset = cursor_offset_start,
-            .anchor = 0,
+            .anchor = if (smith.value(bool)) .{
+                .offset = smith.valueRangeLessThan(u32, 0, @intCast(ctx.editor.document.items.len)),
+                .line = smith.value(bool),
+            } else null,
             .line_offset_snap = lineOffset(ctx.editor.document.items, cursor_offset_start),
         },
         .mode = .normal,
         .document = ctx.editor.document,
         .clipboard = blk: {
-            ctx.editor.clipboard.clearRetainingCapacity();
+            ctx.editor.clipboard.text.clearRetainingCapacity();
             break :blk ctx.editor.clipboard;
         },
         .prompt_text_buffer = ctx.editor.prompt_text_buffer,
