@@ -7,7 +7,6 @@
 
 ## TODO
 
-- Paste over selection should replace selection.
 - Add `{`, `}`, `_`, and `%` motions.
 - Fix all fuzzer bugs.
 - Basic undo/redo. For now just individual modifications.

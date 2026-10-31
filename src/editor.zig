@@ -160,12 +160,17 @@ const Editor = struct {
                         editor.cursor.anchor = null;
                         editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
                     },
-                    // 'P' => {}, // paste before
+                    // 'P' => {}, // TODO: paste before
                     'p' => if (editor.clipboard.items.len > 0) {
-                        // If we're on a newline, pasting inserts on the next line. This doesn't
-                        // feel great, so make an exception.
+                        // If there is a selection, paste substitutes selection. Don't need to move
+                        // right before pasting. Pasting on a newline would insert on the next line.
+                        // Make an exception for that too.
                         const on_newline = editor.document.items[editor.cursor.offset] == '\n';
-                        if (!on_newline) editor.cursor.move(.right, 1, editor.document.items);
+                        if (editor.cursor.selection()) |selection| {
+                            try editor.delete();
+                            editor.cursor.update(editor.document.items, selection.head, .snap_update);
+                        } else if (!on_newline) editor.cursor.move(.right, 1, editor.document.items);
+
                         try editor.insert(editor.clipboard.items);
                         if (!on_newline) editor.cursor.move(.left, 1, editor.document.items);
                     },
