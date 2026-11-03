@@ -171,6 +171,15 @@ const Editor = struct {
                         },
                     },
                     'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
+                    'Y' => {
+                        const head = lineHead(editor.document.items, editor.cursor.offset);
+                        const tail = lineTail(editor.document.items, editor.cursor.offset);
+                        assert(editor.document.items[tail] == '\n');
+                        editor.clipboard.clearRetainingCapacity();
+                        editor.clipboard.appendSliceAssumeCapacity(
+                            editor.document.items[head .. tail + 1],
+                        );
+                    },
                     // 'P' => {}, // TODO: paste before
                     'p' => try paste(
                         &editor.document,
@@ -3342,6 +3351,64 @@ test "delete selection" {
         \\~
         \\hello.c [+]                      2,3
     , .{ .row = 1, .col = 5 }, .steady_block);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "Y yanks the cursor's line" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to line 4
+            "lll" ++ // move into the line
+            "Y" ++ // yank line
+            "p" ++ // paste it below
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    for (0..6) |_| try test_editor.tick(); // process jjjlll
+    try test_editor.tick(); // process Y
+
+    // Clipboard holds the whole line with its newline. Cursor and document are unchanged.
+    try std.testing.expectEqualStrings(
+        "  printf(\"Hello, world!\\n\");\n",
+        test_editor.editor.clipboard.items,
+    );
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c                          4,4
+    , .{ .row = 3, .col = 6 }, .steady_block);
+
+    try test_editor.tick(); // process p
+
+    // Line-wise paste below, cursor after the pasted line's indentation.
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   printf("Hello, world!\n");
+        \\ 6   return 0;
+        \\ 7 }
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c [+]                      5,3
+    , .{ .row = 4, .col = 5 }, .steady_block);
 
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
