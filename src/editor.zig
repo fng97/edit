@@ -366,14 +366,14 @@ const Editor = struct {
         };
         var highlight = false;
         for (line_number_start..line_number_start + row_count - 1) |line_number| {
-            // Draw gutter: coloured line number and space delimiter.
-            try writer.print(esc_line_number_foreground ++ "{[line_number]d: >[gutter_width]}" ++
-                esc_colour_reset ++ " ", .{
-                .line_number = line_number + 1, // displayed line number indexed from 1
-                .gutter_width = gutter_width - 1, // space suffix already in format string
-            });
-
             if (line_head < document.len) {
+                // Draw gutter: coloured line number and space delimiter.
+                try writer.print(esc_line_number_foreground ++ "{[line_number]d: >[gutter_width]}" ++
+                    esc_colour_reset ++ " ", .{
+                    .line_number = line_number + 1, // displayed line number indexed from 1
+                    .gutter_width = gutter_width - 1, // space suffix already in format string
+                });
+
                 const line_tail = lineTail(document, line_head);
 
                 // Handle horizontal scroll.
@@ -413,7 +413,7 @@ const Editor = struct {
                 } else try writer.writeAll(document[cropped_head..cropped_tail]); // normal line
 
                 line_head = line_tail + 1;
-            } else try writer.writeByte('~');
+            } else try writer.writeByte('~'); // past end of document: '~' in gutter
             try writer.writeAll("\r\n");
         }
 
@@ -749,13 +749,12 @@ var termios_original: ?std.posix.termios = null;
 pub const panic = std.debug.FullPanic(struct {
     pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         @branchHint(.cold);
-        // TODO: Worth draining stdin on panic so we don't get garbage input by the terminal cursor
-        // once prior terminal restored?
         if (termios_original) |t| {
             termios_original = null; // so we only do this once
             var threaded: std.Io.Threaded = .init_single_threaded;
             // Disable KKP (CSI < u) and resize (CSI ? 2048 l) then exit alt screen (CSI ? 1049 l).
             std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
+            // tcsetattr with .FLUSH (TCSAFLUSH) flushes stdin.
             std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
         }
         std.debug.defaultPanic(msg, first_trace_addr);
@@ -2434,11 +2433,11 @@ test "rendering: hello_c" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2482,16 +2481,16 @@ test "rendering: empty" {
 
     try test_editor.expectRender(
         \\ 1 
-        \\ 2 ~
-        \\ 3 ~
-        \\ 4 ~
-        \\ 5 ~
-        \\ 6 ~
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\empty.zig                        1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2560,11 +2559,11 @@ test "horizontal scroll: go to start/end of line" {
         \\ 4   printf(
         \\ 5   return 
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c  1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2577,11 +2576,11 @@ test "horizontal scroll: go to start/end of line" {
         \\ 4 Hello, wo
         \\ 5 ;
         \\ 6 
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c 1,19
     , .{ .row = 0, .col = 11 }, .steady_block);
 
@@ -2594,11 +2593,11 @@ test "horizontal scroll: go to start/end of line" {
         \\ 4   printf(
         \\ 5   return 
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c  1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2630,11 +2629,11 @@ test "insert mode" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2647,11 +2646,11 @@ test "insert mode" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_bar); // changed to steady bar
 
@@ -2664,11 +2663,11 @@ test "insert mode" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,2
         //         ^ dirty buffer indicator
     , .{ .row = 0, .col = 4 }, .steady_bar);
@@ -2682,11 +2681,11 @@ test "insert mode" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,3
     , .{ .row = 0, .col = 5 }, .steady_bar);
 
@@ -2699,11 +2698,11 @@ test "insert mode" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,3
     , .{ .row = 0, .col = 5 }, .steady_block); // back to steady block
 
@@ -2719,11 +2718,11 @@ test "insert mode" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                     1,20
     , .{ .row = 0, .col = 22 }, .steady_block);
 
@@ -2751,11 +2750,11 @@ test "new line with o preserves indentation" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2774,10 +2773,10 @@ test "new line with o preserves indentation" {
         \\ 5   x
         \\ 6   return 0;
         \\ 7 }
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      5,4
     , .{ .row = 4, .col = 6 }, .steady_block);
 
@@ -2805,11 +2804,11 @@ test "new line with O preserves indentation" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2828,10 +2827,10 @@ test "new line with O preserves indentation" {
         \\ 5   printf("Hello, world!\n");
         \\ 6   return 0;
         \\ 7 }
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      4,4
     , .{ .row = 3, .col = 6 }, .steady_block);
 
@@ -2859,11 +2858,11 @@ test "insert with I goes to start of line after indentation" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2881,11 +2880,11 @@ test "insert with I goes to start of line after indentation" {
         \\ 4   xprintf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      4,4
     , .{ .row = 3, .col = 6 }, .steady_block);
 
@@ -2913,11 +2912,11 @@ test "A inserts at end of line" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2935,11 +2934,11 @@ test "A inserts at end of line" {
         \\ 4   printf("Hello, world!\n");x
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                     4,30
     , .{ .row = 3, .col = 32 }, .steady_block);
 
@@ -2967,11 +2966,11 @@ test "tab inserts four spaces" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -2987,11 +2986,11 @@ test "tab inserts four spaces" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,6
     , .{ .row = 0, .col = 8 }, .steady_block);
 
@@ -3021,11 +3020,11 @@ test "enter preserves indentation" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3046,10 +3045,10 @@ test "enter preserves indentation" {
         \\ 5   yprintf("Hello, world!\n");
         \\ 6   return 0;
         \\ 7 }
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      5,4
     , .{ .row = 4, .col = 6 }, .steady_block);
 
@@ -3079,11 +3078,11 @@ test "delete" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3096,11 +3095,11 @@ test "delete" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3113,12 +3112,12 @@ test "delete" {
         \\ 3   printf("Hello, world!\n");
         \\ 4   return 0;
         \\ 5 }
-        \\ 6 ~
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                     1,18
     , .{ .row = 0, .col = 20 }, .steady_block);
 
@@ -3133,12 +3132,12 @@ test "delete" {
         \\ 3   printf("Hello, world!\n");
         \\ 4   return 0;
         \\ 5 }
-        \\ 6 ~
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      5,2
     , .{ .row = 4, .col = 4 }, .steady_block);
 
@@ -3174,11 +3173,11 @@ test "delete selection" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3193,12 +3192,12 @@ test "delete selection" {
         \\ 3   printf("Hello, world!\n");
         \\ 4   return 0;
         \\ 5 }
-        \\ 6 ~
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3212,15 +3211,15 @@ test "delete selection" {
     try test_editor.expectRender(
         \\ 1 
         \\ 2 in
-        \\ 3 ~
-        \\ 4 ~
-        \\ 5 ~
-        \\ 6 ~
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      2,3
     , .{ .row = 1, .col = 5 }, .steady_block);
 
@@ -3259,11 +3258,11 @@ test "save file" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3276,11 +3275,11 @@ test "save file" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3294,11 +3293,11 @@ test "save file" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\:w
     , .{ .row = 11, .col = 2 }, .steady_bar);
 
@@ -3314,10 +3313,10 @@ test "save file" {
         \\ 5 printf("Hello, world!\n");
         \\ 6 return 0;
         \\ 7 }
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3363,11 +3362,11 @@ test "save file and quit" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3380,11 +3379,11 @@ test "save file and quit" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3409,11 +3408,11 @@ test "quit" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3439,11 +3438,11 @@ test "quit without saving" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3456,11 +3455,11 @@ test "quit without saving" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c [+]                      1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3475,11 +3474,11 @@ test "quit without saving" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\Save changes to hello.c (y/n)?
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3573,11 +3572,11 @@ test "go to line" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3593,11 +3592,11 @@ test "go to line" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                         5,12
     , .{ .row = 4, .col = 14 }, .steady_block);
 
@@ -3623,11 +3622,11 @@ test "user message" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3643,11 +3642,11 @@ test "user message" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\invalid command
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3675,11 +3674,11 @@ test "selection highlighting" {
         \\ 4   printf("Hello, world!\n");
         \\ 5   return 0;
         \\ 6 }
-        \\ 7 ~
-        \\ 8 ~
-        \\ 9 ~
-        \\10 ~
-        \\11 ~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
         \\hello.c                          1,1
     , .{ .row = 0, .col = 3 }, .steady_block);
 
@@ -3698,11 +3697,11 @@ test "selection highlighting" {
             ln ++ " 4" ++ rs ++ "   printf(\"Hello, world!\\n\");\n" ++
             ln ++ " 5" ++ rs ++ "   return 0;\n" ++
             ln ++ " 6" ++ rs ++ " }\n" ++
-            ln ++ " 7" ++ rs ++ " ~\n" ++
-            ln ++ " 8" ++ rs ++ " ~\n" ++
-            ln ++ " 9" ++ rs ++ " ~\n" ++
-            ln ++ "10" ++ rs ++ " ~\n" ++
-            ln ++ "11" ++ rs ++ " ~\n" ++
+            "~\n" ++
+            "~\n" ++
+            "~\n" ++
+            "~\n" ++
+            "~\n" ++
             "hello.c                          3,1",
         .{ .row = 2, .col = 3 },
         .steady_block,
