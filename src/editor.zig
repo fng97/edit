@@ -614,13 +614,18 @@ const Editor = struct {
             .unknown => return null, // no formatter, save as is
         }, editor.document.items, editor.scratch_buffer) orelse return false;
 
-        editor.document.clearRetainingCapacity();
-        editor.document.appendSliceAssumeCapacity(formatted);
+        // Treat output we can't accept as a formatting failure, leaving the document untouched.
+        // Check it's valid before replacing, replace asserts on invalid characters.
+        validateDocument(formatted) catch return false;
+        replace(
+            &editor.document,
+            &editor.dirty,
+            0,
+            @intCast(editor.document.items.len),
+            formatted,
+        ) catch return false; // too long once the trailing newline is added
 
-        try validateDocument(editor.document.items);
-
-        assert(editor.document.items.len > 0);
-        editor.dirty = true;
+        editor.cursor.anchor = null;
 
         // Move cursor to start of line.
         const offset = @min(editor.cursor.offset, editor.document.items.len - 1);
@@ -1526,7 +1531,11 @@ fn runFormatter(
     // Resulting stdout is new document.
     var stdout_reader = child.stdout.?.reader(io, &.{});
     var buffer_writer: std.Io.Writer = .fixed(scratch_buffer);
-    const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
+    const stdout_size = stdout_reader.interface.streamRemaining(&buffer_writer) catch |err|
+        switch (err) {
+            error.WriteFailed => return null, // output doesn't fit, treat as formatting failure
+            error.ReadFailed => return err,
+        };
 
     const term = try child.wait(io);
     if (!term.success()) return null;
@@ -3226,6 +3235,27 @@ test "save file" {
     , .{ .row = 0, .col = 3 }, .steady_block);
 
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "formatting clears selection" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "Gvk" ++ // select from the last line up, anchor near the end of the document
+            ":w\r", // save, formatting removes indentation so the document shrinks
+    });
+    defer test_editor.deinit();
+
+    for ("Gvk") |_| try test_editor.tick();
+    const anchor = test_editor.editor.cursor.anchor.?;
+    for (":w\r") |_| try test_editor.tick();
+
+    // Without clearing the selection, the anchor would point past the end of the document.
+    try std.testing.expect(anchor >= test_editor.editor.document.items.len);
+    try std.testing.expectEqual(null, test_editor.editor.cursor.anchor);
+    try std.testing.expect(!test_editor.editor.dirty); // formatting marks dirty, saving clears it
 }
 
 test "save file and quit" {
