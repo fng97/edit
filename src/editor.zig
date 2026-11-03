@@ -611,7 +611,7 @@ const Editor = struct {
             .markdown => &.{ "prettier", "--parser", "markdown" },
             .sh => &.{ "shfmt", "--indent", "4" },
             .c => &.{ "clang-format", "--style=Google" },
-            .unknown => return false,
+            .unknown => return null, // no formatter, save as is
         }, editor.document.items, editor.scratch_buffer) orelse return false;
 
         editor.document.clearRetainingCapacity();
