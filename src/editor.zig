@@ -241,7 +241,7 @@ const Editor = struct {
                     },
                     .enter => {
                         if (std.mem.eql(u8, "w", command.text.items)) {
-                            try editor.formatAndSave();
+                            if (try editor.formatAndSave()) editor.mode = .normal;
                         } else if (std.mem.eql(u8, "q", command.text.items)) {
                             if (!editor.dirty) return false; // exit!
                             // Trying to exit without saving. Prompt user to save.
@@ -252,7 +252,9 @@ const Editor = struct {
                         } else if (std.mem.eql(u8, "q!", command.text.items)) {
                             return false; // exit, for real!
                         } else if (std.mem.eql(u8, "wq", command.text.items)) {
-                            try editor.formatAndSave();
+                            if (try editor.formatAndSave()) return false; // exit if saved
+                        } else if (std.mem.eql(u8, "wq!", command.text.items)) { // skip formatting
+                            try editor.save();
                             return false;
                         } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
                             // Line number given is indexed from 1.
@@ -275,10 +277,7 @@ const Editor = struct {
                 .unsaved => switch (event) {
                     .escape => editor.mode = .normal,
                     .ascii => |c| switch (c) {
-                        'y' => {
-                            try editor.save();
-                            return false;
-                        },
+                        'y' => if (try editor.formatAndSave()) return false, // exit if saved
                         'n' => return false, // quit without saving
                         else => {}, // do nothing
                     },
@@ -557,17 +556,16 @@ const Editor = struct {
         allocator.free(editor.scratch_buffer);
     }
 
-    /// Format document if formatter available then save. Present error message if formatting fails.
-    fn formatAndSave(editor: *Editor) !void {
-        if (try editor.formatDocument()) |success| {
-            if (success) {
-                try editor.save();
-                editor.mode = .normal;
-            } else editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
-        } else {
-            try editor.save();
-            editor.mode = .normal;
+    /// Format document if formatter available then save. If formatting fails, show the error and
+    /// don't save. Returns whether the document was saved so the caller can decide what to do next
+    /// (e.g. exit).
+    fn formatAndSave(editor: *Editor) !bool {
+        if (try editor.formatDocument() == false) {
+            editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
+            return false;
         }
+        try editor.save();
+        return true;
     }
 
     fn centreCursorVertically(editor: *Editor) void {
@@ -602,7 +600,7 @@ const Editor = struct {
         else
             .unknown;
 
-        const formatted = if (document_kind == .testing) formatDocumentWithTestFormatter(
+        const formatted = (if (document_kind == .testing) formatDocumentWithTestFormatter(
             editor.document.items,
             editor.scratch_buffer,
         ) else try runFormatter(editor.io, switch (document_kind) {
@@ -612,7 +610,7 @@ const Editor = struct {
             .sh => &.{ "shfmt", "--indent", "4" },
             .c => &.{ "clang-format", "--style=Google" },
             .unknown => return null, // no formatter, save as is
-        }, editor.document.items, editor.scratch_buffer) orelse return false;
+        }, editor.document.items, editor.scratch_buffer)) orelse return false;
 
         // Treat output we can't accept as a formatting failure, leaving the document untouched.
         // Check it's valid before replacing, replace asserts on invalid characters.
@@ -1551,8 +1549,12 @@ test fuzzKkpParser {
     try std.testing.fuzz(&reader_buffer, fuzzKkpParser, .{});
 }
 
-/// Fake formatter for testing. Double all blank lines. Remove all indentation.
-fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) []const u8 {
+/// Fake formatter for testing. Double all blank lines. Remove all indentation. Like a real
+/// formatter on a syntax error, fail (return null) if braces are unbalanced.
+fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) ?[]const u8 {
+    if (std.mem.countScalar(u8, document, '{') != std.mem.countScalar(u8, document, '}'))
+        return null;
+
     // Double all blank lines ("\n\n" -> "\n\n\n").
     const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", scratch_buffer);
     const with_newlines_doubled = scratch_buffer[0 .. document.len + replacement_count];
@@ -1582,16 +1584,20 @@ test formatDocumentWithTestFormatter {
         \\return 0;
         \\}
         \\
-    , formatDocumentWithTestFormatter(hello_c, &buffer));
+    , formatDocumentWithTestFormatter(hello_c, &buffer).?);
 
     try std.testing.expectEqualStrings(
         "hello\n\n\n\n\n\nworld!\n",
-        formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer),
+        formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer).?,
     );
 
-    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter("", &buffer));
-    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter(" ", &buffer));
-    try std.testing.expectEqualStrings("\n\n\n", formatDocumentWithTestFormatter(" \n\n", &buffer));
+    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter("", &buffer).?);
+    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter(" ", &buffer).?);
+    try std.testing.expectEqualStrings("\n\n\n", formatDocumentWithTestFormatter(" \n\n", &buffer).?);
+
+    // Unbalanced braces fail.
+    try std.testing.expectEqual(null, formatDocumentWithTestFormatter("int main() {\n", &buffer));
+    try std.testing.expectEqual(null, formatDocumentWithTestFormatter("}\n", &buffer));
 }
 
 fn validateDocument(document: []const u8) error{FileContainsInvalidCharacter}!void {
@@ -3386,6 +3392,74 @@ test "quit without saving" {
     , .{ .row = 0, .col = 3 }, .steady_block);
 
     try test_editor.expectTickExit(); // process y
+}
+
+test "save and quit stays open if formatting fails" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "main.c",
+        .file_bytes = "int main() {\n", // unbalanced braces, test formatter fails
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "d" ++ // delete first character, make the document dirty
+            ":wq\r" ++ // try to save and quit, formatting fails
+            "\r" ++ // dismiss the formatting error
+            ":wq!\r", // save without formatting and quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.tick(); // process d
+    for (":wq\r") |_| try test_editor.tick(); // doesn't exit
+    try std.testing.expect(test_editor.editor.mode == .prompt);
+    try std.testing.expect(test_editor.editor.mode.prompt == .message);
+    try std.testing.expectEqual(.formatting_failed, test_editor.editor.mode.prompt.message);
+    try std.testing.expect(test_editor.editor.dirty); // not saved
+    try std.testing.expectEqualStrings("nt main() {\n", test_editor.editor.document.items);
+
+    try test_editor.tick(); // process \r
+    try std.testing.expect(test_editor.editor.mode == .normal);
+
+    for (":wq!") |_| try test_editor.tick();
+    try test_editor.expectTickExit(); // process \r
+    try std.testing.expect(!test_editor.editor.dirty); // saved
+    try std.testing.expectEqualStrings("nt main() {\n", test_editor.editor.document.items);
+}
+
+test "save and quit from unsaved prompt formats" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "main.c",
+        .file_bytes = "int main() {\n  return 0;\n", // unbalanced braces, test formatter fails
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "d" ++ // delete first character, make the document dirty
+            ":q\r" ++ // try quit, prompts to save
+            "y" ++ // save and quit, formatting fails
+            "\r" ++ // dismiss the formatting error
+            "G" ++ // go to last line
+            "o}" ++ // balance the braces...
+            "\x1b[27u" ++ // ...and back to normal mode
+            ":q\r" ++ // try quit, prompts to save
+            "y", // save and quit, formatting succeeds
+    });
+    defer test_editor.deinit();
+
+    try test_editor.tick(); // process d
+    for (":q\ry") |_| try test_editor.tick(); // doesn't exit
+    try std.testing.expect(test_editor.editor.mode == .prompt);
+    try std.testing.expect(test_editor.editor.mode.prompt == .message);
+    try std.testing.expectEqual(.formatting_failed, test_editor.editor.mode.prompt.message);
+    try std.testing.expect(test_editor.editor.dirty); // not saved
+
+    try test_editor.tick(); // process \r
+    for ("Go}") |_| try test_editor.tick();
+    try test_editor.tick(); // process escape
+    for (":q\r") |_| try test_editor.tick();
+    try test_editor.expectTickExit(); // process y
+    try std.testing.expect(!test_editor.editor.dirty); // saved
+    // Formatted: indentation removed.
+    try std.testing.expectEqualStrings(
+        "nt main() {\nreturn 0;\n}\n",
+        test_editor.editor.document.items,
+    );
 }
 
 test "go to line" {
