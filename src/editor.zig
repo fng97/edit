@@ -602,37 +602,17 @@ const Editor = struct {
         else
             .unknown;
 
-        const formatted = switch (document_kind) {
-            .testing => try formatDocumentWithTestFormatter(
-                editor.document.items,
-                editor.scratch_buffer,
-            ),
-            .zig => try runFormatter(
-                editor.io,
-                &.{ "zig", "fmt", "--stdin" },
-                editor.document.items,
-                editor.scratch_buffer,
-            ),
-            .markdown => try runFormatter(
-                editor.io,
-                &.{ "prettier", "--parser", "markdown" },
-                editor.document.items,
-                editor.scratch_buffer,
-            ),
-            .sh => try runFormatter(
-                editor.io,
-                &.{ "shfmt", "--indent", "4" },
-                editor.document.items,
-                editor.scratch_buffer,
-            ),
-            .c => try runFormatter(
-                editor.io,
-                &.{ "clang-format", "--style=Google" },
-                editor.document.items,
-                editor.scratch_buffer,
-            ),
-            .unknown => return null,
-        } orelse return false;
+        const formatted = if (document_kind == .testing) try formatDocumentWithTestFormatter(
+            editor.document.items,
+            editor.scratch_buffer,
+        ) else try runFormatter(editor.io, switch (document_kind) {
+            .testing => unreachable,
+            .zig => &.{ "zig", "fmt", "--stdin" },
+            .markdown => &.{ "prettier", "--parser", "markdown" },
+            .sh => &.{ "shfmt", "--indent", "4" },
+            .c => &.{ "clang-format", "--style=Google" },
+            .unknown => return false,
+        }, editor.document.items, editor.scratch_buffer) orelse return false;
 
         editor.document.clearRetainingCapacity();
         editor.document.appendSliceAssumeCapacity(formatted);
