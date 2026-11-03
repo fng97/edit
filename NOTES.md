@@ -33,4 +33,3 @@
 - Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
 - Add timing instrumentation. Is 2ms max reasonable per-tick?
-- The ~ for empty lines should go in the gutter instead of the text section.
