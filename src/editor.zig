@@ -29,9 +29,8 @@ const terminal_deinit =
     "\x1b[?2048l" ++ // disable in-band resize notifications
     "\x1b[<u" ++ // pop KKP flags
     "\x1b[?1049l"; // exit alt screen
-// FIXME: Use 16-colour palette for all colours.
-const esc_highlight_foreground = "\x1b[38;2;40;40;40m"; // dark foreground
-const esc_highlight_background = "\x1b[48;2;200;200;200m"; // light gray background
+const esc_highlight_foreground = "\x1b[30m"; // black
+const esc_highlight_background = "\x1b[47m"; // white (light gray on most palettes)
 const esc_line_number_foreground = "\x1b[33m"; // yellow
 const esc_colour_reset = "\x1b[0m";
 
