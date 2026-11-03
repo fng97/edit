@@ -498,24 +498,24 @@ const Editor = struct {
             row_count_max: u32,
         },
     ) !Editor {
-        const document_buffer = try allocator.alloc(u8, options.file_size_max);
-        errdefer allocator.free(document_buffer);
-        var document_writer: std.Io.Writer = .fixed(document_buffer);
-        _ = file_reader.streamRemaining(&document_writer) catch |err| switch (err) {
+        // Read the file into the scratch buffer. The document is built from it by `load`.
+        const scratch_buffer = try allocator.alloc(u8, options.file_size_max);
+        errdefer allocator.free(scratch_buffer);
+        var scratch_writer: std.Io.Writer = .fixed(scratch_buffer);
+        const file_size = file_reader.streamRemaining(&scratch_writer) catch |err| switch (err) {
             error.WriteFailed => return error.FileTooLong,
             error.ReadFailed => return err,
         };
-        // Error handling already frees document_buffer via errdefer above. Don't double free.
-        var document: std.ArrayList(u8) = document_writer.toArrayList();
-        try ensureDocumentValid(&document);
+        var document: std.ArrayList(u8) = try .initCapacity(allocator, options.file_size_max);
+        errdefer document.deinit(allocator);
+        var dirty = false;
+        try load(&document, &dirty, scratch_buffer, @intCast(file_size));
 
         var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, options.file_size_max);
         errdefer clipboard.deinit(allocator);
         // -1 accounts for the ':' shown when the prompt is active.
         const prompt_text_buffer = try allocator.alloc(u8, options.col_count_max - 1);
         errdefer allocator.free(prompt_text_buffer);
-        const scratch_buffer = try allocator.alloc(u8, options.file_size_max);
-        errdefer allocator.free(scratch_buffer);
 
         const cursor_offset_start: ?u32 = offsetFromPosition(
             document.items,
@@ -536,6 +536,7 @@ const Editor = struct {
             },
             .file_path = file_path,
             .document = document,
+            .dirty = dirty,
             .cursor = .{
                 .offset = cursor_offset_start orelse 0,
                 .anchor = null,
@@ -1620,25 +1621,98 @@ fn validateDocument(document: []const u8) error{FileContainsInvalidCharacter}!vo
     }
 }
 
-// FIXME: This should mark the editor as dirty.
-/// Document must not be empty, contain only ASCII, and end in newline.
-fn ensureDocumentValid(
+/// Build a valid document from the raw file bytes in `scratch_buffer[0..file_size]`. A valid
+/// document is not empty, contains only newlines and printable ASCII, and ends in a newline. To get
+/// there we expand tabs to eight spaces, add a missing trailing newline, and turn an empty file into
+/// a single newline. Any of those mean the document no longer matches the file on disk so we mark
+/// it dirty.
+fn load(
     document: *std.ArrayList(u8),
+    dirty: *bool,
+    scratch_buffer: []u8,
+    file_size: u32,
 ) error{ FileTooLong, FileContainsInvalidCharacter }!void {
-    if (document.items.len == 0) {
-        document.appendAssumeCapacity('\n');
-        return;
-    }
+    assert(document.capacity > 0);
+    assert(scratch_buffer.len >= document.capacity); // expanded file must fit in scratch too
+    assert(file_size <= document.capacity); // callers read at most file_size_max bytes
 
-    // Replace all tabs with eight spaces.
-    while (std.mem.findScalar(u8, document.items, '\t')) |index| {
+    // Replace all tabs with eight spaces, in the scratch buffer. Capacity is limited to the
+    // document's so that a file that's too long once expanded fails here.
+    var expanded: std.ArrayList(u8) = .initBuffer(scratch_buffer[0..document.capacity]);
+    expanded.items.len = file_size;
+    while (std.mem.findScalar(u8, expanded.items, '\t')) |index| {
         const tab_whitespace: [8]u8 = @splat(' ');
-        document.replaceRangeBounded(index, 1, &tab_whitespace) catch return error.FileTooLong;
+        expanded.replaceRangeBounded(index, 1, &tab_whitespace) catch return error.FileTooLong;
     }
 
-    try validateDocument(document.items);
+    try validateDocument(expanded.items);
 
-    if (document.last().? != '\n') document.appendBounded('\n') catch return error.FileTooLong;
+    // Start from the smallest valid document then replace it with the file. `replace` takes care
+    // of empty files and the trailing newline.
+    document.clearRetainingCapacity();
+    document.appendAssumeCapacity('\n');
+    try replace(document, dirty, 0, 1, expanded.items);
+
+    // `replace` always marks the document dirty. Every change we make while loading adds bytes
+    // (tab -> 8 spaces, missing newline, empty file), so the document matches the file on disk
+    // exactly when the sizes match.
+    assert(document.items.len >= file_size);
+    dirty.* = document.items.len != file_size;
+}
+
+test load {
+    var document_buffer: [16]u8 = undefined;
+    var document: std.ArrayList(u8) = .initBuffer(&document_buffer);
+    var scratch_buffer: [document_buffer.len]u8 = undefined;
+    var dirty = true;
+
+    // Already valid. Unchanged, not dirty.
+    @memcpy(scratch_buffer[0..4], "abc\n");
+    try load(&document, &dirty, &scratch_buffer, 4);
+    try std.testing.expectEqualStrings("abc\n", document.items);
+    try std.testing.expect(!dirty);
+
+    // Empty file becomes a single newline.
+    try load(&document, &dirty, &scratch_buffer, 0);
+    try std.testing.expectEqualStrings("\n", document.items);
+    try std.testing.expect(dirty);
+
+    // Missing trailing newline is added.
+    dirty = false;
+    @memcpy(scratch_buffer[0..3], "abc");
+    try load(&document, &dirty, &scratch_buffer, 3);
+    try std.testing.expectEqualStrings("abc\n", document.items);
+    try std.testing.expect(dirty);
+
+    // Tabs are expanded.
+    dirty = false;
+    @memcpy(scratch_buffer[0..3], "\ta\n");
+    try load(&document, &dirty, &scratch_buffer, 3);
+    try std.testing.expectEqualStrings("        a\n", document.items);
+    try std.testing.expect(dirty);
+
+    // Exactly fills the document.
+    dirty = true;
+    @memcpy(scratch_buffer[0..16], "123456789012345\n");
+    try load(&document, &dirty, &scratch_buffer, 16);
+    try std.testing.expectEqualStrings("123456789012345\n", document.items);
+    try std.testing.expect(!dirty);
+
+    // Full but no room for the trailing newline.
+    @memcpy(scratch_buffer[0..16], "1234567890123456");
+    try std.testing.expectError(error.FileTooLong, load(&document, &dirty, &scratch_buffer, 16));
+
+    // Too long once tabs are expanded.
+    @memcpy(scratch_buffer[0..3], "\t\t\n");
+    try std.testing.expectError(error.FileTooLong, load(&document, &dirty, &scratch_buffer, 3));
+
+    // Invalid characters.
+    std.testing.log_level = .err; // don't print the expected warning
+    @memcpy(scratch_buffer[0..3], "a\rb");
+    try std.testing.expectError(
+        error.FileContainsInvalidCharacter,
+        load(&document, &dirty, &scratch_buffer, 3),
+    );
 }
 
 fn characterValid(c: u8) bool {
@@ -2029,9 +2103,9 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     const file_path = ctx.file_path_buffer[0..file_path_size];
     const row_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.col_count_max);
-    ctx.editor.document.clearRetainingCapacity();
-    ctx.editor.document.appendSliceAssumeCapacity(file);
-    ensureDocumentValid(&ctx.editor.document) catch return;
+    @memcpy(ctx.editor.scratch_buffer[0..file.len], file);
+    var dirty = false;
+    load(&ctx.editor.document, &dirty, ctx.editor.scratch_buffer, @intCast(file.len)) catch return;
     const cursor_offset_start =
         smith.valueRangeLessThan(u32, 0, @intCast(ctx.editor.document.items.len));
 
@@ -2058,6 +2132,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         },
         .mode = .normal,
         .document = ctx.editor.document,
+        .dirty = dirty,
         .clipboard = blk: {
             ctx.editor.clipboard.clearRetainingCapacity();
             break :blk ctx.editor.clipboard;
@@ -3146,6 +3221,19 @@ test "delete selection" {
     , .{ .row = 1, .col = 5 }, .steady_block);
 
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "opening a file that needs fixing marks it dirty" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "tabs.txt",
+        .file_bytes = "\tx", // tab expanded and trailing newline added on load
+        .input = "\x1b[48;12;36;0;0t", // dimensions: 12 rows by 36 cols
+    });
+    defer test_editor.deinit();
+
+    try std.testing.expectEqualStrings("        x\n", test_editor.editor.document.items);
+    try std.testing.expect(test_editor.editor.dirty);
 }
 
 test "save file" {
