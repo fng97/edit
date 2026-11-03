@@ -306,7 +306,7 @@ const Editor = struct {
     }
 
     /// Focus the viewport: Ensure it contains the cursor.
-    fn focus(editor: *Editor, cursor: Position) Error!void {
+    fn focus(editor: *Editor, cursor: Position) error{ ViewportTooSmall, ViewportTooLarge }!void {
         const row_count = editor.viewport.row_count;
         const row_count_max = editor.row_count_max;
         const col_count = editor.viewport.col_count;
@@ -315,11 +315,11 @@ const Editor = struct {
         const line_offset = cursor.line_offset;
 
         // Check viewport dimensions.
-        if (row_count < 2) return Error.ViewportTooSmall; // at least one line plus the status line
-        if (row_count > row_count_max) return Error.ViewportTooLarge;
+        if (row_count < 2) return error.ViewportTooSmall; // at least one line plus the status line
+        if (row_count > row_count_max) return error.ViewportTooLarge;
         if (col_count < editor.viewport.gutterWidth() + 1)
-            return Error.ViewportTooSmall; // at least one char
-        if (col_count > col_count_max) return Error.ViewportTooLarge;
+            return error.ViewportTooSmall; // at least one char
+        if (col_count > col_count_max) return error.ViewportTooLarge;
 
         const last_line = editor.viewport.lastLine();
         if (line_number < editor.viewport.line_number_start) {
@@ -431,7 +431,7 @@ const Editor = struct {
                 const dirty_indicator = " [+]";
                 if (editor.dirty) min_size += dirty_indicator.len;
                 min_size += cursor_coordinates_col_count + 1; // 1 for padding
-                if (min_size > col_count) return Error.ViewportTooSmall;
+                if (min_size > col_count) return error.ViewportTooSmall;
 
                 try writer.writeAll(file_path);
                 if (editor.dirty) try writer.writeAll(dirty_indicator);
@@ -503,7 +503,7 @@ const Editor = struct {
         errdefer allocator.free(document_buffer);
         var document_writer: std.Io.Writer = .fixed(document_buffer);
         _ = file_reader.streamRemaining(&document_writer) catch |err| switch (err) {
-            error.WriteFailed => return Error.FileTooLong,
+            error.WriteFailed => return error.FileTooLong,
             error.ReadFailed => return err,
         };
         // Error handling already frees document_buffer via errdefer above. Don't double free.
@@ -602,7 +602,7 @@ const Editor = struct {
         else
             .unknown;
 
-        const formatted = if (document_kind == .testing) try formatDocumentWithTestFormatter(
+        const formatted = if (document_kind == .testing) formatDocumentWithTestFormatter(
             editor.document.items,
             editor.scratch_buffer,
         ) else try runFormatter(editor.io, switch (document_kind) {
@@ -710,7 +710,7 @@ pub fn main(init: std.process.Init) !void {
 
     const dimensions = switch (try parseOne(reader)) {
         .resize => |dimensions| dimensions,
-        else => return Error.FirstEventMustBeResize,
+        else => return error.FirstEventMustBeResize,
     };
 
     const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
@@ -1376,17 +1376,6 @@ test yank {
     try std.testing.expectEqual(0, cursor.line_offset_snap);
 }
 
-const Error = error{
-    CsiSequenceInvalid,
-    CsiSequenceNotRecognised,
-    CsiSequenceTooLong,
-    FileContainsInvalidCharacter,
-    FileTooLong,
-    FirstEventMustBeResize,
-    ViewportTooLarge,
-    ViewportTooSmall,
-};
-
 /// Kitty Keyboard Protocol modifiers:
 ///
 /// shift     0b1         (1)
@@ -1411,18 +1400,18 @@ const Modifiers = packed struct(u8) {
     /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
     /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
     /// 0b101 = 6 and so on."
-    fn decode(encoded: []const u8) !Modifiers {
+    fn decode(encoded: []const u8) error{CsiSequenceInvalid}!Modifiers {
         // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
         const value = try parseCsiInt(encoded);
-        if (value == 0) return Error.CsiSequenceInvalid;
-        if (value - 1 > std.math.maxInt(u8)) return Error.CsiSequenceInvalid;
+        if (value == 0) return error.CsiSequenceInvalid;
+        if (value - 1 > std.math.maxInt(u8)) return error.CsiSequenceInvalid;
         const byte: u8 = @intCast(value - 1);
         return @bitCast(byte);
     }
 };
 
-fn parseCsiInt(text: []const u8) !u32 {
-    return std.fmt.parseInt(u32, text, 10) catch return Error.CsiSequenceInvalid;
+fn parseCsiInt(text: []const u8) error{CsiSequenceInvalid}!u32 {
+    return std.fmt.parseInt(u32, text, 10) catch return error.CsiSequenceInvalid;
 }
 
 const ViewportDimensions = struct { row_count: u32, col_count: u32 };
@@ -1449,26 +1438,26 @@ fn parseOne(reader: *std.Io.Reader) !Event {
         // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences and
         // https://en.wikipedia.org/wiki/ANSI_escape_code.
         '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
-            if (try reader.takeByte() != '[') return Error.CsiSequenceInvalid;
+            if (try reader.takeByte() != '[') return error.CsiSequenceInvalid;
 
             var params_buffer: [32]u8 = undefined;
             var params_index: usize = 0;
             // Read until the final byte so we have all that remains of the escape sequence.
             const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
                 // Since we don't yet support a sequence that uses intermediates, just reject them.
-                0x20...0x2F => return Error.CsiSequenceNotRecognised, // intermediates
+                0x20...0x2F => return error.CsiSequenceNotRecognised, // intermediates
                 0x30...0x3F => |byte| {
-                    if (params_index == params_buffer.len) return Error.CsiSequenceTooLong;
+                    if (params_index == params_buffer.len) return error.CsiSequenceTooLong;
                     params_buffer[params_index] = byte;
                 },
                 0x40...0x7E => |final_byte| break final_byte,
-                else => return Error.CsiSequenceInvalid,
+                else => return error.CsiSequenceInvalid,
             };
 
             const params = params_buffer[0..params_index];
             var iter = std.mem.splitScalar(u8, params, ';');
             // The escape sequences we support
-            const first_str = iter.next() orelse return Error.CsiSequenceNotRecognised;
+            const first_str = iter.next() orelse return error.CsiSequenceNotRecognised;
             const first = try parseCsiInt(first_str);
             switch (final) {
                 'u' => switch (first) {
@@ -1478,34 +1467,34 @@ fn parseOne(reader: *std.Io.Reader) !Event {
                         .chord = .{
                             .ascii = @intCast(switch (c) {
                                 // CSI u unicode-key-code must be unshifted (e.g. a not A).
-                                'A'...'Z' => return Error.CsiSequenceInvalid,
+                                'A'...'Z' => return error.CsiSequenceInvalid,
                                 else => c,
                             }),
                             // Modifiers may not be present. It defaults to 1 (no modifiers). For
                             // now return an error if these are missing.
                             .modifiers = try .decode(
-                                iter.next() orelse return Error.CsiSequenceNotRecognised,
+                                iter.next() orelse return error.CsiSequenceNotRecognised,
                             ),
                         },
                     },
-                    else => return Error.CsiSequenceNotRecognised,
+                    else => return error.CsiSequenceNotRecognised,
                 },
                 't' => switch (first) {
                     // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t. See
                     // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
                     48 => return .{
                         .resize = .{
-                            .row_count = try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
-                            .col_count = try parseCsiInt(iter.next() orelse return Error.CsiSequenceInvalid),
+                            .row_count = try parseCsiInt(iter.next() orelse return error.CsiSequenceInvalid),
+                            .col_count = try parseCsiInt(iter.next() orelse return error.CsiSequenceInvalid),
                         },
                     },
-                    else => return Error.CsiSequenceNotRecognised,
+                    else => return error.CsiSequenceNotRecognised,
                 },
-                else => return Error.CsiSequenceNotRecognised,
+                else => return error.CsiSequenceNotRecognised,
             }
             unreachable;
         },
-        else => return Error.CsiSequenceNotRecognised,
+        else => return error.CsiSequenceNotRecognised,
     }
 }
 
@@ -1550,8 +1539,8 @@ fn fuzzKkpParser(reader_buffer: *[128]u8, smith: *std.testing.Smith) !void {
 
     while (true) _ = parseOne(&reader) catch |err| switch (err) {
         error.EndOfStream => return,
-        Error.CsiSequenceNotRecognised,
-        Error.CsiSequenceInvalid,
+        error.CsiSequenceNotRecognised,
+        error.CsiSequenceInvalid,
         => continue,
         else => return err,
     };
@@ -1563,7 +1552,7 @@ test fuzzKkpParser {
 }
 
 /// Fake formatter for testing. Double all blank lines. Remove all indentation.
-fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) ![]const u8 {
+fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) []const u8 {
     // Double all blank lines ("\n\n" -> "\n\n\n").
     const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", scratch_buffer);
     const with_newlines_doubled = scratch_buffer[0 .. document.len + replacement_count];
@@ -1593,19 +1582,19 @@ test formatDocumentWithTestFormatter {
         \\return 0;
         \\}
         \\
-    , try formatDocumentWithTestFormatter(hello_c, &buffer));
+    , formatDocumentWithTestFormatter(hello_c, &buffer));
 
     try std.testing.expectEqualStrings(
         "hello\n\n\n\n\n\nworld!\n",
-        try formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer),
+        formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer),
     );
 
-    try std.testing.expectEqualStrings("", try formatDocumentWithTestFormatter("", &buffer));
-    try std.testing.expectEqualStrings("", try formatDocumentWithTestFormatter(" ", &buffer));
-    try std.testing.expectEqualStrings("\n\n\n", try formatDocumentWithTestFormatter(" \n\n", &buffer));
+    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter("", &buffer));
+    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter(" ", &buffer));
+    try std.testing.expectEqualStrings("\n\n\n", formatDocumentWithTestFormatter(" \n\n", &buffer));
 }
 
-fn validateDocument(document: []const u8) !void {
+fn validateDocument(document: []const u8) error{FileContainsInvalidCharacter}!void {
     var line_number: u32 = 0;
     var line_offset: u32 = 0;
     for (document) |c| {
@@ -1614,7 +1603,7 @@ fn validateDocument(document: []const u8) !void {
                 "file contains invalid character (0x{x}) at {d}:{d}",
                 .{ c, line_number + 1, line_offset + 1 },
             );
-            return Error.FileContainsInvalidCharacter;
+            return error.FileContainsInvalidCharacter;
         }
 
         line_offset += 1;
@@ -1627,7 +1616,9 @@ fn validateDocument(document: []const u8) !void {
 
 // FIXME: This should mark the editor as dirty.
 /// Document must not be empty, contain only ASCII, and end in newline.
-fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
+fn ensureDocumentValid(
+    document: *std.ArrayList(u8),
+) error{ FileTooLong, FileContainsInvalidCharacter }!void {
     if (document.items.len == 0) {
         document.appendAssumeCapacity('\n');
         return;
@@ -1636,12 +1627,12 @@ fn ensureDocumentValid(document: *std.ArrayList(u8)) Error!void {
     // Replace all tabs with eight spaces.
     while (std.mem.findScalar(u8, document.items, '\t')) |index| {
         const tab_whitespace: [8]u8 = @splat(' ');
-        document.replaceRangeBounded(index, 1, &tab_whitespace) catch return Error.FileTooLong;
+        document.replaceRangeBounded(index, 1, &tab_whitespace) catch return error.FileTooLong;
     }
 
     try validateDocument(document.items);
 
-    if (document.last().? != '\n') document.appendBounded('\n') catch return Error.FileTooLong;
+    if (document.last().? != '\n') document.appendBounded('\n') catch return error.FileTooLong;
 }
 
 fn characterValid(c: u8) bool {
@@ -2078,11 +2069,9 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         if (event == .ascii and !characterValid(event.ascii)) continue; // valid ascii only
 
         if (ctx.editor.tick(event) catch |err| switch (err) {
-            Error.CsiSequenceInvalid,
-            Error.CsiSequenceNotRecognised,
-            Error.FileTooLong,
-            Error.ViewportTooLarge,
-            Error.ViewportTooSmall,
+            error.FileTooLong,
+            error.ViewportTooLarge,
+            error.ViewportTooSmall,
             => return,
             else => return err,
         }) continue else return;
@@ -2229,7 +2218,7 @@ const TestEditor = struct {
 
         const dimensions = switch (try parseOne(&test_editor.reader)) {
             .resize => |dimensions| dimensions,
-            else => return Error.FirstEventMustBeResize,
+            else => return error.FirstEventMustBeResize,
         };
 
         test_editor.editor = try .init(
