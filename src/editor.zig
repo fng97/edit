@@ -705,6 +705,17 @@ pub fn main(init: std.process.Init) !void {
     termios_raw.cc[@backingInt(std.posix.V.TIME)] = 0;
     try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
 
+    // Restore terminal if we're killed. ISIG is off so CTRL+C etc. arrive as input, but these can
+    // still be sent with kill(1).
+    const termination_action: std.posix.Sigaction = .{
+        .handler = .{ .handler = handleTerminationSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESETHAND, // so the re-raise in the handler takes the default action
+    };
+    for ([_]std.posix.SIG{ .TERM, .INT, .HUP, .QUIT }) |sig| {
+        std.posix.sigaction(sig, &termination_action, null);
+    }
+
     // Always restore, even if init fails.
     defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
     try stdout.writeStreamingAll(io, terminal_init);
@@ -776,6 +787,13 @@ pub const debug = struct {
         std.debug.defaultHandleSegfault(addr, name, ctx);
     }
 };
+
+// Restore terminal state then re-raise so we exit with the usual status for the signal. The signal
+// is blocked until the handler returns, by which point the default action has been reinstated.
+fn handleTerminationSignal(sig: std.posix.SIG) callconv(.c) void {
+    restoreTerminalOnCrash();
+    std.posix.raise(sig) catch {};
+}
 
 var log_writer: ?*std.Io.Writer = null;
 fn logFnErr(
