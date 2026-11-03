@@ -139,11 +139,8 @@ const Editor = struct {
                     'v' => editor.cursor.anchor =
                         if (editor.cursor.anchor != null) null else editor.cursor.offset,
                     'd' => {
-                        // If it's a selection, snap cursor to head after yank.
-                        const cursor_offset = editor.cursor.head();
-                        try editor.yank();
-                        try editor.delete();
-                        editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
+                        delete(&editor.document, &editor.clipboard, &editor.cursor);
+                        editor.dirty = true;
                     },
                     ':' => editor.mode = .{
                         .prompt = .{
@@ -153,13 +150,7 @@ const Editor = struct {
                             },
                         },
                     },
-                    'y' => {
-                        // If it's a selection, snap cursor to head after yank.
-                        const cursor_offset = editor.cursor.head();
-                        try editor.yank();
-                        editor.cursor.anchor = null;
-                        editor.cursor.update(editor.document.items, cursor_offset, .snap_update);
-                    },
+                    'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
                     // 'P' => {}, // TODO: paste before
                     'p' => if (editor.clipboard.items.len > 0) {
                         // If there is a selection, paste substitutes selection. Don't need to move
@@ -167,7 +158,7 @@ const Editor = struct {
                         // Make an exception for that too.
                         const on_newline = editor.document.items[editor.cursor.offset] == '\n';
                         if (editor.cursor.selection()) |selection| {
-                            try editor.delete();
+                            delete(&editor.document, &editor.clipboard, &editor.cursor);
                             editor.cursor.update(editor.document.items, selection.head, .snap_update);
                         } else if (!on_newline) editor.cursor.move(.right, 1, editor.document.items);
 
@@ -205,7 +196,7 @@ const Editor = struct {
                     .ascii => |c| try editor.insert(&.{c}),
                     .backspace => if (editor.cursor.offset != 0) {
                         editor.cursor.move(.left, 1, editor.document.items);
-                        try editor.delete();
+                        delete(&editor.document, &editor.clipboard, &editor.cursor);
                     },
                     .tab => try editor.insert("    "),
                     .enter => {
@@ -558,29 +549,6 @@ const Editor = struct {
         editor.document.insertSliceBounded(editor.cursor.offset, text) catch
             return Error.FileTooLong;
         editor.cursor.move(.right, @intCast(text.len), editor.document.items);
-        editor.dirty = true;
-    }
-
-    fn yank(editor: *Editor) !void {
-        editor.clipboard.clearRetainingCapacity();
-        if (editor.cursor.selection()) |selection|
-            editor.clipboard.appendSliceAssumeCapacity(selection.slice(editor.document.items))
-        else
-            editor.clipboard.appendAssumeCapacity(editor.document.items[editor.cursor.offset]);
-    }
-
-    /// Delete text under cursor.
-    fn delete(editor: *Editor) !void {
-        if (editor.cursor.selection()) |selection| {
-            // We're removing text here so this should never return an error.
-            editor.document.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
-            editor.cursor.anchor = null;
-        } else _ = editor.document.orderedRemove(editor.cursor.offset);
-
-        // File must always end in a newline.
-        if (editor.document.items.len == 0 or editor.document.last() != '\n')
-            editor.document.appendAssumeCapacity('\n');
-
         editor.dirty = true;
     }
 
@@ -950,6 +918,108 @@ const Cursor = struct {
         return if (cursor.selection()) |s| s.head else cursor.offset;
     }
 };
+
+// fn paste(document: *std.ArrayList(u8), clipboard: *std.ArrayList(u8), cursor: *Cursor) void {}
+
+// test paste {} // paste over selection, clipboard becomes selection
+
+fn delete(document: *std.ArrayList(u8), clipboard: *std.ArrayList(u8), cursor: *Cursor) void {
+    // If it's a selection, snap cursor to head after yank.
+    const cursor_offset = cursor.head();
+
+    yankInner(document.items, clipboard, cursor.*);
+
+    if (cursor.selection()) |selection| {
+        // We're removing text here so this should never return an error.
+        document.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
+        cursor.anchor = null;
+    } else _ = document.orderedRemove(cursor.offset);
+
+    // File must always end in a newline.
+    if (document.items.len == 0 or document.last() != '\n')
+        document.appendAssumeCapacity('\n');
+
+    cursor.update(document.items, cursor_offset, .snap_update);
+}
+
+test delete {
+    const document_original = "Hello, world!\n  All your codebase are belong to us.\n";
+    var document_buffer: [document_original.len]u8 = undefined;
+    var document: std.ArrayList(u8) = .initBuffer(&document_buffer);
+    document.appendSliceAssumeCapacity(document_original);
+    var clipboard_buffer: [document_original.len]u8 = undefined;
+    var clipboard: std.ArrayList(u8) = .initBuffer(&clipboard_buffer);
+    var cursor: Cursor = undefined;
+
+    cursor = .{ // select all
+        .offset = @intCast(document.items.len - 1),
+        .anchor = 0,
+        .line_offset_snap = @intCast(document.items.len - 1),
+    };
+    delete(&document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("\n", document.items);
+    try std.testing.expectEqualStrings(document_original, clipboard.items);
+    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    try std.testing.expect(cursor.offset == 0); // snap back to head
+
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original); // refill document
+    cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 };
+    delete(&document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("H", clipboard.items);
+    try std.testing.expectEqualStrings(document_original[1..], document.items);
+    try std.testing.expect(cursor.offset == 0);
+
+    cursor = .{ .offset = 6, .anchor = 12, .line_offset_snap = 6 };
+    delete(&document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("world!\n", clipboard.items);
+    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    try std.testing.expect(cursor.offset == 6); // stays at head
+    try std.testing.expectEqualStrings(
+        "ello,   All your codebase are belong to us.\n",
+        document.items,
+    );
+}
+
+fn yankInner(document: []const u8, clipboard: *std.ArrayList(u8), cursor: Cursor) void {
+    clipboard.clearRetainingCapacity();
+    if (cursor.selection()) |selection|
+        clipboard.appendSliceAssumeCapacity(selection.slice(document))
+    else
+        clipboard.appendAssumeCapacity(document[cursor.offset]);
+}
+
+fn yank(document: []const u8, clipboard: *std.ArrayList(u8), cursor: *Cursor) void {
+    // If it's a selection, snap cursor to head after yank.
+    const cursor_offset = cursor.head();
+    yankInner(document, clipboard, cursor.*);
+    cursor.anchor = null; // unselect
+    cursor.update(document, cursor_offset, .snap_update);
+}
+
+test yank {
+    const document = "Hello, world!\n  All your codebase are belong to us.\n";
+    var clipboard_buffer: [document.len]u8 = undefined;
+    var clipboard: std.ArrayList(u8) = .initBuffer(&clipboard_buffer);
+    var cursor: Cursor = undefined;
+
+    cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 };
+    yank(document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("H", clipboard.items);
+    try std.testing.expect(cursor.offset == 0);
+
+    cursor = .{ .offset = 7, .anchor = 13, .line_offset_snap = 7 };
+    yank(document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("world!\n", clipboard.items);
+    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    try std.testing.expect(cursor.offset == 7); // snap back to head
+
+    cursor = .{ .offset = document.len - 1, .anchor = 0, .line_offset_snap = 0 }; // select all
+    yank(document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings(document, clipboard.items);
+    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    try std.testing.expect(cursor.offset == 0); // snap back to head
+}
 
 const Error = error{
     CsiSequenceInvalid,
