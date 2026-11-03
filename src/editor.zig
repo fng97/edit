@@ -26,6 +26,9 @@ const terminal_init =
     // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
     "\x1b[?2048h";
 const terminal_deinit =
+    "\x1b[?2026l" ++ // end synchronised update, in case we crashed mid-render
+    "\x1b[0m" ++ // reset colours, in case we crashed mid-render
+    "\x1b[?25h" ++ // show cursor
     "\x1b[?2048l" ++ // disable in-band resize notifications
     "\x1b[<u" ++ // pop KKP flags
     "\x1b[?1049l"; // exit alt screen
@@ -744,22 +747,35 @@ pub fn main(init: std.process.Init) !void {
 }
 
 var termios_original: ?std.posix.termios = null;
+// Restore terminal state when crashing. Runs only once. Writes straight to stdout rather than via
+// the buffered writer so we don't flush a partial frame. Restoring termios with FLUSH discards any
+// input the terminal has sent that we haven't read yet, so it doesn't end up in the shell.
+fn restoreTerminalOnCrash() void {
+    if (termios_original) |t| {
+        termios_original = null; // so we only do this once
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
+        std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
+    }
+}
+
 // Wrap panic handler so that we can restore terminal state first. Calls default panic after
-// cleanup. Cleanup logic runs only once. This prevents jank backtraces when we crash.
+// cleanup. This prevents jank backtraces when we crash.
 pub const panic = std.debug.FullPanic(struct {
     pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
         @branchHint(.cold);
-        if (termios_original) |t| {
-            termios_original = null; // so we only do this once
-            var threaded: std.Io.Threaded = .init_single_threaded;
-            // Disable KKP (CSI < u) and resize (CSI ? 2048 l) then exit alt screen (CSI ? 1049 l).
-            std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
-            // tcsetattr with .FLUSH (TCSAFLUSH) flushes stdin.
-            std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
-        }
+        restoreTerminalOnCrash();
         std.debug.defaultPanic(msg, first_trace_addr);
     }
 }.panic);
+
+// Same for segfaults (SIGSEGV, SIGILL, SIGBUS, SIGFPE), which don't go through the panic handler.
+pub const debug = struct {
+    pub fn handleSegfault(addr: ?usize, name: []const u8, ctx: ?std.debug.CpuContextPtr) noreturn {
+        restoreTerminalOnCrash();
+        std.debug.defaultHandleSegfault(addr, name, ctx);
+    }
+};
 
 var log_writer: ?*std.Io.Writer = null;
 fn logFnErr(
@@ -783,7 +799,11 @@ fn logFn(
 ) void {
     logFnErr(message_level, scope, format, args) catch |e| std.debug.panic("log failed: {}", .{e});
 }
-pub const std_options: std.Options = .{ .logFn = logFn };
+pub const std_options: std.Options = .{
+    .logFn = logFn,
+    // Only enabled by default in safe builds. Enable always so we can restore the terminal.
+    .enable_segfault_handler = true,
+};
 
 const Position = struct { line_number: u32, line_offset: u32 };
 
