@@ -57,7 +57,7 @@ const Editor = struct {
     document: std.ArrayList(u8),
     dirty: bool = false,
     prompt_text_buffer: []u8,
-    formatting_buffer: []u8,
+    scratch_buffer: []u8, // used for formatting, selection paste
     clipboard: std.ArrayList(u8),
 
     fn tick(editor: *Editor, event: Event) !bool {
@@ -122,26 +122,44 @@ const Editor = struct {
                     },
                     'o' => {
                         editor.cursor.moveMax(.right, editor.document.items);
-                        const indentation = lineIndentation(editor.document.items, editor.cursor.offset);
-                        try editor.insert("\n");
-                        for (0..indentation) |_| try editor.insert(" ");
+                        const indentation = lineIndentation(
+                            editor.document.items,
+                            editor.cursor.offset,
+                        );
+                        try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
+                        for (0..indentation) |_| try insert(
+                            &editor.document,
+                            &editor.cursor,
+                            &editor.dirty,
+                            " ",
+                        );
                         editor.mode = .insert;
                     },
                     'O' => {
                         editor.cursor.moveMax(.left, editor.document.items);
-                        const indentation = lineIndentation(editor.document.items, editor.cursor.offset);
-                        try editor.insert("\n");
+                        const indentation = lineIndentation(
+                            editor.document.items,
+                            editor.cursor.offset,
+                        );
+                        try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
                         editor.cursor.move(.up, 1, editor.document.items);
-                        for (0..indentation) |_| try editor.insert(" ");
+                        for (0..indentation) |_| try insert(
+                            &editor.document,
+                            &editor.cursor,
+                            &editor.dirty,
+                            " ",
+                        );
                         editor.mode = .insert;
                     },
                     // Enable/disable selection.
                     'v' => editor.cursor.anchor =
                         if (editor.cursor.anchor != null) null else editor.cursor.offset,
-                    'd' => {
-                        delete(&editor.document, &editor.clipboard, &editor.cursor);
-                        editor.dirty = true;
-                    },
+                    'd' => delete(
+                        &editor.document,
+                        &editor.clipboard,
+                        &editor.cursor,
+                        &editor.dirty,
+                    ),
                     ':' => editor.mode = .{
                         .prompt = .{
                             .command = .{
@@ -152,19 +170,13 @@ const Editor = struct {
                     },
                     'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
                     // 'P' => {}, // TODO: paste before
-                    'p' => if (editor.clipboard.items.len > 0) {
-                        // If there is a selection, paste substitutes selection. Don't need to move
-                        // right before pasting. Pasting on a newline would insert on the next line.
-                        // Make an exception for that too.
-                        const on_newline = editor.document.items[editor.cursor.offset] == '\n';
-                        if (editor.cursor.selection()) |selection| {
-                            delete(&editor.document, &editor.clipboard, &editor.cursor);
-                            editor.cursor.update(editor.document.items, selection.head, .snap_update);
-                        } else if (!on_newline) editor.cursor.move(.right, 1, editor.document.items);
-
-                        try editor.insert(editor.clipboard.items);
-                        if (!on_newline) editor.cursor.move(.left, 1, editor.document.items);
-                    },
+                    'p' => try paste(
+                        &editor.document,
+                        &editor.clipboard,
+                        editor.scratch_buffer,
+                        &editor.cursor,
+                        &editor.dirty,
+                    ),
                     'z' => editor.centreCursorVertically(),
                     else => {},
                 },
@@ -193,16 +205,16 @@ const Editor = struct {
                 editor.cursor.anchor = null;
                 switch (event) {
                     .escape => editor.mode = .normal,
-                    .ascii => |c| try editor.insert(&.{c}),
+                    .ascii => |c| try insert(&editor.document, &editor.cursor, &editor.dirty, &.{c}),
                     .backspace => if (editor.cursor.offset != 0) {
                         editor.cursor.move(.left, 1, editor.document.items);
-                        delete(&editor.document, &editor.clipboard, &editor.cursor);
+                        delete(&editor.document, &editor.clipboard, &editor.cursor, &editor.dirty);
                     },
-                    .tab => try editor.insert("    "),
+                    .tab => try insert(&editor.document, &editor.cursor, &editor.dirty, "    "),
                     .enter => {
                         const indent_count = lineIndentation(editor.document.items, editor.cursor.offset);
-                        try editor.insert("\n");
-                        for (0..indent_count) |_| try editor.insert(" ");
+                        try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
+                        for (0..indent_count) |_| try insert(&editor.document, &editor.cursor, &editor.dirty, " ");
                     },
                     .chord => {}, // do nothing
                     .resize => unreachable,
@@ -501,8 +513,8 @@ const Editor = struct {
         // -1 accounts for the ':' shown when the prompt is active.
         const prompt_text_buffer = try allocator.alloc(u8, options.col_count_max - 1);
         errdefer allocator.free(prompt_text_buffer);
-        const formatting_buffer = try allocator.alloc(u8, options.file_size_max);
-        errdefer allocator.free(formatting_buffer);
+        const scratch_buffer = try allocator.alloc(u8, options.file_size_max);
+        errdefer allocator.free(scratch_buffer);
 
         const cursor_offset_start: ?u32 = offsetFromPosition(
             document.items,
@@ -530,7 +542,7 @@ const Editor = struct {
             },
             .clipboard = clipboard,
             .prompt_text_buffer = prompt_text_buffer,
-            .formatting_buffer = formatting_buffer,
+            .scratch_buffer = scratch_buffer,
             .col_count_max = options.col_count_max,
             .row_count_max = options.row_count_max,
         };
@@ -540,16 +552,7 @@ const Editor = struct {
         editor.document.deinit(allocator);
         editor.clipboard.deinit(allocator);
         allocator.free(editor.prompt_text_buffer);
-        allocator.free(editor.formatting_buffer);
-    }
-
-    fn insert(editor: *Editor, text: []const u8) Error!void {
-        assert(text.len > 0);
-        assert(editor.cursor.offset < editor.document.items.len);
-        editor.document.insertSliceBounded(editor.cursor.offset, text) catch
-            return Error.FileTooLong;
-        editor.cursor.move(.right, @intCast(text.len), editor.document.items);
-        editor.dirty = true;
+        allocator.free(editor.scratch_buffer);
     }
 
     /// Format document if formatter available then save. Present error message if formatting fails.
@@ -600,31 +603,31 @@ const Editor = struct {
         const formatted = switch (document_kind) {
             .testing => try formatDocumentWithTestFormatter(
                 editor.document.items,
-                editor.formatting_buffer,
+                editor.scratch_buffer,
             ),
             .zig => try runFormatter(
                 editor.io,
                 &.{ "zig", "fmt", "--stdin" },
                 editor.document.items,
-                editor.formatting_buffer,
+                editor.scratch_buffer,
             ),
             .markdown => try runFormatter(
                 editor.io,
                 &.{ "prettier", "--parser", "markdown" },
                 editor.document.items,
-                editor.formatting_buffer,
+                editor.scratch_buffer,
             ),
             .sh => try runFormatter(
                 editor.io,
                 &.{ "shfmt", "--indent", "4" },
                 editor.document.items,
-                editor.formatting_buffer,
+                editor.scratch_buffer,
             ),
             .c => try runFormatter(
                 editor.io,
                 &.{ "clang-format", "--style=Google" },
                 editor.document.items,
-                editor.formatting_buffer,
+                editor.scratch_buffer,
             ),
             .unknown => return null,
         } orelse return false;
@@ -919,25 +922,217 @@ const Cursor = struct {
     }
 };
 
-// fn paste(document: *std.ArrayList(u8), clipboard: *std.ArrayList(u8), cursor: *Cursor) void {}
+/// All modifications to the document happen through this function. This allows us to handle all
+/// modification checks and invariants in one place. Replacing an empty range (offset with size 0)
+/// is insertion. Replacing a range with nothing is deletion.
+fn replace(
+    document: *std.ArrayList(u8),
+    dirty: *bool,
+    offset: u32,
+    size: u32,
+    text: []const u8,
+) error{FileTooLong}!void {
+    assert(offset < document.items.len);
+    if (size > 0) assert(offset + size - 1 < document.items.len); // -1: size -> offset
+    assert(size > 0 or text.len > 0); // must be an insertion or deletion, should never be a noop
 
-// test paste {} // paste over selection, clipboard becomes selection
+    // The document must always end in a newline. Work out up front whether we'll need to append
+    // one so that we can check the final size before modifying anything. Either the whole
+    // replacement happens or none of it does.
+    const newline_needed = newline_needed: {
+        // If the range doesn't reach the end of the document the existing trailing newline stays.
+        if (offset + size < document.items.len) break :newline_needed false;
+        if (text.len == 0) {
+            // We're deleting a range that reaches the end of the document, check if the last byte
+            // before the range (becomes the end) is a newline.
+            if (offset == 0) break :newline_needed true; // deleting entire document
+            if (document.items[offset - 1] != '\n') break :newline_needed true;
+        } else {
+            // Replacing end of file with text. Check the last byte.
+            if (text[text.len - 1] != '\n') break :newline_needed true;
+        }
+        break :newline_needed false;
+    };
+    const size_new = document.items.len - size + text.len + @intFromBool(newline_needed);
+    if (size_new > document.capacity) return error.FileTooLong;
 
-fn delete(document: *std.ArrayList(u8), clipboard: *std.ArrayList(u8), cursor: *Cursor) void {
+    document.replaceRangeAssumeCapacity(offset, size, text);
+    if (newline_needed) document.appendAssumeCapacity('\n');
+    assert(document.items.len == size_new);
+    assert(document.last() == '\n');
+    dirty.* = true;
+}
+
+test replace {
+    var document_buffer: [8]u8 = undefined;
+    var document: std.ArrayList(u8) = .initBuffer(&document_buffer);
+    var dirty = false;
+
+    // Full document. Replacing the last line with text that doesn't end in a newline needs one
+    // more byte than we have. Nothing should change.
+    document.appendSliceAssumeCapacity("abc\ndef\n");
+    try std.testing.expectError(error.FileTooLong, replace(&document, &dirty, 4, 4, "wxyz"));
+    try std.testing.expectEqualStrings("abc\ndef\n", document.items);
+    try std.testing.expect(!dirty);
+
+    // Same but one byte shorter fits exactly once the newline is added back.
+    try replace(&document, &dirty, 4, 4, "wxy");
+    try std.testing.expectEqualStrings("abc\nwxy\n", document.items);
+    try std.testing.expect(dirty);
+
+    // Insertion that overflows.
+    dirty = false;
+    try std.testing.expectError(error.FileTooLong, replace(&document, &dirty, 0, 0, "x"));
+    try std.testing.expectEqualStrings("abc\nwxy\n", document.items);
+    try std.testing.expect(!dirty);
+
+    // Deleting the trailing newline puts it back.
+    try replace(&document, &dirty, 7, 1, "");
+    try std.testing.expectEqualStrings("abc\nwxy\n", document.items);
+
+    // Deleting the last line including its newline. The byte before the range is already a
+    // newline so one isn't added.
+    try replace(&document, &dirty, 4, 4, "");
+    try std.testing.expectEqualStrings("abc\n", document.items);
+
+    // Deleting everything leaves a single newline.
+    try replace(&document, &dirty, 0, 4, "");
+    try std.testing.expectEqualStrings("\n", document.items);
+
+    // Replacing everything with text that ends in a newline doesn't add another.
+    try replace(&document, &dirty, 0, 1, "hello\n");
+    try std.testing.expectEqualStrings("hello\n", document.items);
+}
+
+fn insert(
+    document: *std.ArrayList(u8),
+    cursor: *Cursor,
+    dirty: *bool,
+    text: []const u8,
+) error{FileTooLong}!void {
+    assert(text.len > 0);
+    assert(cursor.offset < document.items.len);
+    try replace(document, dirty, cursor.offset, 0, text);
+    cursor.move(.right, @intCast(text.len), document.items);
+}
+
+test insert {}
+
+fn paste(
+    document: *std.ArrayList(u8),
+    clipboard: *std.ArrayList(u8),
+    scratch_buffer: []u8,
+    cursor: *Cursor,
+    dirty: *bool,
+) Error!void {
+    if (clipboard.items.len == 0) return;
+
+    // If there is a selection, pasting swaps the clipboard contents with the selection.
+    if (cursor.selection()) |selection| {
+        // Save selection in scratch until it can be copied to the clipboard.
+        var scratch: std.ArrayList(u8) = .initBuffer(scratch_buffer);
+        scratch.appendSliceAssumeCapacity(selection.slice(document.items));
+
+        // Replace the selection with what's in the current clipboard. Move the cursor to the end
+        // of what we just pasted.
+        try replace(document, dirty, selection.head, selection.size(), clipboard.items);
+        cursor.update(
+            document.items,
+            @intCast(selection.head + clipboard.items.len - 1),
+            .snap_update,
+        );
+        cursor.anchor = null;
+
+        clipboard.clearRetainingCapacity();
+        clipboard.appendSliceAssumeCapacity(scratch.items);
+    } else {
+        // Normal pasting starts to the right of the cursor so move right first. Make an exception
+        // when pasting on a newline so we're not inserting on the next line.
+        const paste_right = document.items[cursor.offset] != '\n';
+        if (paste_right) cursor.move(.right, 1, document.items);
+        try insert(document, cursor, dirty, clipboard.items);
+        if (paste_right) cursor.move(.left, 1, document.items);
+    }
+}
+
+test paste {
+    const document_original = "Hello, world!\n  All your codebase are belong to us.\n";
+    var document_buffer: [64]u8 = undefined;
+    var document: std.ArrayList(u8) = .initBuffer(&document_buffer);
+    document.appendSliceAssumeCapacity(document_original);
+    var clipboard_buffer: [document_buffer.len]u8 = undefined;
+    var clipboard: std.ArrayList(u8) = .initBuffer(&clipboard_buffer);
+    var scratch_buffer: [document_buffer.len]u8 = undefined;
+    var cursor: Cursor = undefined;
+    var dirty = false;
+
+    cursor = .{ .offset = 0, .anchor = 4, .line_offset_snap = 0 };
+    yank(document.items, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("Hello", clipboard.items);
+    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    try std.testing.expect(!dirty);
+
+    cursor = .{ .offset = 4, .anchor = null, .line_offset_snap = 0 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings("Hello", clipboard.items);
+    try std.testing.expectEqualStrings("HelloHello, world!\n", document.items[0..19]);
+    try std.testing.expect(dirty);
+    try std.testing.expectEqual(9, cursor.offset);
+    try std.testing.expectEqual(null, cursor.anchor);
+    try std.testing.expectEqual(9, cursor.line_offset_snap);
+
+    dirty = false;
+    cursor = .{ .offset = 0, .anchor = 9, .line_offset_snap = 0 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings("Hello, world!\n", document.items[0..14]);
+    try std.testing.expectEqualStrings("HelloHello", clipboard.items);
+    try std.testing.expect(dirty);
+    try std.testing.expectEqual(4, cursor.offset);
+    try std.testing.expectEqual(null, cursor.anchor);
+    try std.testing.expectEqual(cursor.offset, cursor.line_offset_snap);
+
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original);
+    dirty = false;
+    cursor = .{
+        .offset = 0,
+        .anchor = @intCast(document.items.len - 1), // select all
+        .line_offset_snap = 0,
+    };
+    yank(document.items, &clipboard, &cursor);
+    try std.testing.expectEqualStrings(document_original, clipboard.items);
+    cursor = .{
+        .offset = 0,
+        .anchor = @intCast(document.items.len - 1), // select all
+        .line_offset_snap = 0,
+    };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(document_original, clipboard.items);
+    try std.testing.expectEqualStrings(document_original, document.items);
+    try std.testing.expect(dirty);
+    try std.testing.expectEqual(document.items.len - 1, cursor.offset);
+    try std.testing.expectEqual(null, cursor.anchor);
+    try std.testing.expectEqual(lineOffset(document.items, cursor.offset), cursor.line_offset_snap);
+}
+
+fn delete(
+    document: *std.ArrayList(u8),
+    clipboard: *std.ArrayList(u8),
+    cursor: *Cursor,
+    dirty: *bool,
+) void {
     // If it's a selection, snap cursor to head after yank.
     const cursor_offset = cursor.head();
 
     yankInner(document.items, clipboard, cursor.*);
 
+    // We're removing text here so this should never return an error.
     if (cursor.selection()) |selection| {
-        // We're removing text here so this should never return an error.
-        document.replaceRangeAssumeCapacity(selection.head, selection.size(), "");
+        replace(document, dirty, selection.head, selection.size(), "") catch unreachable;
         cursor.anchor = null;
-    } else _ = document.orderedRemove(cursor.offset);
-
-    // File must always end in a newline.
-    if (document.items.len == 0 or document.last() != '\n')
-        document.appendAssumeCapacity('\n');
+    } else {
+        replace(document, dirty, cursor.offset, 1, "") catch unreachable;
+    }
 
     cursor.update(document.items, cursor_offset, .snap_update);
 }
@@ -950,28 +1145,33 @@ test delete {
     var clipboard_buffer: [document_original.len]u8 = undefined;
     var clipboard: std.ArrayList(u8) = .initBuffer(&clipboard_buffer);
     var cursor: Cursor = undefined;
+    var dirty = false;
 
     cursor = .{ // select all
         .offset = @intCast(document.items.len - 1),
         .anchor = 0,
         .line_offset_snap = @intCast(document.items.len - 1),
     };
-    delete(&document, &clipboard, &cursor);
+    delete(&document, &clipboard, &cursor, &dirty);
     try std.testing.expectEqualStrings("\n", document.items);
     try std.testing.expectEqualStrings(document_original, clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
     try std.testing.expect(cursor.offset == 0); // snap back to head
+    try std.testing.expect(dirty);
 
+    dirty = false;
     document.clearRetainingCapacity();
     document.appendSliceAssumeCapacity(document_original); // refill document
     cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 };
-    delete(&document, &clipboard, &cursor);
+    delete(&document, &clipboard, &cursor, &dirty);
     try std.testing.expectEqualStrings("H", clipboard.items);
     try std.testing.expectEqualStrings(document_original[1..], document.items);
     try std.testing.expect(cursor.offset == 0);
+    try std.testing.expect(dirty);
 
+    dirty = false;
     cursor = .{ .offset = 6, .anchor = 12, .line_offset_snap = 6 };
-    delete(&document, &clipboard, &cursor);
+    delete(&document, &clipboard, &cursor, &dirty);
     try std.testing.expectEqualStrings("world!\n", clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
     try std.testing.expect(cursor.offset == 6); // stays at head
@@ -979,6 +1179,7 @@ test delete {
         "ello,   All your codebase are belong to us.\n",
         document.items,
     );
+    try std.testing.expect(dirty);
 }
 
 fn yankInner(document: []const u8, clipboard: *std.ArrayList(u8), cursor: Cursor) void {
@@ -1158,7 +1359,7 @@ fn runFormatter(
     io: std.Io,
     argv: []const []const u8,
     document: []const u8,
-    formatting_buffer: []u8,
+    scratch_buffer: []u8,
 ) !?[]const u8 {
     var child = try std.process.spawn(io, .{
         .argv = argv,
@@ -1175,12 +1376,12 @@ fn runFormatter(
 
     // Resulting stdout is new document.
     var stdout_reader = child.stdout.?.reader(io, &.{});
-    var buffer_writer: std.Io.Writer = .fixed(formatting_buffer);
+    var buffer_writer: std.Io.Writer = .fixed(scratch_buffer);
     const stdout_size = try stdout_reader.interface.streamRemaining(&buffer_writer);
 
     const term = try child.wait(io);
     if (!term.success()) return null;
-    return formatting_buffer[0..stdout_size];
+    return scratch_buffer[0..stdout_size];
 }
 
 fn fuzzKkpParser(reader_buffer: *[128]u8, smith: *std.testing.Smith) !void {
@@ -1204,10 +1405,10 @@ test fuzzKkpParser {
 }
 
 /// Fake formatter for testing. Double all blank lines. Remove all indentation.
-fn formatDocumentWithTestFormatter(document: []const u8, formatting_buffer: []u8) ![]const u8 {
+fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) ![]const u8 {
     // Double all blank lines ("\n\n" -> "\n\n\n").
-    const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", formatting_buffer);
-    const with_newlines_doubled = formatting_buffer[0 .. document.len + replacement_count];
+    const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", scratch_buffer);
+    const with_newlines_doubled = scratch_buffer[0 .. document.len + replacement_count];
 
     var formatted: std.ArrayList(u8) = .fromOwnedSlice(with_newlines_doubled);
 
@@ -1649,8 +1850,8 @@ pub const EditorFuzzContext = struct {
         errdefer editor.document.deinit(allocator);
         editor.clipboard = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
         errdefer editor.clipboard.deinit(allocator);
-        editor.formatting_buffer = try allocator.alloc(u8, EditorFuzzContext.file_size_max);
-        errdefer allocator.free(editor.formatting_buffer);
+        editor.scratch_buffer = try allocator.alloc(u8, EditorFuzzContext.file_size_max);
+        errdefer allocator.free(editor.scratch_buffer);
         editor.prompt_text_buffer = try allocator.alloc(u8, EditorFuzzContext.col_count_max - 1);
         errdefer allocator.free(editor.prompt_text_buffer);
 
@@ -1707,7 +1908,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
             break :blk ctx.editor.clipboard;
         },
         .prompt_text_buffer = ctx.editor.prompt_text_buffer,
-        .formatting_buffer = ctx.editor.formatting_buffer,
+        .scratch_buffer = ctx.editor.scratch_buffer,
     };
 
     const cursor_position = position(ctx.editor.document.items, ctx.editor.cursor.offset);
