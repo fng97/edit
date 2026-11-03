@@ -296,6 +296,8 @@ const Editor = struct {
             lineSize(editor.document.items, editor.cursor.offset) - 1,
         ));
         assert(cursor_position.line_offset <= editor.cursor.line_offset_snap);
+        // Selection anchor must point into the document.
+        if (editor.cursor.anchor) |anchor| assert(anchor < editor.document.items.len);
 
         try editor.focus(cursor_position);
         try editor.render(cursor_position);
@@ -932,9 +934,16 @@ fn replace(
     size: u32,
     text: []const u8,
 ) error{FileTooLong}!void {
+    assert(document.items.len > 0);
+    assert(document.last() == '\n');
     assert(offset < document.items.len);
-    if (size > 0) assert(offset + size - 1 < document.items.len); // -1: size -> offset
+    assert(offset + size <= document.items.len);
     assert(size > 0 or text.len > 0); // must be an insertion or deletion, should never be a noop
+    // Text must not alias the document.
+    assert(text.len == 0 or
+        @intFromPtr(text.ptr) >= @intFromPtr(document.items.ptr) + document.capacity or
+        @intFromPtr(text.ptr) + text.len <= @intFromPtr(document.items.ptr));
+    for (text) |c| assert(characterValid(c));
 
     // The document must always end in a newline. Work out up front whether we'll need to append
     // one so that we can check the final size before modifying anything. Either the whole
@@ -1012,11 +1021,70 @@ fn insert(
 ) error{FileTooLong}!void {
     assert(text.len > 0);
     assert(cursor.offset < document.items.len);
+    const offset = cursor.offset;
     try replace(document, dirty, cursor.offset, 0, text);
     cursor.move(.right, @intCast(text.len), document.items);
+    assert(cursor.offset == offset + text.len);
 }
 
-test insert {}
+test insert {
+    var document_buffer: [16]u8 = undefined;
+    var document: std.ArrayList(u8) = .initBuffer(&document_buffer);
+    document.appendSliceAssumeCapacity("abc\ndef\n");
+    var cursor: Cursor = undefined;
+    var dirty = false;
+
+    // Mid-line. Cursor ends up on the character after the inserted text.
+    cursor = .{ .offset = 1, .anchor = null, .line_offset_snap = 1 };
+    try insert(&document, &cursor, &dirty, "xy");
+    try std.testing.expectEqualStrings("axybc\ndef\n", document.items);
+    try std.testing.expectEqual(3, cursor.offset);
+    try std.testing.expectEqual(3, cursor.line_offset_snap);
+    try std.testing.expect(dirty);
+
+    // Start of document.
+    dirty = false;
+    cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 };
+    try insert(&document, &cursor, &dirty, "z");
+    try std.testing.expectEqualStrings("zaxybc\ndef\n", document.items);
+    try std.testing.expectEqual(1, cursor.offset);
+    try std.testing.expectEqual(1, cursor.line_offset_snap);
+    try std.testing.expect(dirty);
+
+    // Newline splits the line. Cursor moves to the start of the new line.
+    cursor = .{ .offset = 3, .anchor = null, .line_offset_snap = 3 };
+    try insert(&document, &cursor, &dirty, "\n");
+    try std.testing.expectEqualStrings("zax\nybc\ndef\n", document.items);
+    try std.testing.expectEqual(4, cursor.offset);
+    try std.testing.expectEqual(0, cursor.line_offset_snap);
+
+    // Before the trailing newline (end of last line). Cursor stays on the trailing newline.
+    cursor = .{ .offset = 11, .anchor = null, .line_offset_snap = 3 };
+    try insert(&document, &cursor, &dirty, "g");
+    try std.testing.expectEqualStrings("zax\nybc\ndefg\n", document.items);
+    try std.testing.expectEqual(12, cursor.offset);
+    try std.testing.expectEqual(4, cursor.line_offset_snap);
+
+    // Text ending in a newline before the trailing newline. Leaves an empty last line, no extra
+    // newline is added.
+    try insert(&document, &cursor, &dirty, "\n");
+    try std.testing.expectEqualStrings("zax\nybc\ndefg\n\n", document.items);
+    try std.testing.expectEqual(13, cursor.offset);
+    try std.testing.expectEqual(0, cursor.line_offset_snap);
+
+    // Overflow. Document, cursor and dirty are untouched.
+    dirty = false;
+    const cursor_before = cursor;
+    try std.testing.expectError(error.FileTooLong, insert(&document, &cursor, &dirty, "xyz"));
+    try std.testing.expectEqualStrings("zax\nybc\ndefg\n\n", document.items);
+    try std.testing.expectEqual(cursor_before, cursor);
+    try std.testing.expect(!dirty);
+
+    // Fills the buffer exactly.
+    try insert(&document, &cursor, &dirty, "xy");
+    try std.testing.expectEqual(document.capacity, document.items.len);
+    try std.testing.expectEqualStrings("zax\nybc\ndefg\nxy\n", document.items);
+}
 
 fn paste(
     document: *std.ArrayList(u8),
@@ -1024,7 +1092,11 @@ fn paste(
     scratch_buffer: []u8,
     cursor: *Cursor,
     dirty: *bool,
-) Error!void {
+) error{FileTooLong}!void {
+    // Any selection must fit in the clipboard and scratch buffer.
+    assert(clipboard.capacity >= document.capacity);
+    assert(scratch_buffer.len >= document.items.len);
+
     if (clipboard.items.len == 0) return;
 
     // If there is a selection, pasting swaps the clipboard contents with the selection.
@@ -1045,14 +1117,17 @@ fn paste(
 
         clipboard.clearRetainingCapacity();
         clipboard.appendSliceAssumeCapacity(scratch.items);
+        assert(clipboard.items.len == selection.size());
     } else {
-        // Normal pasting starts to the right of the cursor so move right first. Make an exception
-        // when pasting on a newline so we're not inserting on the next line.
-        const paste_right = document.items[cursor.offset] != '\n';
-        if (paste_right) cursor.move(.right, 1, document.items);
-        try insert(document, cursor, dirty, clipboard.items);
-        if (paste_right) cursor.move(.left, 1, document.items);
+        // Normal pasting starts to the right of the cursor. Make an exception when pasting on a
+        // newline so we're not inserting on the next line. Don't move the cursor until the paste
+        // has succeeded so that it's untouched on error.
+        const offset = cursor.offset + @intFromBool(document.items[cursor.offset] != '\n');
+        try replace(document, dirty, offset, 0, clipboard.items);
+        // Cursor on the last pasted byte, same as when pasting over a selection.
+        cursor.update(document.items, @intCast(offset + clipboard.items.len - 1), .snap_update);
     }
+    assert(cursor.anchor == null);
 }
 
 test paste {
@@ -1066,41 +1141,65 @@ test paste {
     var cursor: Cursor = undefined;
     var dirty = false;
 
-    cursor = .{ .offset = 0, .anchor = 4, .line_offset_snap = 0 };
-    yank(document.items, &clipboard, &cursor);
-    try std.testing.expectEqualStrings("Hello", clipboard.items);
-    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    // Empty clipboard does nothing.
+    cursor = .{ .offset = 4, .anchor = null, .line_offset_snap = 4 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(document_original, document.items);
+    try std.testing.expectEqual(4, cursor.offset);
     try std.testing.expect(!dirty);
 
-    cursor = .{ .offset = 4, .anchor = null, .line_offset_snap = 0 };
+    // Paste after the cursor. Cursor ends on the last pasted byte.
+    clipboard.appendSliceAssumeCapacity("Hello");
     try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
     try std.testing.expectEqualStrings("Hello", clipboard.items);
-    try std.testing.expectEqualStrings("HelloHello, world!\n", document.items[0..19]);
+    try std.testing.expectEqualStrings(
+        "HelloHello, world!\n  All your codebase are belong to us.\n",
+        document.items,
+    );
     try std.testing.expect(dirty);
     try std.testing.expectEqual(9, cursor.offset);
     try std.testing.expectEqual(null, cursor.anchor);
     try std.testing.expectEqual(9, cursor.line_offset_snap);
 
+    // Paste over a selection (cursor at the head). Clipboard and selection swap.
     dirty = false;
     cursor = .{ .offset = 0, .anchor = 9, .line_offset_snap = 0 };
     try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
-    try std.testing.expectEqualStrings("Hello, world!\n", document.items[0..14]);
+    try std.testing.expectEqualStrings(document_original, document.items);
     try std.testing.expectEqualStrings("HelloHello", clipboard.items);
     try std.testing.expect(dirty);
     try std.testing.expectEqual(4, cursor.offset);
     try std.testing.expectEqual(null, cursor.anchor);
-    try std.testing.expectEqual(cursor.offset, cursor.line_offset_snap);
+    try std.testing.expectEqual(4, cursor.line_offset_snap);
 
+    // Paste over a selection (cursor at the tail).
+    cursor = .{ .offset = 4, .anchor = 0, .line_offset_snap = 4 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(
+        "HelloHello, world!\n  All your codebase are belong to us.\n",
+        document.items,
+    );
+    try std.testing.expectEqualStrings("Hello", clipboard.items);
+    try std.testing.expectEqual(9, cursor.offset);
+    try std.testing.expectEqual(null, cursor.anchor);
+    try std.testing.expectEqual(9, cursor.line_offset_snap);
+
+    // Paste on a newline inserts before it rather than on the next line.
+    cursor = .{ .offset = 18, .anchor = null, .line_offset_snap = 18 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(
+        "HelloHello, world!Hello\n  All your codebase are belong to us.\n",
+        document.items,
+    );
+    try std.testing.expectEqual(22, cursor.offset);
+    try std.testing.expectEqual(22, cursor.line_offset_snap);
+
+    // Select all and paste the whole document over itself.
     document.clearRetainingCapacity();
     document.appendSliceAssumeCapacity(document_original);
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSliceAssumeCapacity(document_original);
     dirty = false;
-    cursor = .{
-        .offset = 0,
-        .anchor = @intCast(document.items.len - 1), // select all
-        .line_offset_snap = 0,
-    };
-    yank(document.items, &clipboard, &cursor);
-    try std.testing.expectEqualStrings(document_original, clipboard.items);
     cursor = .{
         .offset = 0,
         .anchor = @intCast(document.items.len - 1), // select all
@@ -1113,6 +1212,34 @@ test paste {
     try std.testing.expectEqual(document.items.len - 1, cursor.offset);
     try std.testing.expectEqual(null, cursor.anchor);
     try std.testing.expectEqual(lineOffset(document.items, cursor.offset), cursor.line_offset_snap);
+
+    // Too long without a selection. Nothing changes, including the cursor.
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSliceAssumeCapacity("0123456789abc"); // 52 + 13 > 64
+    dirty = false;
+    cursor = .{ .offset = 4, .anchor = null, .line_offset_snap = 4 };
+    var cursor_before = cursor;
+    try std.testing.expectError(
+        error.FileTooLong,
+        paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty),
+    );
+    try std.testing.expectEqualStrings(document_original, document.items);
+    try std.testing.expectEqualStrings("0123456789abc", clipboard.items);
+    try std.testing.expectEqual(cursor_before, cursor);
+    try std.testing.expect(!dirty);
+
+    // Too long over a selection. Nothing changes, selection is kept.
+    clipboard.appendSliceAssumeCapacity("d"); // 52 - 1 + 14 > 64
+    cursor = .{ .offset = 0, .anchor = 0, .line_offset_snap = 0 };
+    cursor_before = cursor;
+    try std.testing.expectError(
+        error.FileTooLong,
+        paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty),
+    );
+    try std.testing.expectEqualStrings(document_original, document.items);
+    try std.testing.expectEqualStrings("0123456789abcd", clipboard.items);
+    try std.testing.expectEqual(cursor_before, cursor);
+    try std.testing.expect(!dirty);
 }
 
 fn delete(
@@ -1126,15 +1253,16 @@ fn delete(
 
     yankInner(document.items, clipboard, cursor.*);
 
-    // We're removing text here so this should never return an error.
-    if (cursor.selection()) |selection| {
-        replace(document, dirty, selection.head, selection.size(), "") catch unreachable;
-        cursor.anchor = null;
-    } else {
-        replace(document, dirty, cursor.offset, 1, "") catch unreachable;
-    }
+    // Delete from the head of the selection or, without a selection, the byte under the cursor.
+    const size: u32 = if (cursor.selection()) |selection| selection.size() else 1;
+    // We're removing at least one byte. Even if the trailing newline has to be added back the
+    // document can't grow, so this never returns an error.
+    assert(size > 0);
+    replace(document, dirty, cursor_offset, size, "") catch unreachable;
+    cursor.anchor = null;
 
     cursor.update(document.items, cursor_offset, .snap_update);
+    assert(cursor.offset < document.items.len);
 }
 
 test delete {
@@ -1180,9 +1308,36 @@ test delete {
         document.items,
     );
     try std.testing.expect(dirty);
+
+    // Deleting a newline between lines joins them.
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original); // refill document
+    cursor = .{ .offset = 13, .anchor = null, .line_offset_snap = 13 };
+    delete(&document, &clipboard, &cursor, &dirty);
+    try std.testing.expectEqualStrings("\n", clipboard.items);
+    try std.testing.expectEqualStrings(
+        "Hello, world!  All your codebase are belong to us.\n",
+        document.items,
+    );
+    try std.testing.expectEqual(13, cursor.offset);
+    try std.testing.expectEqual(13, cursor.line_offset_snap);
+
+    // Deleting the trailing newline puts it back. The document is unchanged but still marked
+    // dirty (harmless false positive).
+    dirty = false;
+    cursor = .{ .offset = 50, .anchor = null, .line_offset_snap = 50 };
+    delete(&document, &clipboard, &cursor, &dirty);
+    try std.testing.expectEqualStrings("\n", clipboard.items);
+    try std.testing.expectEqualStrings(
+        "Hello, world!  All your codebase are belong to us.\n",
+        document.items,
+    );
+    try std.testing.expectEqual(50, cursor.offset);
+    try std.testing.expect(dirty);
 }
 
 fn yankInner(document: []const u8, clipboard: *std.ArrayList(u8), cursor: Cursor) void {
+    assert(clipboard.capacity >= document.len); // any selection fits
     clipboard.clearRetainingCapacity();
     if (cursor.selection()) |selection|
         clipboard.appendSliceAssumeCapacity(selection.slice(document))
@@ -1214,12 +1369,26 @@ test yank {
     try std.testing.expectEqualStrings("world!\n", clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
     try std.testing.expect(cursor.offset == 7); // snap back to head
+    try std.testing.expectEqual(7, cursor.line_offset_snap);
 
-    cursor = .{ .offset = document.len - 1, .anchor = 0, .line_offset_snap = 0 }; // select all
+    // Cursor at the tail of a selection snaps back to the head.
+    cursor = .{ .offset = 18, .anchor = 7, .line_offset_snap = 4 };
+    yank(document, &clipboard, &cursor);
+    try std.testing.expectEqualStrings("world!\n  All", clipboard.items);
+    try std.testing.expect(cursor.anchor == null); // deselect after yank
+    try std.testing.expectEqual(7, cursor.offset);
+    try std.testing.expectEqual(7, cursor.line_offset_snap);
+
+    cursor = .{ // select all
+        .offset = document.len - 1,
+        .anchor = 0,
+        .line_offset_snap = lineOffset(document, document.len - 1),
+    };
     yank(document, &clipboard, &cursor);
     try std.testing.expectEqualStrings(document, clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
     try std.testing.expect(cursor.offset == 0); // snap back to head
+    try std.testing.expectEqual(0, cursor.line_offset_snap);
 }
 
 const Error = error{
