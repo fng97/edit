@@ -1551,12 +1551,14 @@ test fuzzKkpParser {
 }
 
 /// Fake formatter for testing. Double all blank lines. Remove all indentation. Like a real
-/// formatter on a syntax error, fail (return null) if braces are unbalanced.
+/// formatter on a syntax error, fail (return null) if braces are unbalanced. Also fail if the
+/// output doesn't fit in the scratch buffer, like `runFormatter`.
 fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) ?[]const u8 {
     if (std.mem.countScalar(u8, document, '{') != std.mem.countScalar(u8, document, '}'))
         return null;
 
     // Double all blank lines ("\n\n" -> "\n\n\n").
+    if (std.mem.replacementSize(u8, document, "\n\n", "\n\n\n") > scratch_buffer.len) return null;
     const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", scratch_buffer);
     const with_newlines_doubled = scratch_buffer[0 .. document.len + replacement_count];
 
@@ -1595,6 +1597,9 @@ test formatDocumentWithTestFormatter {
     try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter("", &buffer).?);
     try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter(" ", &buffer).?);
     try std.testing.expectEqualStrings("\n\n\n", formatDocumentWithTestFormatter(" \n\n", &buffer).?);
+
+    // Output doesn't fit.
+    try std.testing.expectEqual(null, formatDocumentWithTestFormatter("\n\n\n\n", buffer[0..5]));
 
     // Unbalanced braces fail.
     try std.testing.expectEqual(null, formatDocumentWithTestFormatter("int main() {\n", &buffer));
