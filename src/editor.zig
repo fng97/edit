@@ -956,7 +956,9 @@ fn replace(
 ) error{FileTooLong}!void {
     assert(document.items.len > 0);
     assert(document.last() == '\n');
-    assert(offset < document.items.len);
+    // Offset may equal the document size for an insertion at the very end (after the trailing
+    // newline). The second assert rules out deleting past the end.
+    assert(offset <= document.items.len);
     assert(offset + size <= document.items.len);
     assert(size > 0 or text.len > 0); // must be an insertion or deletion, should never be a noop
     // Text must not alias the document.
@@ -1031,6 +1033,10 @@ test replace {
     // Replacing everything with text that ends in a newline doesn't add another.
     try replace(&document, &dirty, 0, 1, "hello\n");
     try std.testing.expectEqualStrings("hello\n", document.items);
+
+    // Inserting at the very end, after the trailing newline.
+    try replace(&document, &dirty, 6, 0, "x\n");
+    try std.testing.expectEqualStrings("hello\nx\n", document.items);
 }
 
 fn insert(
@@ -1138,6 +1144,18 @@ fn paste(
         clipboard.clearRetainingCapacity();
         clipboard.appendSliceAssumeCapacity(scratch.items);
         assert(clipboard.items.len == selection.size());
+    } else if (clipboard.last() == '\n') { // line-wise paste
+        // Clipboard ends in a newline: treat it as whole lines and paste them below the cursor's
+        // line. On the last line the offset is the document size, an insertion after the trailing
+        // newline.
+        const offset = lineTail(document.items, cursor.offset) + 1;
+        try replace(document, dirty, offset, 0, clipboard.items);
+        // Cursor on the first pasted line, after its indentation.
+        cursor.update(
+            document.items,
+            offset + lineIndentation(document.items, offset),
+            .snap_update,
+        );
     } else {
         // Normal pasting starts to the right of the cursor. Make an exception when pasting on a
         // newline so we're not inserting on the next line. Don't move the cursor until the paste
@@ -1258,6 +1276,70 @@ test paste {
     );
     try std.testing.expectEqualStrings(document_original, document.items);
     try std.testing.expectEqualStrings("0123456789abcd", clipboard.items);
+    try std.testing.expectEqual(cursor_before, cursor);
+    try std.testing.expect(!dirty);
+
+    // Clipboard ending in a newline pastes whole lines below the cursor's line, wherever the
+    // cursor is in the line. Cursor ends on the first pasted line after its indentation.
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSliceAssumeCapacity("  foo\nbar\n");
+    cursor = .{ .offset = 4, .anchor = null, .line_offset_snap = 4 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(
+        "Hello, world!\n  foo\nbar\n  All your codebase are belong to us.\n",
+        document.items,
+    );
+    try std.testing.expectEqualStrings("  foo\nbar\n", clipboard.items);
+    try std.testing.expect(dirty);
+    try std.testing.expectEqual(16, cursor.offset);
+    try std.testing.expectEqual(2, cursor.line_offset_snap);
+
+    // Same with the cursor on the line's newline.
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original);
+    cursor = .{ .offset = 13, .anchor = null, .line_offset_snap = 13 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(
+        "Hello, world!\n  foo\nbar\n  All your codebase are belong to us.\n",
+        document.items,
+    );
+    try std.testing.expectEqual(16, cursor.offset);
+
+    // Pasting lines below the last line appends them to the document.
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original);
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSliceAssumeCapacity("bar\n");
+    cursor = .{ .offset = 20, .anchor = null, .line_offset_snap = 6 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(document_original ++ "bar\n", document.items);
+    try std.testing.expectEqual(document_original.len, cursor.offset);
+    try std.testing.expectEqual(0, cursor.line_offset_snap);
+
+    // A lone newline is an empty line.
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSliceAssumeCapacity("\n");
+    cursor = .{ .offset = 0, .anchor = null, .line_offset_snap = 0 };
+    try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
+    try std.testing.expectEqualStrings(
+        "Hello, world!\n\n  All your codebase are belong to us.\nbar\n",
+        document.items,
+    );
+    try std.testing.expectEqual(14, cursor.offset);
+    try std.testing.expectEqual(0, cursor.line_offset_snap);
+
+    // Too long. Nothing changes, including the cursor.
+    clipboard.clearRetainingCapacity();
+    clipboard.appendSliceAssumeCapacity("0123456789ab\n"); // 57 + 13 > 64
+    dirty = false;
+    cursor = .{ .offset = 4, .anchor = null, .line_offset_snap = 4 };
+    cursor_before = cursor;
+    const document_before = document.items.len;
+    try std.testing.expectError(
+        error.FileTooLong,
+        paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty),
+    );
+    try std.testing.expectEqual(document_before, document.items.len);
     try std.testing.expectEqual(cursor_before, cursor);
     try std.testing.expect(!dirty);
 }
