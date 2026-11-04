@@ -217,16 +217,32 @@ const Editor = struct {
                 editor.cursor.anchor = null;
                 switch (event) {
                     .escape => editor.mode = .normal,
-                    .ascii => |c| try insert(&editor.document, &editor.cursor, &editor.dirty, &.{c}),
+                    .ascii => |c| try insert(
+                        &editor.document,
+                        &editor.cursor,
+                        &editor.dirty,
+                        &.{c},
+                    ),
                     .backspace => if (editor.cursor.offset != 0) {
                         editor.cursor.move(.left, 1, editor.document.items);
-                        delete(&editor.document, &editor.clipboard, &editor.cursor, &editor.dirty);
+                        // Using replace here instead of delete because delete updates clipboard.
+                        replace(
+                            &editor.document,
+                            &editor.dirty,
+                            editor.cursor.offset,
+                            1,
+                            "",
+                        ) catch unreachable;
                     },
                     .tab => try insert(&editor.document, &editor.cursor, &editor.dirty, "    "),
                     .enter => {
-                        const indent_count = lineIndentation(editor.document.items, editor.cursor.offset);
+                        const indent_count = lineIndentation(
+                            editor.document.items,
+                            editor.cursor.offset,
+                        );
                         try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                        for (0..indent_count) |_| try insert(&editor.document, &editor.cursor, &editor.dirty, " ");
+                        for (0..indent_count) |_|
+                            try insert(&editor.document, &editor.cursor, &editor.dirty, " ");
                     },
                     .chord => {}, // do nothing
                     .resize => unreachable,

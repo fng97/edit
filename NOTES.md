@@ -7,6 +7,8 @@
 
 ## TODO
 
+- Display symbol for newlines.
+- Newlines should be included when highlighting.
 - Add `{`, `}`, `_`, and `%` motions.
 - Fix all fuzzer bugs.
 - Basic undo/redo. For now just individual modifications.
