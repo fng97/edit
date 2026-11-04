@@ -115,7 +115,8 @@ const Editor = struct {
                         editor.mode = .insert;
                     },
                     'a' => {
-                        editor.cursor.move(.right, 1, editor.document.items);
+                        if (editor.document.items[editor.cursor.offset] != '\n')
+                            editor.cursor.move(.right, 1, editor.document.items);
                         editor.mode = .insert;
                     },
                     'A' => {
