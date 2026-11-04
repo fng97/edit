@@ -819,7 +819,8 @@ pub fn main(init: std.process.Init) !void {
     defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
     try stdout.writeStreamingAll(io, terminal_init);
 
-    const dimensions = switch (try parseOne(reader)) {
+    var parser: Parser = .{};
+    const dimensions = switch (try Event.next(&parser, reader)) {
         .resize => |dimensions| dimensions,
         else => return error.FirstEventMustBeResize,
     };
@@ -853,7 +854,7 @@ pub fn main(init: std.process.Init) !void {
     // Do the initial render. In event loop we render on every tick.
     try editor.start();
     while (true) {
-        const event = try parseOne(reader);
+        const event = try Event.next(&parser, reader);
         if (!try editor.tick(event)) return;
     }
 }
@@ -1666,23 +1667,17 @@ const Modifiers = packed struct(u8) {
     caps_lock: bool = false,
     num_lock: bool = false,
 
-    /// Decode modifiers from ASCII value passed in escape sequence: "In the escape code, the
-    /// modifier value is encoded as a decimal number which is 1 + actual modifiers. So to represent
-    /// shift only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be 1 +
-    /// 0b101 = 6 and so on."
-    fn decode(encoded: []const u8) error{CsiSequenceInvalid}!Modifiers {
-        // u9 because if all bits were high we'd have 255 + 1 = 256, which cannot be stored in a u8.
-        const value = try parseCsiInt(encoded);
-        if (value == 0) return error.CsiSequenceInvalid;
-        if (value - 1 > std.math.maxInt(u8)) return error.CsiSequenceInvalid;
-        const byte: u8 = @intCast(value - 1);
+    /// Decode Kitty Keyboard Protocol modifiers from parameter: "In the escape code, the modifier
+    /// value is encoded as a decimal number which is 1 + actual modifiers. So to represent shift
+    /// only, the value would be 1 + 1 = 2, to represent ctrl+shift the value would be
+    /// 1 + 0b101 = 6 and so on."
+    fn decode(encoded: u32) ?Modifiers {
+        if (encoded == 0) return null;
+        if (encoded - 1 > std.math.maxInt(u8)) return null;
+        const byte: u8 = @intCast(encoded - 1);
         return @bitCast(byte);
     }
 };
-
-fn parseCsiInt(text: []const u8) error{CsiSequenceInvalid}!u32 {
-    return std.fmt.parseInt(u32, text, 10) catch return error.CsiSequenceInvalid;
-}
 
 const ViewportDimensions = struct { row_count: u32, col_count: u32 };
 
@@ -1694,79 +1689,67 @@ const Event = union(enum) {
     enter,
     escape,
     tab,
-};
 
-/// Handle input: parse Kitty Keyboard Protocol events.
-fn parseOne(reader: *std.Io.Reader) !Event {
-    switch (try reader.takeByte()) {
-        0x08, 0x7F => return .backspace,
-        0x09 => return .tab,
-        0x0D => return .enter,
-        // Key events that produce text are sent directly as UTF-8 encyoded bytes.
-        0x20...0x7E => |c| return .{ .ascii = c },
-        // Control sequences start with CSI (0x1b 0x5b) and end with a character in the range,
-        // 0x40-0x7E. See https://ghostty.org/docs/vt/concepts/sequences#escape-sequences and
-        // https://en.wikipedia.org/wiki/ANSI_escape_code.
-        '\x1b' => { // CSI is ESC [ (0x1b 0x5b).
-            if (try reader.takeByte() != '[') return error.CsiSequenceInvalid;
-
-            var params_buffer: [32]u8 = undefined;
-            var params_index: usize = 0;
-            // Read until the final byte so we have all that remains of the escape sequence.
-            const final = while (true) : (params_index += 1) switch (try reader.takeByte()) {
-                // Since we don't yet support a sequence that uses intermediates, just reject them.
-                0x20...0x2F => return error.CsiSequenceNotRecognised, // intermediates
-                0x30...0x3F => |byte| {
-                    if (params_index == params_buffer.len) return error.CsiSequenceTooLong;
-                    params_buffer[params_index] = byte;
-                },
-                0x40...0x7E => |final_byte| break final_byte,
-                else => return error.CsiSequenceInvalid,
-            };
-
-            const params = params_buffer[0..params_index];
-            var iter = std.mem.splitScalar(u8, params, ';');
-            // The escape sequences we support
-            const first_str = iter.next() orelse return error.CsiSequenceNotRecognised;
-            const first = try parseCsiInt(first_str);
-            switch (final) {
-                'u' => switch (first) {
-                    0x1b => return .escape,
-                    // Printable ASCII with modifiers. Codepoints must be the lowercase variant.
-                    0x20...0x7E => |c| return .{
-                        .chord = .{
-                            .ascii = @intCast(switch (c) {
-                                // CSI u unicode-key-code must be unshifted (e.g. a not A).
-                                'A'...'Z' => return error.CsiSequenceInvalid,
-                                else => c,
-                            }),
-                            // Modifiers may not be present. It defaults to 1 (no modifiers). For
-                            // now return an error if these are missing.
-                            .modifiers = try .decode(
-                                iter.next() orelse return error.CsiSequenceNotRecognised,
-                            ),
+    /// Give a parser action meaning. Returns null for actions that aren't recognised.
+    fn decode(action: Parser.Action) ?Event {
+        switch (action) {
+            .print => |c| return .{ .ascii = c },
+            .execute => |byte| switch (byte) {
+                0x08, 0x7F => return .backspace,
+                0x09 => return .tab,
+                0x0D => return .enter,
+                else => return null,
+            },
+            .esc_dispatch => return null,
+            .csi_dispatch => |csi| {
+                if (csi.private_marker) |_| return null;
+                if (csi.intermediates.len != 0) return null;
+                const first = if (0 < csi.params.len) csi.params[0] else return null;
+                switch (csi.final) {
+                    'u' => switch (first) {
+                        0x1b => return .escape,
+                        // Printable ASCII with modifiers. Codepoints must be the lowercase variant.
+                        0x20...0x7E => |c| return .{
+                            .chord = .{
+                                .ascii = @intCast(switch (c) {
+                                    // CSI u unicode-key-code must be unshifted (e.g. a not A).
+                                    'A'...'Z' => return null, // discard
+                                    else => c,
+                                }),
+                                // Modifiers may not be present. It defaults to 1 (no modifiers). For
+                                // now ignore events without them.
+                                .modifiers = Modifiers.decode(
+                                    if (1 < csi.params.len) csi.params[1] else return null,
+                                ) orelse return null,
+                            },
                         },
+                        else => return null,
                     },
-                    else => return error.CsiSequenceNotRecognised,
-                },
-                't' => switch (first) {
-                    // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t. See
-                    // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
-                    48 => return .{
-                        .resize = .{
-                            .row_count = try parseCsiInt(iter.next() orelse return error.CsiSequenceInvalid),
-                            .col_count = try parseCsiInt(iter.next() orelse return error.CsiSequenceInvalid),
+                    't' => switch (first) {
+                        // Resize: CSI 48 ; height_chars ; width_chars ; height_pix ; width_pix t. See
+                        // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
+                        48 => return .{
+                            .resize = .{
+                                .row_count = if (1 < csi.params.len) csi.params[1] else return null,
+                                .col_count = if (2 < csi.params.len) csi.params[2] else return null,
+                            },
                         },
+                        else => return null,
                     },
-                    else => return error.CsiSequenceNotRecognised,
-                },
-                else => return error.CsiSequenceNotRecognised,
-            }
-            unreachable;
-        },
-        else => return error.CsiSequenceNotRecognised,
+                    else => return null,
+                }
+            },
+        }
     }
-}
+
+    /// Pull actions from the parser until one decodes to an event.
+    fn next(parser: *Parser, reader: *std.Io.Reader) error{ EndOfStream, ReadFailed }!Event {
+        while (true) {
+            const action = try parser.next(reader);
+            if (Event.decode(action)) |event| return event;
+        }
+    }
+};
 
 fn runFormatter(
     io: std.Io,
@@ -1801,24 +1784,522 @@ fn runFormatter(
     return scratch_buffer[0..stdout_size];
 }
 
-fn fuzzKkpParser(reader_buffer: *[128]u8, smith: *std.testing.Smith) !void {
-    @disableInstrumentation();
+/// Paul Williams' DEC ANSI parser state machine. See https://vt100.net/emu/dec_ansi_parser.
+///
+/// Deviations from the spec:
+/// - DEL is executed rather than printed, since it's what the Backspace key sends.
+/// - 0x80-0xFF is ignored since UTF-8 is not yet supported.
+/// - C0 bytes mid-sequence are ignored.
+/// - BEL terminates any string, not just OSC. Due to how this is handled, ESC \ (ST) never produces
+///   an ESC dispatch.
+/// - High bytes mid-sequence are ignored rather than aborted.
+const Parser = struct {
+    param_buffer: [16]u32 = undefined,
+    intermediate_buffer: [2]u8 = undefined,
 
-    const size = smith.slice(reader_buffer);
-    var reader: std.Io.Reader = .fixed(reader_buffer[0..size]);
+    const Action = union(enum) {
+        print: u8,
+        execute: u8,
+        esc_dispatch: Esc,
+        csi_dispatch: Csi,
+    };
 
-    while (true) _ = parseOne(&reader) catch |err| switch (err) {
-        error.EndOfStream => return,
-        error.CsiSequenceNotRecognised,
-        error.CsiSequenceInvalid,
-        => continue,
-        else => return err,
+    /// Slices point into the parser and are valid until the next call to `next`.
+    const Esc = struct {
+        intermediates: []const u8,
+        final: u8,
+    };
+
+    /// Slices point into the parser and are valid until the next call to `next`.
+    const Csi = struct {
+        private_marker: ?u8,
+        params: []const u32,
+        intermediates: []const u8,
+        final: u8,
+    };
+
+    /// Pull bytes from the reader until an action is produced.
+    fn next(parser: *Parser, reader: *std.Io.Reader) error{ EndOfStream, ReadFailed }!Action {
+        var params: std.ArrayList(u32) = .initBuffer(&parser.param_buffer);
+        var intermediates: []const u8 = "";
+        var private: ?u8 = null;
+
+        state: switch (enum {
+            ground,
+            escape,
+            escape_intermediate,
+            escape_ignore,
+            string_ignore,
+            csi_entry,
+            csi_param,
+            csi_intermediate,
+            csi_ignore,
+        }.ground) {
+            // This trick lets us write shared code. The switch statments apply to multiple branches
+            // except for the final one which behaves as expected.
+            inline else => |state| {
+                const byte = try reader.takeByte();
+
+                switch (byte) { // anywhere
+                    0x07 => if (state != .ground and state != .string_ignore)
+                        continue :state state, // ignore BEL
+                    0x00...0x06, 0x08...0x17, 0x19, 0x1C...0x1F => if (state != .ground)
+                        continue :state state, // ignore C0
+                    0x18, 0x1A => return .{ .execute = byte }, // CAN, SUB: abort
+                    0x1B => { // abort and start a new sequence
+                        params.clearRetainingCapacity();
+                        intermediates = "";
+                        private = null;
+                        continue :state .escape;
+                    },
+                    0x7F => if (state != .ground) continue :state state, // ignore DEL
+                    0x80...0xFF => continue :state state, // ignore UTF-8 and C1, not supported
+                    else => {},
+                }
+
+                switch (state) {
+                    .ground => switch (byte) {
+                        0x18, 0x1A, 0x1B, 0x80...0xFF => unreachable, // handled above
+                        0x00...0x17, 0x19, 0x1C...0x1F => return .{ .execute = byte }, // C0
+                        0x20...0x7E => return .{ .print = byte },
+                        0x7F => return .{ .execute = byte }, // DEL
+                    },
+                    .escape => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        '[' => continue :state .csi_entry, // 0x5B
+                        0x20...0x2F => { // intermediates
+                            assert(intermediates.len == 0);
+                            parser.intermediate_buffer[0] = byte;
+                            intermediates = parser.intermediate_buffer[0..1];
+                            continue :state .escape_intermediate;
+                        },
+                        'P', ']', 'X', '^', '_' => continue :state .string_ignore,
+                        0x5C => continue :state .ground,
+                        0x30...0x4F, 0x51...0x57, 0x59...0x5A, 0x60...0x7E => return .{
+                            .esc_dispatch = .{ .intermediates = "", .final = byte },
+                        },
+                    },
+                    .escape_intermediate => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        0x20...0x2F => { // second intermediate
+                            assert(intermediates.len != 0);
+                            if (intermediates.len > 1)
+                                continue :state .escape_ignore; // max of 2 intermediates
+                            parser.intermediate_buffer[1] = byte;
+                            intermediates = parser.intermediate_buffer[0..2];
+                            continue :state .escape_intermediate; // next byte should be final
+                        },
+                        0x30...0x7E => return .{
+                            .esc_dispatch = .{ .intermediates = intermediates, .final = byte },
+                        },
+                    },
+                    .escape_ignore => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        0x20...0x2F => continue :state .escape_ignore, // ignore until end of sequence
+                        0x30...0x7E => continue :state .ground, // final byte
+                    },
+                    // All strings are terminated by BEL or ESC \. ESC is handled by anywhere.
+                    .string_ignore => switch (byte) {
+                        0x00...0x06, 0x08...0x1F, 0x7F...0xFF => unreachable,
+                        0x07 => continue :state .ground, // BEL
+                        0x20...0x7E => continue :state .string_ignore,
+                    },
+                    .csi_entry => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        0x20...0x2F => { // intermediates
+                            assert(intermediates.len == 0);
+                            parser.intermediate_buffer[0] = byte;
+                            intermediates = parser.intermediate_buffer[0..1];
+                            continue :state .csi_intermediate;
+                        },
+                        '0'...'9' => { // first param
+                            assert(params.items.len == 0);
+                            params.appendAssumeCapacity(byte - '0');
+                            continue :state .csi_param;
+                        },
+                        ':' => continue :state .csi_ignore, // not valid
+                        ';' => {
+                            assert(params.items.len == 0);
+                            params.appendAssumeCapacity(0); // default empty param to 0
+                            params.appendAssumeCapacity(0); // initialise next param (after ;) to 0
+                            continue :state .csi_param;
+                        },
+                        0x3C...0x3F => if (private == null) { // accept ONE private (< = > ?)
+                            private = byte;
+                            continue :state .csi_entry;
+                        } else continue :state .csi_ignore,
+                        0x40...0x7E => return .{
+                            .csi_dispatch = .{
+                                .private_marker = private,
+                                .params = &.{},
+                                .intermediates = "",
+                                .final = byte,
+                            },
+                        },
+                    },
+                    .csi_param => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        0x20...0x2F => { // intermediate
+                            assert(intermediates.len == 0);
+                            parser.intermediate_buffer[0] = byte;
+                            intermediates = parser.intermediate_buffer[0..1];
+                            continue :state .csi_intermediate;
+                        },
+                        '0'...'9' => { // param
+                            const last = params.lastPtr().?;
+                            last.* = last.* *| 10 +| (byte - '0');
+                            continue :state .csi_param;
+                        },
+                        ':' => continue :state .csi_ignore, // not valid
+                        ';' => {
+                            params.appendBounded(0) catch continue :state .csi_ignore; // drop if too long
+                            continue :state .csi_param;
+                        },
+                        0x3C...0x3F => continue :state .csi_ignore, // private only valid as first byte
+                        0x40...0x7E => return .{ // final byte
+                            .csi_dispatch = .{
+                                .private_marker = private,
+                                .params = params.items,
+                                .intermediates = "",
+                                .final = byte,
+                            },
+                        },
+                    },
+                    .csi_intermediate => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        0x20...0x2F => { // second intermediate
+                            assert(intermediates.len != 0);
+                            if (intermediates.len > 1) continue :state .csi_ignore; // max of 2 intermediates
+                            parser.intermediate_buffer[1] = byte;
+                            intermediates = parser.intermediate_buffer[0..2];
+                            continue :state .csi_intermediate; // next byte should be final
+                        },
+                        // No privates or params after intermediates.
+                        0x3C...0x3F, '0'...'9', ';' => continue :state .csi_ignore,
+                        ':' => continue :state .csi_ignore, // not valid
+                        0x40...0x7E => return .{ // final byte
+                            .csi_dispatch = .{
+                                .private_marker = private,
+                                .params = params.items,
+                                .intermediates = intermediates,
+                                .final = byte,
+                            },
+                        },
+                    },
+                    .csi_ignore => switch (byte) {
+                        0x00...0x1F, 0x7F...0xFF => unreachable,
+                        0x40...0x7E => continue :state .ground, // final byte (different from .escape_ignore)
+                        0x20...0x3F => continue :state .csi_ignore, // ignore until end of sequence
+                    },
+                }
+            },
+        }
+    }
+};
+
+/// Check the actions parsed from the input, then that the input is used up. Each action is
+/// checked as it's produced, since its slices are only valid until the next call.
+fn expectActions(input: []const u8, expected: []const Parser.Action) !void {
+    var reader: std.Io.Reader = .fixed(input);
+    var parser: Parser = .{};
+    for (expected) |expected_action| {
+        try std.testing.expectEqualDeep(expected_action, try parser.next(&reader));
+    }
+    try std.testing.expectError(error.EndOfStream, parser.next(&reader));
+}
+
+/// Check the events decoded from the input. Actions that aren't events are skipped.
+fn expectEvents(input: []const u8, expected: []const Event) !void {
+    var reader: std.Io.Reader = .fixed(input);
+    var parser: Parser = .{};
+    for (expected) |expected_event| {
+        const event = while (true) {
+            if (Event.decode(try parser.next(&reader))) |event| break event;
+        };
+        try std.testing.expectEqual(expected_event, event);
+    }
+    while (true) {
+        const action = parser.next(&reader) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        try std.testing.expectEqual(null, Event.decode(action));
+    }
+}
+
+/// Test helper: a CSI dispatch, with defaults for the parts most tests leave out.
+fn testCsi(args: struct {
+    private_marker: ?u8 = null,
+    params: []const u32 = &.{},
+    intermediates: []const u8 = "",
+    final: u8,
+}) Parser.Action {
+    return .{
+        .csi_dispatch = .{
+            .private_marker = args.private_marker,
+            .params = args.params,
+            .intermediates = args.intermediates,
+            .final = args.final,
+        },
     };
 }
 
-test fuzzKkpParser {
-    var reader_buffer: [128]u8 = undefined;
-    try std.testing.fuzz(&reader_buffer, fuzzKkpParser, .{});
+/// Test helper: an ESC dispatch, with defaults for the parts most tests leave out.
+fn testEsc(args: struct { intermediates: []const u8 = "", final: u8 }) Parser.Action {
+    return .{ .esc_dispatch = .{ .intermediates = args.intermediates, .final = args.final } };
+}
+
+test "parser: ground" {
+    try expectActions("a\r~", &.{ .{ .print = 'a' }, .{ .execute = '\r' }, .{ .print = '~' } });
+    try expectActions("\x00\x07\x08\x09\x0d\x1f", &.{
+        .{ .execute = 0x00 },
+        .{ .execute = 0x07 },
+        .{ .execute = 0x08 },
+        .{ .execute = 0x09 },
+        .{ .execute = 0x0d },
+        .{ .execute = 0x1f },
+    });
+    // DEL is executed, since it's what the Backspace key sends.
+    try expectActions("\x7f", &.{.{ .execute = 0x7F }});
+    // Bytes >= 0x80 are ignored: UTF-8 (here e acute) isn't supported, and 8-bit C1 controls
+    // (0x80-0x9F) aren't recognised.
+    try expectActions("\xc3\xa9a\x80\x9b\xff", &.{.{ .print = 'a' }});
+    try expectActions("", &.{});
+}
+
+test "parser: esc" {
+    try expectActions("\x1bc", &.{testEsc(.{ .final = 'c' })});
+    try expectActions("\x1b7\x1b8", &.{ testEsc(.{ .final = '7' }), testEsc(.{ .final = '8' }) });
+    // Lowest and highest final bytes.
+    try expectActions("\x1b0\x1b~", &.{ testEsc(.{ .final = '0' }), testEsc(.{ .final = '~' }) });
+    try expectActions("\x1b(B", &.{testEsc(.{ .intermediates = "(", .final = 'B' })});
+    try expectActions("\x1b ~", &.{testEsc(.{ .intermediates = " ", .final = '~' })});
+    // DEL and bytes >= 0x80 are ignored.
+    try expectActions("\x1b\x7f\x80\xffc", &.{testEsc(.{ .final = 'c' })});
+    // Unfinished.
+    try expectActions("\x1b", &.{});
+}
+
+test "parser: csi params" {
+    try expectActions("\x1b[109;5u", &.{testCsi(.{ .params = &.{ 109, 5 }, .final = 'u' })});
+    try expectActions("\x1b[0123456789m", &.{testCsi(.{ .params = &.{123456789}, .final = 'm' })});
+    try expectActions("\x1b[48;24;80;480;800t", &.{
+        testCsi(.{ .params = &.{ 48, 24, 80, 480, 800 }, .final = 't' }),
+    });
+    // No params. Lowest and highest final bytes.
+    try expectActions("\x1b[A", &.{testCsi(.{ .final = 'A' })});
+    try expectActions("\x1b[@\x1b[~", &.{ testCsi(.{ .final = '@' }), testCsi(.{ .final = '~' }) });
+    // Empty params are 0.
+    try expectActions("\x1b[;5u\x1b[5;u\x1b[;u", &.{
+        testCsi(.{ .params = &.{ 0, 5 }, .final = 'u' }),
+        testCsi(.{ .params = &.{ 5, 0 }, .final = 'u' }),
+        testCsi(.{ .params = &.{ 0, 0 }, .final = 'u' }),
+    });
+    // Values saturate.
+    try expectActions("\x1b[99999999999999999999u", &.{
+        testCsi(.{ .params = &.{std.math.maxInt(u32)}, .final = 'u' }),
+    });
+    // Params are cleared between sequences.
+    try expectActions("\x1b[1;2;3u\x1b[u", &.{
+        testCsi(.{ .params = &.{ 1, 2, 3 }, .final = 'u' }),
+        testCsi(.{ .final = 'u' }),
+    });
+    // 16 params is the max.
+    try expectActions("\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16m", &.{
+        testCsi(.{ .params = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, .final = 'm' }),
+    });
+    // DEL and bytes >= 0x80 are ignored.
+    try expectActions("\x1b[1\x7f\x80\xff2u", &.{testCsi(.{ .params = &.{12}, .final = 'u' })});
+    // Unfinished.
+    try expectActions("\x1b[12", &.{});
+}
+
+test "parser: csi private markers and intermediates" {
+    try expectActions("\x1b[?2048h", &.{testCsi(.{ .private_marker = '?', .params = &.{2048}, .final = 'h' })});
+    try expectActions("\x1b[>1u", &.{testCsi(.{ .private_marker = '>', .params = &.{1}, .final = 'u' })});
+    try expectActions("\x1b[<u", &.{testCsi(.{ .private_marker = '<', .final = 'u' })});
+    try expectActions("\x1b[1;2$x", &.{testCsi(.{ .params = &.{ 1, 2 }, .intermediates = "$", .final = 'x' })});
+    // Set cursor style (DECSCUSR), as the editor sends.
+    try expectActions("\x1b[2 q", &.{testCsi(.{ .params = &.{2}, .intermediates = " ", .final = 'q' })});
+    try expectActions("\x1b[ !x", &.{testCsi(.{ .intermediates = " !", .final = 'x' })});
+    try expectActions("\x1b[?1$p", &.{
+        testCsi(.{ .private_marker = '?', .params = &.{1}, .intermediates = "$", .final = 'p' }),
+    });
+}
+
+test "parser: malformed sequences are dropped" {
+    // They're consumed up to their final byte, so the bytes after them are still parsed correctly.
+    // Private markers are only valid first, and only one.
+    try expectActions("\x1b[1?2ux", &.{.{ .print = 'x' }});
+    try expectActions("\x1b[<?ua", &.{.{ .print = 'a' }});
+    // Sub-params (':') aren't supported. KKP only uses them for flags we don't enable (alternate
+    // keys, event types).
+    try expectActions("\x1b[97:65;2ua", &.{.{ .print = 'a' }});
+    try expectActions("\x1b[:ua", &.{.{ .print = 'a' }});
+    // Params and private markers can't follow intermediates.
+    try expectActions("\x1b[2$3xy", &.{.{ .print = 'y' }});
+    try expectActions("\x1b[$?xy", &.{.{ .print = 'y' }});
+    // At most 2 intermediates. ESC finals start at 0x30, below CSI finals.
+    try expectActions("\x1b[ !\"xy", &.{.{ .print = 'y' }});
+    try expectActions("\x1b(((Ba", &.{.{ .print = 'a' }});
+    try expectActions("\x1b(((0a", &.{.{ .print = 'a' }});
+    // At most 16 params.
+    try expectActions("\x1b[1;2;3;4;5;6;7;8;9;10;11;12;13;14;15;16;17ma", &.{.{ .print = 'a' }});
+    // DEL and bytes >= 0x80 are ignored while dropping.
+    try expectActions("\x1b[1?\x7f\x80;2ua", &.{.{ .print = 'a' }});
+}
+
+test "parser: esc, can, and sub abort sequences" {
+    // ESC aborts the current sequence and starts a new one.
+    try expectActions("\x1b[\x1b[A", &.{testCsi(.{ .final = 'A' })});
+    try expectActions("\x1b[12\x1b[A", &.{testCsi(.{ .final = 'A' })});
+    try expectActions("\x1b[1?\x1b[A", &.{testCsi(.{ .final = 'A' })});
+    try expectActions("\x1b(\x1bc", &.{testEsc(.{ .final = 'c' })});
+    // CAN and SUB abort it and are executed.
+    try expectActions("\x18\x1a", &.{ .{ .execute = 0x18 }, .{ .execute = 0x1A } });
+    try expectActions("\x1b\x18a", &.{ .{ .execute = 0x18 }, .{ .print = 'a' } });
+    try expectActions("\x1b[12\x18a", &.{ .{ .execute = 0x18 }, .{ .print = 'a' } });
+    try expectActions("\x1b[12\x1aa", &.{ .{ .execute = 0x1A }, .{ .print = 'a' } });
+    try expectActions("\x1b[1?\x18a", &.{ .{ .execute = 0x18 }, .{ .print = 'a' } });
+    // Aborted and dropped sequences leave nothing behind.
+    try expectActions("\x1b[?\x1b[A", &.{testCsi(.{ .final = 'A' })});
+    try expectActions("\x1b(\x1b(B", &.{testEsc(.{ .intermediates = "(", .final = 'B' })});
+    try expectActions("\x1b[$\x1b[$x", &.{testCsi(.{ .intermediates = "$", .final = 'x' })});
+    try expectActions("\x1b[?1$1x\x1b[A", &.{testCsi(.{ .final = 'A' })});
+}
+
+test "parser: C0 controls within sequences are ignored" {
+    try expectActions("\x1b\rc", &.{testEsc(.{ .final = 'c' })});
+    try expectActions("\x1b(\rB", &.{testEsc(.{ .intermediates = "(", .final = 'B' })});
+    try expectActions("\x1b[1\r0m", &.{testCsi(.{ .params = &.{10}, .final = 'm' })});
+    try expectActions("\x1b[1;2$\rx", &.{testCsi(.{ .params = &.{ 1, 2 }, .intermediates = "$", .final = 'x' })});
+    try expectActions("\x1b[1?\r2ux", &.{.{ .print = 'x' }});
+}
+
+test "parser: strings are dropped" {
+    // OSC (ESC ]), DCS (ESC P), SOS (ESC X), PM (ESC ^), and APC (ESC _) are dropped up to ST
+    // (ESC \) or BEL. The ESC ends the string, then the '\' is consumed without an action.
+    try expectActions("\x1b]0;title\x07a", &.{.{ .print = 'a' }});
+    try expectActions("\x1b]52;c;aGk=\x1b\\a", &.{.{ .print = 'a' }});
+    // XTVERSION and DECRQSS responses (DCS).
+    try expectActions("\x1bP>|ghostty\r1.0\x1b\\a", &.{.{ .print = 'a' }});
+    try expectActions("\x1bP1$r0m\x1b\\a", &.{.{ .print = 'a' }});
+    try expectActions("\x1bP1:2q\x1b\\a", &.{.{ .print = 'a' }});
+    // Kitty graphics protocol response (APC).
+    inline for (.{ "\x1bXsos", "\x1b^pm", "\x1b_Gi=1;OK" }) |string| {
+        try expectActions(string ++ "\x1b\\a", &.{.{ .print = 'a' }});
+    }
+    // C0 controls and bytes >= 0x80 are part of the string.
+    try expectActions("\x1b]0;a\rb\xc3\xa9\x07c", &.{.{ .print = 'c' }});
+    // CAN, SUB, and ESC still abort it.
+    try expectActions("\x1b]0;title\x18a", &.{ .{ .execute = 0x18 }, .{ .print = 'a' } });
+    try expectActions("\x1bPq\x1aa", &.{ .{ .execute = 0x1A }, .{ .print = 'a' } });
+    try expectActions("\x1b]0;ti\x1b[Atle", &.{
+        testCsi(.{ .final = 'A' }),
+        .{ .print = 't' },
+        .{ .print = 'l' },
+        .{ .print = 'e' },
+    });
+    // ST on its own.
+    try expectActions("\x1b\\a", &.{.{ .print = 'a' }});
+    // Unfinished.
+    try expectActions("\x1b]0;title", &.{});
+    try expectActions("\x1bP>|ghostty", &.{});
+    try expectActions("\x1b_Gi=1;OK", &.{});
+}
+
+test "event: decode keys" {
+    try expectEvents("a~ \x7f\x08\t\r", &.{
+        .{ .ascii = 'a' },
+        .{ .ascii = '~' },
+        .{ .ascii = ' ' },
+        .backspace,
+        .backspace,
+        .tab,
+        .enter,
+    });
+    try expectEvents("\x1b[27u", &.{.escape});
+    try expectEvents("\x1b[109;5u", &.{.{ .chord = .{ .ascii = 'm', .modifiers = .{ .ctrl = true } } }});
+    try expectEvents("\x1b[97;7u", &.{
+        .{ .chord = .{ .ascii = 'a', .modifiers = .{ .alt = true, .ctrl = true } } },
+    });
+}
+
+test "event: decode resize" {
+    try expectEvents("\x1b[48;24;80;480;800t", &.{.{ .resize = .{ .row_count = 24, .col_count = 80 } }});
+}
+
+test "event: decode skips unsupported sequences" {
+    try expectEvents(
+        // KKP key codes must be unshifted (a not A).
+        "\x1b[65;5u" ++
+            // Missing, zero, and out of range modifiers.
+            "\x1b[97u" ++ "\x1b[97;0u" ++ "\x1b[97;258u" ++
+            // Private markers and intermediates.
+            "\x1b[?1u" ++ "\x1b[1;2$u" ++
+            // Resize without dimensions.
+            "\x1b[48;24t" ++
+            // Other actions.
+            "\x1bc" ++ "\x1b]0;title\x07" ++ "\x01" ++ "\x1b[A" ++
+            "a",
+        &.{.{ .ascii = 'a' }},
+    );
+}
+
+const ParserFuzzContext = struct {
+    parser: Parser = .{},
+    input_buffer: [128]u8 = undefined,
+};
+
+fn fuzzParser(ctx: *ParserFuzzContext, smith: *std.testing.Smith) !void {
+    @disableInstrumentation();
+
+    const parser = &ctx.parser;
+    const input_buffer = &ctx.input_buffer;
+
+    // Garbage followed by a valid sequence.
+    const resync = "\x1b[97;5u";
+    const garbage_size = smith.slice(input_buffer[0 .. input_buffer.len - resync.len]);
+    @memcpy(input_buffer[garbage_size..][0..resync.len], resync);
+    var reader: std.Io.Reader = .fixed(input_buffer[0 .. garbage_size + resync.len]);
+
+    var resynced = false;
+    while (true) {
+        const action = parser.next(&reader) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        // Every action is well formed.
+        switch (action) {
+            .print => |byte| try std.testing.expect(byte >= 0x20 and byte <= 0x7E),
+            .execute => |byte| try std.testing.expect(byte <= 0x1F or byte == 0x7F),
+            .esc_dispatch => |esc| {
+                try std.testing.expect(esc.intermediates.len <= 2);
+                for (esc.intermediates) |byte| try std.testing.expect(byte >= 0x20 and byte <= 0x2F);
+                try std.testing.expect(esc.final >= 0x30 and esc.final <= 0x7E);
+            },
+            .csi_dispatch => |csi| {
+                if (csi.private_marker) |marker| try std.testing.expect(marker >= 0x3C and marker <= 0x3F);
+                try std.testing.expect(csi.params.len <= 16);
+                try std.testing.expect(csi.intermediates.len <= 2);
+                for (csi.intermediates) |byte| try std.testing.expect(byte >= 0x20 and byte <= 0x2F);
+                try std.testing.expect(csi.final >= 0x40 and csi.final <= 0x7E);
+            },
+        }
+        _ = Event.decode(action); // any action can be decoded
+        // The valid sequence is parsed whatever state the garbage left the parser in.
+        resynced = action == .csi_dispatch and
+            action.csi_dispatch.private_marker == null and
+            std.mem.eql(u32, action.csi_dispatch.params, &.{ 97, 5 }) and
+            action.csi_dispatch.intermediates.len == 0 and
+            action.csi_dispatch.final == 'u';
+    }
+    try std.testing.expect(resynced);
+}
+
+test fuzzParser {
+    var ctx: ParserFuzzContext = .{};
+    try std.testing.fuzz(&ctx, fuzzParser, .{});
 }
 
 /// Fake formatter for testing. Double all blank lines. Remove all indentation. Like a real
@@ -2420,7 +2901,7 @@ test fuzzEditor {
 }
 
 test Modifiers {
-    try std.testing.expect(try Modifiers.decode("1") == Modifiers{
+    try std.testing.expect(Modifiers.decode(1) == Modifiers{
         .shift = false,
         .alt = false,
         .ctrl = false,
@@ -2431,7 +2912,7 @@ test Modifiers {
         .num_lock = false,
     });
 
-    try std.testing.expect(try Modifiers.decode("2") == Modifiers{
+    try std.testing.expect(Modifiers.decode(2) == Modifiers{
         .shift = true,
         .alt = false,
         .ctrl = false,
@@ -2442,7 +2923,7 @@ test Modifiers {
         .num_lock = false,
     });
 
-    try std.testing.expect(try Modifiers.decode("6") == Modifiers{
+    try std.testing.expect(Modifiers.decode(6) == Modifiers{
         .shift = true,
         .alt = false,
         .ctrl = true,
@@ -2453,7 +2934,7 @@ test Modifiers {
         .num_lock = false,
     });
 
-    try std.testing.expect(try Modifiers.decode("256") == Modifiers{
+    try std.testing.expect(Modifiers.decode(256) == Modifiers{
         .shift = true,
         .alt = true,
         .ctrl = true,
@@ -2540,6 +3021,7 @@ const TestEditor = struct {
     stripping_writer: StrippingWriter,
     buffers: Buffers,
     editor: Editor,
+    parser: Parser,
 
     fn init(test_editor: *TestEditor, params: struct {
         file_path: []const u8,
@@ -2551,8 +3033,9 @@ const TestEditor = struct {
         test_editor.stripping_writer = try .init(allocator);
         errdefer test_editor.stripping_writer.deinit();
         test_editor.reader = .fixed(params.input);
+        test_editor.parser = .{};
 
-        const dimensions = switch (try parseOne(&test_editor.reader)) {
+        const dimensions = switch (try Event.next(&test_editor.parser, &test_editor.reader)) {
             .resize => |dimensions| dimensions,
             else => return error.FirstEventMustBeResize,
         };
@@ -2584,12 +3067,12 @@ const TestEditor = struct {
     }
 
     fn tick(test_editor: *TestEditor) !void {
-        const event = try parseOne(&test_editor.reader);
+        const event = try Event.next(&test_editor.parser, &test_editor.reader);
         try std.testing.expect(try test_editor.editor.tick(event) == true);
     }
 
     fn expectTickExit(test_editor: *TestEditor) !void {
-        const event = try parseOne(&test_editor.reader);
+        const event = try Event.next(&test_editor.parser, &test_editor.reader);
         try std.testing.expect(try test_editor.editor.tick(event) == false);
     }
 
@@ -2604,14 +3087,14 @@ const TestEditor = struct {
             "q" ++
             (if (force == .force) "!" else "");
         for (input) |c| {
-            const event = try parseOne(&test_editor.reader);
+            const event = try Event.next(&test_editor.parser, &test_editor.reader);
             try std.testing.expect(event == .ascii);
             try std.testing.expectEqual(c, event.ascii);
             try std.testing.expect(try test_editor.editor.tick(event) == true); // no exit yet
         }
 
         // Process the return (enter) keypress.
-        const event = try parseOne(&test_editor.reader);
+        const event = try Event.next(&test_editor.parser, &test_editor.reader);
         try std.testing.expectEqual(.enter, event);
         try std.testing.expect(try test_editor.editor.tick(event) == false); // exit
     }
