@@ -42,7 +42,7 @@ const Buffers = struct {
     document: []u8,
     clipboard: []u8,
     scratch: []u8,
-    prompt_text: []u8,
+    prompt: []u8, // prompt command text or message
 
     fn alloc(
         allocator: std.mem.Allocator,
@@ -55,14 +55,14 @@ const Buffers = struct {
         const scratch = try allocator.alloc(u8, options.file_size_max);
         errdefer allocator.free(scratch);
         // -1 accounts for the ':' shown when the prompt is active.
-        const prompt_text = try allocator.alloc(u8, options.col_count_max - 1);
-        errdefer allocator.free(prompt_text);
+        const prompt = try allocator.alloc(u8, options.col_count_max - 1);
+        errdefer allocator.free(prompt);
 
         return .{
             .document = document,
             .clipboard = clipboard,
             .scratch = scratch,
-            .prompt_text = prompt_text,
+            .prompt = prompt,
         };
     }
 
@@ -70,7 +70,7 @@ const Buffers = struct {
         allocator.free(buffers.document);
         allocator.free(buffers.clipboard);
         allocator.free(buffers.scratch);
-        allocator.free(buffers.prompt_text);
+        allocator.free(buffers.prompt);
     }
 };
 
@@ -88,14 +88,14 @@ const Editor = struct {
         normal,
         insert,
         prompt: union(enum) {
-            command: struct { text: std.ArrayList(u8), cursor_offset: u8 },
-            message: enum { command_not_recognised, formatting_failed },
+            command: struct { text: std.ArrayList(u8), cursor_offset: u32 },
+            message: std.ArrayList(u8),
             unsaved,
         },
     },
     document: std.ArrayList(u8),
     dirty: bool,
-    prompt_text_buffer: []u8,
+    prompt_buffer: []u8, // shared by prompt command text and messages
     scratch_buffer: []u8, // used for formatting, selection paste
     clipboard: std.ArrayList(u8),
 
@@ -103,6 +103,16 @@ const Editor = struct {
         if (event == .resize) {
             editor.viewport.row_count = event.resize.row_count;
             editor.viewport.col_count = event.resize.col_count;
+            // Crop the command text so it still fits on the row with the ':' prompt prefix and the
+            // cursor after it.
+            if (editor.mode == .prompt and editor.mode.prompt == .command) {
+                const command = &editor.mode.prompt.command;
+                assert(command.cursor_offset == command.text.items.len);
+                command.text.shrinkRetainingCapacity(
+                    @min(command.text.items.len, editor.viewport.col_count -| 2),
+                );
+                command.cursor_offset = @intCast(command.text.items.len);
+            }
         } else switch (editor.mode) {
             .normal => switch (event) {
                 .ascii => |c| switch (c) {
@@ -203,7 +213,7 @@ const Editor = struct {
                     ':' => editor.mode = .{
                         .prompt = .{
                             .command = .{
-                                .text = .initBuffer(editor.prompt_text_buffer),
+                                .text = .initBuffer(editor.prompt_buffer),
                                 .cursor_offset = 0,
                             },
                         },
@@ -329,7 +339,7 @@ const Editor = struct {
                                 editor.centreCursorVertically();
                             }
                             editor.mode = .normal;
-                        } else editor.mode = .{ .prompt = .{ .message = .command_not_recognised } };
+                        } else editor.showMessage("invalid command", .{});
                     },
                     .tab, .chord => {}, // do nothing
                     .resize => unreachable,
@@ -509,10 +519,10 @@ const Editor = struct {
                     try writer.writeAll(command.text.items);
                 },
                 .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
-                .message => |message| switch (message) {
-                    .command_not_recognised => try writer.writeAll("invalid command"),
-                    .formatting_failed => try writer.writeAll("formatting failed"),
-                },
+                // Crop messages that don't fit on the row.
+                .message => |message| try writer.writeAll(
+                    message.items[0..@min(message.items.len, col_count)],
+                ),
             },
         }
 
@@ -565,7 +575,7 @@ const Editor = struct {
         // buffers).
         assert(args.buffers.document.len == args.buffers.clipboard.len);
         assert(args.buffers.document.len == args.buffers.scratch.len);
-        assert(args.buffers.prompt_text.len == args.col_count_max - 1); // -1 for the ':' in prompt
+        assert(args.buffers.prompt.len == args.col_count_max - 1); // -1 for the ':' in prompt
 
         // Read file into scratch buffer before loading into `document`.
         var scratch_writer: std.Io.Writer = .fixed(args.buffers.scratch);
@@ -601,7 +611,7 @@ const Editor = struct {
                 .line_offset_snap = if (cursor_offset_start) |_| args.cursor_line_offset else 0,
             },
             .clipboard = .initBuffer(args.buffers.clipboard),
-            .prompt_text_buffer = args.buffers.prompt_text,
+            .prompt_buffer = args.buffers.prompt,
             .scratch_buffer = args.buffers.scratch,
             .col_count_max = args.col_count_max,
             .row_count_max = args.row_count_max,
@@ -616,12 +626,20 @@ const Editor = struct {
         try editor.render(cursor_position);
     }
 
+    /// Show a message in place of the status line. Written to the prompt buffer, cropped if it
+    /// doesn't fit. Don't pass the command text in `args`, it's in the same buffer.
+    fn showMessage(editor: *Editor, comptime format: []const u8, args: anytype) void {
+        var message_writer: std.Io.Writer = .fixed(editor.prompt_buffer);
+        message_writer.print(format, args) catch {}; // fixed writer keeps what fits
+        editor.mode = .{ .prompt = .{ .message = message_writer.toArrayList() } };
+    }
+
     /// Format document if formatter available then save. If formatting fails, show the error and
     /// don't save. Returns whether the document was saved so the caller can decide what to do next
     /// (e.g. exit).
     fn formatAndSave(editor: *Editor) !bool {
         if (try editor.formatDocument() == false) {
-            editor.mode = .{ .prompt = .{ .message = .formatting_failed } };
+            editor.showMessage("formatting failed", .{});
             return false;
         }
         try editor.save();
@@ -2256,7 +2274,7 @@ pub const EditorFuzzContext = struct {
     document_buffer: [file_size_max]u8 = undefined,
     clipboard_buffer: [file_size_max]u8 = undefined,
     scratch_buffer: [file_size_max]u8 = undefined,
-    prompt_text_buffer: [col_count_max - 1]u8 = undefined,
+    prompt_buffer: [col_count_max - 1]u8 = undefined,
 };
 
 pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
@@ -2281,7 +2299,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
             .document = &ctx.document_buffer,
             .clipboard = &ctx.clipboard_buffer,
             .scratch = &ctx.scratch_buffer,
-            .prompt_text = &ctx.prompt_text_buffer,
+            .prompt = &ctx.prompt_buffer,
         },
         .file_path = file_path,
         .file_reader = &file_reader,
@@ -3770,7 +3788,10 @@ test "save and quit stays open if formatting fails" {
     for (":wq\r") |_| try test_editor.tick(); // doesn't exit
     try std.testing.expect(test_editor.editor.mode == .prompt);
     try std.testing.expect(test_editor.editor.mode.prompt == .message);
-    try std.testing.expectEqual(.formatting_failed, test_editor.editor.mode.prompt.message);
+    try std.testing.expectEqualStrings(
+        "formatting failed",
+        test_editor.editor.mode.prompt.message.items,
+    );
     try std.testing.expect(test_editor.editor.dirty); // not saved
     try std.testing.expectEqualStrings("nt main() {\n", test_editor.editor.document.items);
 
@@ -3805,7 +3826,10 @@ test "save and quit from unsaved prompt formats" {
     for (":q\ry") |_| try test_editor.tick(); // doesn't exit
     try std.testing.expect(test_editor.editor.mode == .prompt);
     try std.testing.expect(test_editor.editor.mode.prompt == .message);
-    try std.testing.expectEqual(.formatting_failed, test_editor.editor.mode.prompt.message);
+    try std.testing.expectEqualStrings(
+        "formatting failed",
+        test_editor.editor.mode.prompt.message.items,
+    );
     try std.testing.expect(test_editor.editor.dirty); // not saved
 
     try test_editor.tick(); // process \r
@@ -3920,6 +3944,79 @@ test "user message" {
 
     try test_editor.tick(); // process escape
     try test_editor.expectQuit(.save, .no_force); // process :wq\r
+}
+
+test "message cropped to viewport" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "a.c",
+        .file_bytes = "hello\n",
+        .input = "\x1b[48;12;10;0;0t" ++ // dimensions: 12 rows by 10 cols
+            ":x\r" ++ // some invalid command
+            "\x1b[27u" ++ // ESC: dismiss message and return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    for (":x\r") |_| try test_editor.tick();
+    try test_editor.expectRender(
+        \\ 1 hello
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\invalid co
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process escape
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "resize crops prompt command" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "a.c",
+        .file_bytes = "hello\n",
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            ":abcdefghijklmnopqrstuvwxyz0123" ++ // 30 chars, fits in 36 cols
+            "\x1b[48;12;20;0;0t" ++ // resize: 12 rows by 20 cols, room for 18 chars
+            "X" ++ // no room, ignored
+            "\x1b[27u" ++ // ESC: dismiss command and return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    for (":abcdefghijklmnopqrstuvwxyz0123") |_| try test_editor.tick();
+    try std.testing.expectEqualStrings(
+        "abcdefghijklmnopqrstuvwxyz0123",
+        test_editor.editor.mode.prompt.command.text.items,
+    );
+
+    try test_editor.tick(); // process resize
+    try test_editor.tick(); // process X
+    try test_editor.expectRender(
+        \\ 1 hello
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\:abcdefghijklmnopqr
+    , .{ .row = 11, .col = 19 }, .steady_bar);
+
+    try test_editor.tick(); // process escape
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
 
 test "selection highlighting" {
