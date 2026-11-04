@@ -201,9 +201,18 @@ const Editor = struct {
                         );
                         editor.mode = .insert;
                     },
-                    // Enable/disable selection.
-                    'v' => editor.cursor.anchor =
-                        if (editor.cursor.anchor != null) null else editor.cursor.offset,
+                    // Enable/disable selection. If we have a selection in the same mode, deselect,
+                    // otherwise, do selection. Going from a linewise selection to a normal one,
+                    // and vice versa, is valid.
+                    'v' => editor.cursor.anchor = if (editor.cursor.anchor) |anchor|
+                        if (!anchor.lines) null else .{ .offset = anchor.offset, .lines = false }
+                    else
+                        .{ .offset = editor.cursor.offset, .lines = false },
+                    // Enable/disable linewise selection. Same as above.
+                    'V' => editor.cursor.anchor = if (editor.cursor.anchor) |anchor|
+                        if (anchor.lines) null else .{ .offset = anchor.offset, .lines = true }
+                    else
+                        .{ .offset = editor.cursor.offset, .lines = true },
                     'd' => delete(
                         &editor.document,
                         &editor.clipboard,
@@ -370,8 +379,12 @@ const Editor = struct {
             lineSize(editor.document.items, editor.cursor.offset) - 1,
         ));
         assert(cursor_position.line_offset <= editor.cursor.line_offset_snap);
-        // Selection anchor must point into the document.
-        if (editor.cursor.anchor) |anchor| assert(anchor < editor.document.items.len);
+        // Selection must point into the document.
+        if (editor.cursor.anchor) |anchor| assert(anchor.offset < editor.document.items.len);
+        if (editor.cursor.selection(editor.document.items)) |selection| {
+            assert(selection.head < editor.document.items.len);
+            assert(selection.tail < editor.document.items.len);
+        }
 
         try editor.focus(cursor_position);
         try editor.render(cursor_position);
@@ -458,27 +471,26 @@ const Editor = struct {
                 const cropped_tail = @min(line_tail, cropped_head + text_width);
 
                 if (line_head == line_tail) {} // empty line
-                else if (editor.cursor.anchor) |anchor| { // handle selection highlighting
+                // Handle selection highlighting.
+                else if (editor.cursor.selection(document)) |selection| {
                     const esc_highlight = esc_highlight_foreground ++ esc_highlight_background;
-                    const highlight_head = @min(anchor, editor.cursor.offset);
-                    const highlight_tail = @max(anchor, editor.cursor.offset);
 
                     // Should we have already started/stopped highlighting? E.g. anchor not within
                     // cropped line.
-                    if (highlight_head < cropped_head) highlight = true;
-                    if (highlight_tail < cropped_head) highlight = false;
+                    if (selection.head < cropped_head) highlight = true;
+                    if (selection.tail < cropped_head) highlight = false;
 
                     if (highlight) try writer.writeAll(esc_highlight);
 
                     for (cropped_head..cropped_tail) |offset| {
-                        if (offset == highlight_head) {
+                        if (offset == selection.head) {
                             highlight = true;
                             try writer.writeAll(esc_highlight);
                         }
 
                         try writer.writeByte(document[offset]);
 
-                        if (offset == highlight_tail) {
+                        if (offset == selection.tail) {
                             highlight = false;
                             try writer.writeAll(esc_colour_reset);
                         }
@@ -939,7 +951,10 @@ const Viewport = struct {
 
 const Cursor = struct {
     offset: u32,
-    anchor: ?u32,
+    /// Cursor selection is implemented with anchor. A normal selection is just the cursor offset to
+    /// the anchor offset, or vice versa if the anchor comes before. See `selection`. If we are
+    /// selecting lines (e.g 'V'), lines is true.
+    anchor: ?struct { offset: u32, lines: bool },
     line_offset_snap: u32,
 
     fn update(
@@ -998,7 +1013,7 @@ const Cursor = struct {
         }
     }
 
-    fn selection(cursor: Cursor) ?struct {
+    fn selection(cursor: Cursor, document: []const u8) ?struct {
         head: u32,
         tail: u32,
 
@@ -1010,14 +1025,18 @@ const Cursor = struct {
             return buffer[s.head .. s.tail + 1];
         }
     } {
-        if (cursor.anchor) |anchor| return .{
-            .head = @min(anchor, cursor.offset),
-            .tail = @max(anchor, cursor.offset),
+        if (cursor.anchor) |anchor| {
+            const selection_head = @min(anchor.offset, cursor.offset);
+            const selection_tail = @max(anchor.offset, cursor.offset);
+            return .{
+                .head = if (anchor.lines) lineHead(document, selection_head) else selection_head,
+                .tail = if (anchor.lines) lineTail(document, selection_tail) else selection_tail,
+            };
         } else return null;
     }
 
-    fn head(cursor: Cursor) u32 {
-        return if (cursor.selection()) |s| s.head else cursor.offset;
+    fn head(cursor: Cursor, document: []const u8) u32 {
+        return if (cursor.selection(document)) |s| s.head else cursor.offset;
     }
 };
 
@@ -1203,7 +1222,7 @@ fn paste(
     if (clipboard.items.len == 0) return;
 
     // If there is a selection, pasting swaps the clipboard contents with the selection.
-    if (cursor.selection()) |selection| {
+    if (cursor.selection(document.items)) |selection| {
         // Save selection in scratch until it can be copied to the clipboard.
         var scratch: std.ArrayList(u8) = .initBuffer(scratch_buffer);
         scratch.appendSliceAssumeCapacity(selection.slice(document.items));
@@ -1278,7 +1297,7 @@ test paste {
 
     // Paste over a selection (cursor at the head). Clipboard and selection swap.
     dirty = false;
-    cursor = .{ .offset = 0, .anchor = 9, .line_offset_snap = 0 };
+    cursor = .{ .offset = 0, .anchor = .{ .offset = 9, .lines = false }, .line_offset_snap = 0 };
     try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
     try std.testing.expectEqualStrings(document_original, document.items);
     try std.testing.expectEqualStrings("HelloHello", clipboard.items);
@@ -1288,7 +1307,7 @@ test paste {
     try std.testing.expectEqual(4, cursor.line_offset_snap);
 
     // Paste over a selection (cursor at the tail).
-    cursor = .{ .offset = 4, .anchor = 0, .line_offset_snap = 4 };
+    cursor = .{ .offset = 4, .anchor = .{ .offset = 0, .lines = false }, .line_offset_snap = 4 };
     try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
     try std.testing.expectEqualStrings(
         "HelloHello, world!\n  All your codebase are belong to us.\n",
@@ -1317,7 +1336,10 @@ test paste {
     dirty = false;
     cursor = .{
         .offset = 0,
-        .anchor = @intCast(document.items.len - 1), // select all
+        .anchor = .{
+            .offset = @intCast(document.items.len - 1), // select all
+            .lines = false,
+        },
         .line_offset_snap = 0,
     };
     try paste(&document, &clipboard, &scratch_buffer, &cursor, &dirty);
@@ -1345,7 +1367,7 @@ test paste {
 
     // Too long over a selection. Nothing changes, selection is kept.
     clipboard.appendSliceAssumeCapacity("d"); // 52 - 1 + 14 > 64
-    cursor = .{ .offset = 0, .anchor = 0, .line_offset_snap = 0 };
+    cursor = .{ .offset = 0, .anchor = .{ .offset = 0, .lines = false }, .line_offset_snap = 0 };
     cursor_before = cursor;
     try std.testing.expectError(
         error.FileTooLong,
@@ -1428,12 +1450,12 @@ fn delete(
     dirty: *bool,
 ) void {
     // If it's a selection, snap cursor to head after yank.
-    const cursor_offset = cursor.head();
+    const cursor_offset = cursor.head(document.items);
 
     yankInner(document.items, clipboard, cursor.*);
 
     // Delete from the head of the selection or, without a selection, the byte under the cursor.
-    const size: u32 = if (cursor.selection()) |selection| selection.size() else 1;
+    const size: u32 = if (cursor.selection(document.items)) |selection| selection.size() else 1;
     // We're removing at least one byte. Even if the trailing newline has to be added back the
     // document can't grow, so this never returns an error.
     assert(size > 0);
@@ -1456,7 +1478,7 @@ test delete {
 
     cursor = .{ // select all
         .offset = @intCast(document.items.len - 1),
-        .anchor = 0,
+        .anchor = .{ .offset = 0, .lines = false },
         .line_offset_snap = @intCast(document.items.len - 1),
     };
     delete(&document, &clipboard, &cursor, &dirty);
@@ -1477,7 +1499,7 @@ test delete {
     try std.testing.expect(dirty);
 
     dirty = false;
-    cursor = .{ .offset = 6, .anchor = 12, .line_offset_snap = 6 };
+    cursor = .{ .offset = 6, .anchor = .{ .offset = 12, .lines = false }, .line_offset_snap = 6 };
     delete(&document, &clipboard, &cursor, &dirty);
     try std.testing.expectEqualStrings("world!\n", clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
@@ -1518,7 +1540,7 @@ test delete {
 fn yankInner(document: []const u8, clipboard: *std.ArrayList(u8), cursor: Cursor) void {
     assert(clipboard.capacity >= document.len); // any selection fits
     clipboard.clearRetainingCapacity();
-    if (cursor.selection()) |selection|
+    if (cursor.selection(document)) |selection|
         clipboard.appendSliceAssumeCapacity(selection.slice(document))
     else
         clipboard.appendAssumeCapacity(document[cursor.offset]);
@@ -1526,7 +1548,7 @@ fn yankInner(document: []const u8, clipboard: *std.ArrayList(u8), cursor: Cursor
 
 fn yank(document: []const u8, clipboard: *std.ArrayList(u8), cursor: *Cursor) void {
     // If it's a selection, snap cursor to head after yank.
-    const cursor_offset = cursor.head();
+    const cursor_offset = cursor.head(document);
     yankInner(document, clipboard, cursor.*);
     cursor.anchor = null; // unselect
     cursor.update(document, cursor_offset, .snap_update);
@@ -1543,7 +1565,7 @@ test yank {
     try std.testing.expectEqualStrings("H", clipboard.items);
     try std.testing.expect(cursor.offset == 0);
 
-    cursor = .{ .offset = 7, .anchor = 13, .line_offset_snap = 7 };
+    cursor = .{ .offset = 7, .anchor = .{ .offset = 13, .lines = false }, .line_offset_snap = 7 };
     yank(document, &clipboard, &cursor);
     try std.testing.expectEqualStrings("world!\n", clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
@@ -1551,7 +1573,7 @@ test yank {
     try std.testing.expectEqual(7, cursor.line_offset_snap);
 
     // Cursor at the tail of a selection snaps back to the head.
-    cursor = .{ .offset = 18, .anchor = 7, .line_offset_snap = 4 };
+    cursor = .{ .offset = 18, .anchor = .{ .offset = 7, .lines = false }, .line_offset_snap = 4 };
     yank(document, &clipboard, &cursor);
     try std.testing.expectEqualStrings("world!\n  All", clipboard.items);
     try std.testing.expect(cursor.anchor == null); // deselect after yank
@@ -1560,7 +1582,7 @@ test yank {
 
     cursor = .{ // select all
         .offset = document.len - 1,
-        .anchor = 0,
+        .anchor = .{ .offset = 0, .lines = false },
         .line_offset_snap = lineOffset(document, document.len - 1),
     };
     yank(document, &clipboard, &cursor);
@@ -3625,7 +3647,7 @@ test "formatting clears selection" {
     for (":w\r") |_| try test_editor.tick();
 
     // Without clearing the selection, the anchor would point past the end of the document.
-    try std.testing.expect(anchor >= test_editor.editor.document.items.len);
+    try std.testing.expect(anchor.offset >= test_editor.editor.document.items.len);
     try std.testing.expectEqual(null, test_editor.editor.cursor.anchor);
     try std.testing.expect(!test_editor.editor.dirty); // formatting marks dirty, saving clears it
 }
