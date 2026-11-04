@@ -228,14 +228,26 @@ const Editor = struct {
                         },
                     },
                     'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
+                    // Yank the lines covered by the selection or, without one, the cursor's line.
+                    // The cursor stays where it is.
                     'Y' => {
-                        const head = lineHead(editor.document.items, editor.cursor.offset);
-                        const tail = lineTail(editor.document.items, editor.cursor.offset);
-                        assert(editor.document.items[tail] == '\n');
-                        editor.clipboard.clearRetainingCapacity();
-                        editor.clipboard.appendSliceAssumeCapacity(
-                            editor.document.items[head .. tail + 1],
-                        );
+                        const anchor_offset = if (editor.cursor.anchor) |anchor|
+                            anchor.offset
+                        else
+                            editor.cursor.offset;
+                        var lines = editor.cursor;
+                        lines.anchor = .{ .offset = anchor_offset, .lines = true };
+                        yankInner(editor.document.items, &editor.clipboard, lines);
+                        editor.cursor.anchor = null;
+                    },
+                    // Delete the lines covered by the selection or, without one, the cursor's line.
+                    'D' => {
+                        const anchor_offset = if (editor.cursor.anchor) |anchor|
+                            anchor.offset
+                        else
+                            editor.cursor.offset;
+                        editor.cursor.anchor = .{ .offset = anchor_offset, .lines = true };
+                        delete(&editor.document, &editor.clipboard, &editor.cursor, &editor.dirty);
                     },
                     // 'P' => {}, // TODO: paste before
                     'p' => try paste(
@@ -1246,10 +1258,12 @@ fn paste(
         // newline.
         const offset = lineTail(document.items, cursor.offset) + 1;
         try replace(document, dirty, offset, 0, clipboard.items);
-        // Cursor on the first pasted line, after its indentation.
+        // Cursor on the last pasted line, after its indentation, so pasting again appends below
+        // the whole block rather than splitting it. The last pasted byte is that line's newline.
+        const line_head = lineHead(document.items, @intCast(offset + clipboard.items.len - 1));
         cursor.update(
             document.items,
-            offset + lineIndentation(document.items, offset),
+            line_head + lineIndentation(document.items, line_head),
             .snap_update,
         );
     } else {
@@ -1390,8 +1404,8 @@ test paste {
     );
     try std.testing.expectEqualStrings("  foo\nbar\n", clipboard.items);
     try std.testing.expect(dirty);
-    try std.testing.expectEqual(16, cursor.offset);
-    try std.testing.expectEqual(2, cursor.line_offset_snap);
+    try std.testing.expectEqual(20, cursor.offset); // on the last pasted line
+    try std.testing.expectEqual(0, cursor.line_offset_snap);
 
     // Same with the cursor on the line's newline.
     document.clearRetainingCapacity();
@@ -1402,7 +1416,7 @@ test paste {
         "Hello, world!\n  foo\nbar\n  All your codebase are belong to us.\n",
         document.items,
     );
-    try std.testing.expectEqual(16, cursor.offset);
+    try std.testing.expectEqual(20, cursor.offset);
 
     // Pasting lines below the last line appends them to the document.
     document.clearRetainingCapacity();
@@ -1460,9 +1474,19 @@ fn delete(
     // document can't grow, so this never returns an error.
     assert(size > 0);
     replace(document, dirty, cursor_offset, size, "") catch unreachable;
+    const lines = if (cursor.anchor) |anchor| anchor.lines else false;
     cursor.anchor = null;
 
-    cursor.update(document.items, cursor_offset, .snap_update);
+    if (lines) {
+        // Deleting the last lines leaves the head past the end of the document, so clamp it onto
+        // the line above. Either way, land after the indentation of the line now at the cursor.
+        const line_head = lineHead(document.items, @min(cursor_offset, document.items.len - 1));
+        cursor.update(
+            document.items,
+            line_head + lineIndentation(document.items, line_head),
+            .snap_update,
+        );
+    } else cursor.update(document.items, cursor_offset, .snap_update);
     assert(cursor.offset < document.items.len);
 }
 
@@ -1535,6 +1559,36 @@ test delete {
     );
     try std.testing.expectEqual(50, cursor.offset);
     try std.testing.expect(dirty);
+
+    // Line-wise selection deletes whole lines, newlines included. The cursor lands after the
+    // indentation of the line that takes their place.
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original); // refill document
+    cursor = .{ .offset = 5, .anchor = .{ .offset = 5, .lines = true }, .line_offset_snap = 5 };
+    delete(&document, &clipboard, &cursor, &dirty);
+    try std.testing.expectEqualStrings("Hello, world!\n", clipboard.items);
+    try std.testing.expectEqualStrings(document_original[14..], document.items);
+    try std.testing.expect(cursor.anchor == null);
+    try std.testing.expectEqual(2, cursor.offset);
+    try std.testing.expectEqual(2, cursor.line_offset_snap);
+
+    // Deleting the last line moves the cursor up onto the line before it.
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original); // refill document
+    cursor = .{ .offset = 20, .anchor = .{ .offset = 30, .lines = true }, .line_offset_snap = 6 };
+    delete(&document, &clipboard, &cursor, &dirty);
+    try std.testing.expectEqualStrings(document_original[14..], clipboard.items);
+    try std.testing.expectEqualStrings("Hello, world!\n", document.items);
+    try std.testing.expectEqual(0, cursor.offset);
+
+    // Deleting every line leaves just the trailing newline.
+    document.clearRetainingCapacity();
+    document.appendSliceAssumeCapacity(document_original); // refill document
+    cursor = .{ .offset = 20, .anchor = .{ .offset = 3, .lines = true }, .line_offset_snap = 6 };
+    delete(&document, &clipboard, &cursor, &dirty);
+    try std.testing.expectEqualStrings(document_original, clipboard.items);
+    try std.testing.expectEqualStrings("\n", document.items);
+    try std.testing.expectEqual(0, cursor.offset);
 }
 
 fn yankInner(document: []const u8, clipboard: *std.ArrayList(u8), cursor: Cursor) void {
@@ -3530,6 +3584,269 @@ test "Y yanks the cursor's line" {
         \\~
         \\hello.c [+]                      5,3
     , .{ .row = 4, .col = 5 }, .steady_block);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "Y with a selection yanks the selected lines" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjll" ++ // move into line 3
+            "vj" ++ // select into line 4
+            "Y" ++ // yank lines 3 and 4
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    for (0..7) |_| try test_editor.tick(); // process jjllvjY
+
+    try std.testing.expectEqualStrings(
+        "int main() {\n  printf(\"Hello, world!\\n\");\n",
+        test_editor.editor.clipboard.items,
+    );
+    // Selection is cleared but the cursor stays where it is.
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6 }
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c                          4,3
+    , .{ .row = 3, .col = 5 }, .steady_block);
+    try std.testing.expectEqual(null, test_editor.editor.cursor.anchor);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "pasting lines repeatedly keeps blocks together" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjj" ++ // move to line 4
+            "Vjy" ++ // yank lines 4 and 5, cursor snaps back to line 4
+            "j" ++ // move to line 5
+            "pp" ++ // paste them twice
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    for (0..9) |_| try test_editor.tick(); // process jjjVjyjpp
+
+    // Each paste lands below the previous one. Cursor on the last pasted line, after indentation.
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   printf("Hello, world!\n");
+        \\ 5   return 0;
+        \\ 6   printf("Hello, world!\n");
+        \\ 7   return 0;
+        \\ 8   printf("Hello, world!\n");
+        \\ 9   return 0;
+        \\10 }
+        \\~
+        \\hello.c [+]                      9,3
+    , .{ .row = 8, .col = 5 }, .steady_block);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "D deletes lines" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "jjjlll" ++ // move into line 4
+            "D" ++ // delete line 4
+            "Vk" ++ // select lines 3 and 4
+            "D" ++ // delete them
+            "G" ++ // move to last line
+            "D" ++ // delete last line
+            "D" ++ // delete last line again, now empty
+            "D" ++ // delete only line
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    for (0..6) |_| try test_editor.tick(); // process jjjlll
+    try test_editor.tick(); // process D
+
+    // Line is in the clipboard. Cursor is on the next line, after its indentation.
+    try std.testing.expectEqualStrings(
+        "  printf(\"Hello, world!\\n\");\n",
+        test_editor.editor.clipboard.items,
+    );
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 int main() {
+        \\ 4   return 0;
+        \\ 5 }
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c [+]                      4,3
+    , .{ .row = 3, .col = 5 }, .steady_block);
+
+    try test_editor.tick(); // process V
+    try test_editor.tick(); // process k
+    try test_editor.tick(); // process D
+
+    // D with a selection deletes every line it covers.
+    try std.testing.expectEqualStrings(
+        "int main() {\n  return 0;\n",
+        test_editor.editor.clipboard.items,
+    );
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\ 3 }
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c [+]                      3,1
+    , .{ .row = 2, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process G
+    try test_editor.tick(); // process D
+
+    // Deleting the last line moves the cursor up a line.
+    try test_editor.expectRender(
+        \\ 1 #include <stdio.h>
+        \\ 2 
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c [+]                      2,1
+    , .{ .row = 1, .col = 3 }, .steady_block);
+
+    try test_editor.tick(); // process D
+    try test_editor.tick(); // process D
+
+    // Deleting the only line leaves an empty line.
+    try std.testing.expectEqualStrings("#include <stdio.h>\n", test_editor.editor.clipboard.items);
+    try std.testing.expectEqualStrings("\n", test_editor.editor.document.items);
+    try test_editor.expectRender(
+        \\ 1 
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\~
+        \\hello.c [+]                      1,1
+    , .{ .row = 0, .col = 3 }, .steady_block);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "v and V toggle and switch selection kind" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.c",
+        .file_bytes = hello_c,
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "vv" ++ // select then deselect
+            "VV" ++ // select lines then deselect
+            "jjll" ++ // move into line 3
+            "V" ++ // select lines
+            "j" ++ // extend to line 4
+            "v" ++ // switch to normal selection, anchor kept
+            "V" ++ // switch back to line selection
+            "V" ++ // deselect
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+    const cursor = &test_editor.editor.cursor;
+
+    try test_editor.tick(); // process v
+    try std.testing.expect(!cursor.anchor.?.lines);
+    try test_editor.tick(); // process v
+    try std.testing.expectEqual(null, cursor.anchor);
+    try test_editor.tick(); // process V
+    try std.testing.expect(cursor.anchor.?.lines);
+    try test_editor.tick(); // process V
+    try std.testing.expectEqual(null, cursor.anchor);
+
+    for (0..4) |_| try test_editor.tick(); // process jjll
+    try test_editor.tick(); // process V
+    try test_editor.tick(); // process j
+
+    // Whole lines are highlighted, wherever the anchor and cursor are on them.
+    const ln = esc_line_number_foreground;
+    const rs = esc_colour_reset;
+    const hl = esc_highlight_foreground ++ esc_highlight_background;
+    const frame_lines =
+        ln ++ " 1" ++ rs ++ " #include <stdio.h>\n" ++
+        ln ++ " 2" ++ rs ++ " \n" ++
+        ln ++ " 3" ++ rs ++ " " ++ hl ++ "int main() {" ++ rs ++ "\n" ++
+        ln ++ " 4" ++ rs ++ " " ++ hl ++ "  printf(\"Hello, world!\\n\");" ++ rs ++ "\n" ++
+        ln ++ " 5" ++ rs ++ "   return 0;\n" ++
+        ln ++ " 6" ++ rs ++ " }\n" ++
+        "~\n" ++
+        "~\n" ++
+        "~\n" ++
+        "~\n" ++
+        "~\n" ++
+        "hello.c                          4,3";
+    try test_editor.expectFrame(.keep_colour, frame_lines, .{ .row = 3, .col = 5 }, .steady_block);
+
+    try test_editor.tick(); // process v
+
+    // Same anchor, now a normal selection from line 3 to the cursor on line 4.
+    try test_editor.expectFrame(
+        .keep_colour,
+        ln ++ " 1" ++ rs ++ " #include <stdio.h>\n" ++
+            ln ++ " 2" ++ rs ++ " \n" ++
+            ln ++ " 3" ++ rs ++ " in" ++ hl ++ "t main() {" ++ rs ++ "\n" ++
+            ln ++ " 4" ++ rs ++ " " ++ hl ++ "  p" ++ rs ++ "rintf(\"Hello, world!\\n\");\n" ++
+            ln ++ " 5" ++ rs ++ "   return 0;\n" ++
+            ln ++ " 6" ++ rs ++ " }\n" ++
+            "~\n" ++
+            "~\n" ++
+            "~\n" ++
+            "~\n" ++
+            "~\n" ++
+            "hello.c                          4,3",
+        .{ .row = 3, .col = 5 },
+        .steady_block,
+    );
+
+    try test_editor.tick(); // process V
+    try test_editor.expectFrame(.keep_colour, frame_lines, .{ .row = 3, .col = 5 }, .steady_block);
+
+    try test_editor.tick(); // process V
+    try std.testing.expectEqual(null, cursor.anchor);
 
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }
