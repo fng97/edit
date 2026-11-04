@@ -7,6 +7,10 @@
 
 ## TODO
 
+- Lose `validateDocument` and `load` now that they're both only called in
+  `init`.
+- Can command prompt use scratch buffer and just limit on viewport width?
+- Clean up `runFormatter`. Figure out failure modes.
 - Display symbol for newlines.
 - Newlines should be included when highlighting.
 - Add `{`, `}`, `_`, and `%` motions.

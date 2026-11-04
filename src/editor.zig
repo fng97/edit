@@ -37,6 +37,43 @@ const esc_highlight_background = "\x1b[47m"; // white (light gray on most palett
 const esc_line_number_foreground = "\x1b[33m"; // yellow
 const esc_colour_reset = "\x1b[0m";
 
+/// All allocated memory used by the editor lives in this struct.
+const Buffers = struct {
+    document: []u8,
+    clipboard: []u8,
+    scratch: []u8,
+    prompt_text: []u8,
+
+    fn alloc(
+        allocator: std.mem.Allocator,
+        options: struct { file_size_max: u32, col_count_max: u32 },
+    ) error{OutOfMemory}!Buffers {
+        const document = try allocator.alloc(u8, options.file_size_max);
+        errdefer allocator.free(document);
+        const clipboard = try allocator.alloc(u8, options.file_size_max);
+        errdefer allocator.free(clipboard);
+        const scratch = try allocator.alloc(u8, options.file_size_max);
+        errdefer allocator.free(scratch);
+        // -1 accounts for the ':' shown when the prompt is active.
+        const prompt_text = try allocator.alloc(u8, options.col_count_max - 1);
+        errdefer allocator.free(prompt_text);
+
+        return .{
+            .document = document,
+            .clipboard = clipboard,
+            .scratch = scratch,
+            .prompt_text = prompt_text,
+        };
+    }
+
+    fn free(buffers: Buffers, allocator: std.mem.Allocator) void {
+        allocator.free(buffers.document);
+        allocator.free(buffers.clipboard);
+        allocator.free(buffers.scratch);
+        allocator.free(buffers.prompt_text);
+    }
+};
+
 const Editor = struct {
     io: std.Io,
     writer: *std.Io.Writer,
@@ -57,7 +94,7 @@ const Editor = struct {
         },
     },
     document: std.ArrayList(u8),
-    dirty: bool = false,
+    dirty: bool,
     prompt_text_buffer: []u8,
     scratch_buffer: []u8, // used for formatting, selection paste
     clipboard: std.ArrayList(u8),
@@ -510,79 +547,73 @@ const Editor = struct {
         try writer.flush();
     }
 
-    fn init(
-        allocator: std.mem.Allocator,
+    fn init(args: struct {
         io: std.Io,
-        writer: *std.Io.Writer,
+        buffers: Buffers,
         file_path: []const u8,
         file_reader: *std.Io.Reader,
-        options: struct {
-            cursor_line_number: u32,
-            cursor_line_offset: u32,
-            col_count: u32,
-            row_count: u32,
-            file_size_max: u32,
-            col_count_max: u32,
-            row_count_max: u32,
-        },
-    ) !Editor {
-        // Read the file into the scratch buffer. The document is built from it by `load`.
-        const scratch_buffer = try allocator.alloc(u8, options.file_size_max);
-        errdefer allocator.free(scratch_buffer);
-        var scratch_writer: std.Io.Writer = .fixed(scratch_buffer);
-        const file_size = file_reader.streamRemaining(&scratch_writer) catch |err| switch (err) {
-            error.WriteFailed => return error.FileTooLong,
-            error.ReadFailed => return err,
-        };
-        var document: std.ArrayList(u8) = try .initCapacity(allocator, options.file_size_max);
-        errdefer document.deinit(allocator);
+        writer: *std.Io.Writer,
+        col_count: u32,
+        row_count: u32,
+        col_count_max: u32,
+        row_count_max: u32,
+        cursor_line_number: u32,
+        cursor_line_offset: u32,
+        is_test: bool,
+    }) error{ FileTooLong, FileContainsInvalidCharacter, ReadFailed }!Editor {
+        // The max file size is the size of the document buffer (same size as clipboard and scratch
+        // buffers).
+        assert(args.buffers.document.len == args.buffers.clipboard.len);
+        assert(args.buffers.document.len == args.buffers.scratch.len);
+        assert(args.buffers.prompt_text.len == args.col_count_max - 1); // -1 for the ':' in prompt
+
+        // Read file into scratch buffer before loading into `document`.
+        var scratch_writer: std.Io.Writer = .fixed(args.buffers.scratch);
+        const file_size =
+            args.file_reader.streamRemaining(&scratch_writer) catch |err| switch (err) {
+                error.WriteFailed => return error.FileTooLong,
+                error.ReadFailed => |e| return e,
+            };
+        var document: std.ArrayList(u8) = .initBuffer(args.buffers.document);
         var dirty = false;
-        try load(&document, &dirty, scratch_buffer, @intCast(file_size));
+        try load(&document, &dirty, args.buffers.scratch, @intCast(file_size));
 
-        var clipboard: std.ArrayList(u8) = try .initCapacity(allocator, options.file_size_max);
-        errdefer clipboard.deinit(allocator);
-        // -1 accounts for the ':' shown when the prompt is active.
-        const prompt_text_buffer = try allocator.alloc(u8, options.col_count_max - 1);
-        errdefer allocator.free(prompt_text_buffer);
-
-        const cursor_offset_start: ?u32 = offsetFromPosition(
-            document.items,
-            options.cursor_line_number,
-            options.cursor_line_offset,
-        ) orelse null;
+        const cursor_offset_start =
+            offsetFromPosition(document.items, args.cursor_line_number, args.cursor_line_offset);
 
         return .{
-            .is_test = builtin.is_test,
-            .io = io,
-            .writer = writer,
+            .is_test = args.is_test,
+            .io = args.io,
+            .writer = args.writer,
             .mode = .normal,
             .viewport = .{
-                .row_count = options.row_count,
-                .col_count = options.col_count,
+                .row_count = args.row_count,
+                .col_count = args.col_count,
                 .line_number_start = 0,
                 .line_offset_start = 0,
             },
-            .file_path = file_path,
+            .file_path = args.file_path,
             .document = document,
             .dirty = dirty,
             .cursor = .{
                 .offset = cursor_offset_start orelse 0,
                 .anchor = null,
-                .line_offset_snap = if (cursor_offset_start) |_| options.cursor_line_offset else 0,
+                .line_offset_snap = if (cursor_offset_start) |_| args.cursor_line_offset else 0,
             },
-            .clipboard = clipboard,
-            .prompt_text_buffer = prompt_text_buffer,
-            .scratch_buffer = scratch_buffer,
-            .col_count_max = options.col_count_max,
-            .row_count_max = options.row_count_max,
+            .clipboard = .initBuffer(args.buffers.clipboard),
+            .prompt_text_buffer = args.buffers.prompt_text,
+            .scratch_buffer = args.buffers.scratch,
+            .col_count_max = args.col_count_max,
+            .row_count_max = args.row_count_max,
         };
     }
 
-    fn deinit(editor: *Editor, allocator: std.mem.Allocator) void {
-        editor.document.deinit(allocator);
-        editor.clipboard.deinit(allocator);
-        allocator.free(editor.prompt_text_buffer);
-        allocator.free(editor.scratch_buffer);
+    /// Do initial render. After this, `tick` renders on every event.
+    fn start(editor: *Editor) !void {
+        const cursor_position = position(editor.document.items, editor.cursor.offset);
+        try editor.focus(cursor_position);
+        editor.centreCursorVertically();
+        try editor.render(cursor_position);
     }
 
     /// Format document if formatter available then save. If formatting fails, show the error and
@@ -751,32 +782,34 @@ pub fn main(init: std.process.Init) !void {
         else => return error.FirstEventMustBeResize,
     };
 
+    const col_count_max = 400;
+    const row_count_max = 300;
+    const buffers: Buffers = try .alloc(allocator, .{
+        .file_size_max = 1 * 1024 * 1024, // 1 MiB
+        .col_count_max = col_count_max,
+    });
+    defer buffers.free(allocator);
+
     const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
     var file_reader = file.reader(io, &.{});
-    var editor: Editor = try .init(
-        allocator,
-        io,
-        writer,
-        file_path,
-        &file_reader.interface,
-        .{
-            .cursor_line_number = if (cursor_line_number) |cln| cln - 1 else 0,
-            .cursor_line_offset = if (cursor_line_offset) |clo| clo - 1 else 0,
-            .row_count = dimensions.row_count,
-            .col_count = dimensions.col_count,
-            .file_size_max = 1 * 1024 * 1024, // 1 MB
-            .col_count_max = 400,
-            .row_count_max = 300,
-        },
-    );
+    var editor: Editor = try .init(.{
+        .io = io,
+        .buffers = buffers,
+        .file_path = file_path,
+        .file_reader = &file_reader.interface,
+        .writer = writer,
+        .cursor_line_number = if (cursor_line_number) |cln| cln - 1 else 0,
+        .cursor_line_offset = if (cursor_line_offset) |clo| clo - 1 else 0,
+        .row_count = dimensions.row_count,
+        .col_count = dimensions.col_count,
+        .col_count_max = col_count_max,
+        .row_count_max = row_count_max,
+        .is_test = false,
+    });
     file.close(io);
-    defer editor.deinit(allocator);
 
     // Do the initial render. In event loop we render on every tick.
-    const cursor_position = position(editor.document.items, editor.cursor.offset);
-    try editor.focus(cursor_position);
-    editor.centreCursorVertically();
-    try editor.render(cursor_position);
+    try editor.start();
     while (true) {
         const event = try parseOne(reader);
         if (!try editor.tick(event)) return;
@@ -2220,85 +2253,63 @@ pub const EditorFuzzContext = struct {
 
     file_buffer: [file_size_max]u8 = undefined,
     file_path_buffer: [col_count_max]u8 = undefined,
-    editor: Editor,
-
-    pub fn init(allocator: std.mem.Allocator) !EditorFuzzContext {
-        var editor: Editor = undefined;
-        editor.document = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
-        errdefer editor.document.deinit(allocator);
-        editor.clipboard = try .initCapacity(allocator, EditorFuzzContext.file_size_max);
-        errdefer editor.clipboard.deinit(allocator);
-        editor.scratch_buffer = try allocator.alloc(u8, EditorFuzzContext.file_size_max);
-        errdefer allocator.free(editor.scratch_buffer);
-        editor.prompt_text_buffer = try allocator.alloc(u8, EditorFuzzContext.col_count_max - 1);
-        errdefer allocator.free(editor.prompt_text_buffer);
-
-        return .{ .editor = editor };
-    }
-
-    pub fn deinit(ctx: *EditorFuzzContext, allocator: std.mem.Allocator) void {
-        ctx.editor.deinit(allocator);
-    }
+    document_buffer: [file_size_max]u8 = undefined,
+    clipboard_buffer: [file_size_max]u8 = undefined,
+    scratch_buffer: [file_size_max]u8 = undefined,
+    prompt_text_buffer: [col_count_max - 1]u8 = undefined,
 };
 
 pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
     @disableInstrumentation();
 
     // Generate editor state.
-    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
     const file_size = smith.slice(&ctx.file_buffer);
     const file = ctx.file_buffer[0..file_size];
     const file_path_size = smith.slice(&ctx.file_path_buffer);
     const file_path = ctx.file_path_buffer[0..file_path_size];
     const row_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.row_count_max);
     const col_count = smith.valueRangeAtMost(u32, 0, EditorFuzzContext.col_count_max);
-    @memcpy(ctx.editor.scratch_buffer[0..file.len], file);
-    var dirty = false;
-    load(&ctx.editor.document, &dirty, ctx.editor.scratch_buffer, @intCast(file.len)) catch return;
-    const cursor_offset_start =
-        smith.valueRangeLessThan(u32, 0, @intCast(ctx.editor.document.items.len));
+    const line_count: u32 = @intCast(std.mem.countScalar(u8, file, '\n') + 1);
+    const cursor_line_number = smith.valueRangeLessThan(u32, 0, line_count);
+    const cursor_line_offset = smith.valueRangeLessThan(u32, 0, EditorFuzzContext.col_count_max);
 
-    // The editor is reused for each fuzzing run to avoid memory allocations in the fuzzer. It is
-    // reinitialised using struct initialisation syntax so that we don't forget to update any
-    // fields.
-    ctx.editor = .{
-        .is_test = true,
+    var discarding_writer: std.Io.Writer.Discarding = .init(&.{});
+    var file_reader: std.Io.Reader = .fixed(file);
+    var editor = Editor.init(.{
         .io = .failing,
+        .buffers = .{
+            .document = &ctx.document_buffer,
+            .clipboard = &ctx.clipboard_buffer,
+            .scratch = &ctx.scratch_buffer,
+            .prompt_text = &ctx.prompt_text_buffer,
+        },
+        .file_path = file_path,
+        .file_reader = &file_reader,
         .writer = &discarding_writer.writer,
+        .col_count = col_count,
+        .row_count = row_count,
         .col_count_max = EditorFuzzContext.col_count_max,
         .row_count_max = EditorFuzzContext.row_count_max,
-        .file_path = file_path,
-        .viewport = .{
-            .row_count = row_count,
-            .col_count = col_count,
-            .line_number_start = 0,
-            .line_offset_start = 0,
-        },
-        .cursor = .{
-            .offset = cursor_offset_start,
-            .anchor = 0,
-            .line_offset_snap = lineOffset(ctx.editor.document.items, cursor_offset_start),
-        },
-        .mode = .normal,
-        .document = ctx.editor.document,
-        .dirty = dirty,
-        .clipboard = blk: {
-            ctx.editor.clipboard.clearRetainingCapacity();
-            break :blk ctx.editor.clipboard;
-        },
-        .prompt_text_buffer = ctx.editor.prompt_text_buffer,
-        .scratch_buffer = ctx.editor.scratch_buffer,
+        .cursor_line_number = cursor_line_number,
+        .cursor_line_offset = cursor_line_offset,
+        .is_test = true,
+    }) catch |err| switch (err) {
+        error.FileTooLong,
+        error.FileContainsInvalidCharacter,
+        => return,
+        else => return err,
     };
 
-    const cursor_position = position(ctx.editor.document.items, ctx.editor.cursor.offset);
-    ctx.editor.focus(cursor_position) catch return;
-    ctx.editor.centreCursorVertically();
+    editor.start() catch |err| switch (err) {
+        error.ViewportTooLarge,
+        error.ViewportTooSmall,
+        => return,
+        else => return err,
+    };
     while (true) {
         const event: Event = smith.value(Event); // generate input
-
         if (event == .ascii and !characterValid(event.ascii)) continue; // valid ascii only
-
-        if (ctx.editor.tick(event) catch |err| switch (err) {
+        if (editor.tick(event) catch |err| switch (err) {
             error.FileTooLong,
             error.ViewportTooLarge,
             error.ViewportTooSmall,
@@ -2310,8 +2321,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
 
 test fuzzEditor {
     std.testing.log_level = .err;
-    var ctx: EditorFuzzContext = try .init(std.testing.allocator);
-    defer ctx.deinit(std.testing.allocator);
+    var ctx: EditorFuzzContext = .{};
     return std.testing.fuzz(&ctx, fuzzEditor, .{});
 }
 
@@ -2434,6 +2444,7 @@ const TestEditor = struct {
 
     reader: std.Io.Reader,
     stripping_writer: StrippingWriter,
+    buffers: Buffers,
     editor: Editor,
 
     fn init(test_editor: *TestEditor, params: struct {
@@ -2444,6 +2455,7 @@ const TestEditor = struct {
         var file_reader: std.Io.Reader = .fixed(params.file_bytes);
 
         test_editor.stripping_writer = try .init(allocator);
+        errdefer test_editor.stripping_writer.deinit();
         test_editor.reader = .fixed(params.input);
 
         const dimensions = switch (try parseOne(&test_editor.reader)) {
@@ -2451,35 +2463,30 @@ const TestEditor = struct {
             else => return error.FirstEventMustBeResize,
         };
 
-        test_editor.editor = try .init(
-            allocator,
-            .failing,
-            test_editor.stripping_writer.writer(),
-            params.file_path,
-            &file_reader,
-            .{
-                .cursor_line_number = 0,
-                .cursor_line_offset = 0,
-                .col_count = dimensions.col_count,
-                .row_count = dimensions.row_count,
-                .file_size_max = 1024,
-                .col_count_max = 80,
-                .row_count_max = 60,
-            },
-        );
+        test_editor.buffers = try .alloc(allocator, .{ .file_size_max = 1024, .col_count_max = 80 });
+        errdefer test_editor.buffers.free(allocator);
 
-        const cursor_position = position(
-            test_editor.editor.document.items,
-            test_editor.editor.cursor.offset,
-        );
-        try test_editor.editor.focus(cursor_position);
-        test_editor.editor.centreCursorVertically();
-        try test_editor.editor.render(cursor_position);
+        test_editor.editor = try .init(.{
+            .io = .failing,
+            .buffers = test_editor.buffers,
+            .writer = test_editor.stripping_writer.writer(),
+            .file_path = params.file_path,
+            .file_reader = &file_reader,
+            .cursor_line_number = 0,
+            .cursor_line_offset = 0,
+            .col_count = dimensions.col_count,
+            .row_count = dimensions.row_count,
+            .col_count_max = 80,
+            .row_count_max = 60,
+            .is_test = true,
+        });
+
+        try test_editor.editor.start();
     }
 
     fn deinit(test_editor: *TestEditor) void {
         test_editor.stripping_writer.deinit();
-        test_editor.editor.deinit(allocator);
+        test_editor.buffers.free(allocator);
     }
 
     fn tick(test_editor: *TestEditor) !void {
@@ -3087,6 +3094,63 @@ test "A inserts at end of line" {
         \\~
         \\hello.c [+]                     4,30
     , .{ .row = 3, .col = 32 }, .steady_block);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "a on a newline inserts before it" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.txt",
+        .file_bytes = "ab\n\ncd\n",
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "$" ++ // go to end of line, on the newline
+            "a" ++ // append
+            "x" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            "j" ++ // move to the empty line
+            "a" ++ // append
+            "y" ++ // insert text
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.tick(); // process $
+    try test_editor.tick(); // process a
+    try test_editor.tick(); // process x
+    try test_editor.tick(); // process escape
+    try std.testing.expectEqualStrings("abx\n\ncd\n", test_editor.editor.document.items);
+
+    try test_editor.tick(); // process j
+    try test_editor.tick(); // process a
+    try test_editor.tick(); // process y
+    try test_editor.tick(); // process escape
+    try std.testing.expectEqualStrings("abx\ny\ncd\n", test_editor.editor.document.items);
+
+    try test_editor.expectQuit(.no_save, .force); // process :q!\r
+}
+
+test "backspace in insert mode doesn't yank" {
+    var test_editor: TestEditor = undefined;
+    try test_editor.init(.{
+        .file_path = "hello.txt",
+        .file_bytes = "hello\n",
+        .input = "\x1b[48;12;36;0;0t" ++ // dimensions: 12 rows by 36 cols
+            "y" ++ // yank 'h' into the clipboard
+            "A" ++ // insert at end of line
+            "\x08" ++ // backspace
+            "\x1b[27u" ++ // ESC: return to normal mode
+            ":q!\r", // quit
+    });
+    defer test_editor.deinit();
+
+    try test_editor.tick(); // process y
+    try test_editor.tick(); // process A
+    try test_editor.tick(); // process backspace
+    try test_editor.tick(); // process escape
+    try std.testing.expectEqualStrings("hell\n", test_editor.editor.document.items);
+    try std.testing.expectEqualStrings("h", test_editor.editor.clipboard.items); // unchanged
 
     try test_editor.expectQuit(.no_save, .force); // process :q!\r
 }

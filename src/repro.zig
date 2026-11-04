@@ -16,9 +16,6 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(crash);
 
     var smith: std.testing.Smith = .{ .in = crash };
-
-    var ctx: EditorFuzzContext = try .init(allocator);
-    defer ctx.deinit(allocator);
-
+    var ctx: EditorFuzzContext = .{};
     try fuzzEditor(&ctx, &smith);
 }
