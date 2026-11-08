@@ -7,6 +7,7 @@
 
 ## TODO
 
+- Limit `tick` error set to things we can't handle to reduce crashes.
 - Basic search (check out `std.ascii`).
 - Yank, cut, and paste using system clipboard: `CSI ? 2004 h`, `CSI ? 2004 l`,
   `CSI 200 ~`, and `CSI 201 ~`.
