@@ -660,41 +660,21 @@ fn centreCursorVertically(editor: *Editor) void {
 }
 
 fn formatDocument(editor: *Editor) !?bool {
-    const document_kind: enum {
-        zig,
-        markdown,
-        sh,
-        testing,
-        c, // C and C++
-        unknown,
-    } = if (editor.is_test)
-        .testing
-    else if (std.mem.endsWith(u8, editor.file_path, ".zig") or
-        std.mem.endsWith(u8, editor.file_path, ".zon"))
-        .zig
-    else if (std.mem.endsWith(u8, editor.file_path, ".md"))
-        .markdown
-    else if (std.mem.endsWith(u8, editor.file_path, ".c") or
-        std.mem.endsWith(u8, editor.file_path, ".h") or
-        std.mem.endsWith(u8, editor.file_path, ".cpp") or
-        std.mem.endsWith(u8, editor.file_path, ".hpp"))
-        .c
-    else if (std.mem.endsWith(u8, editor.file_path, ".sh"))
-        .sh
-    else
-        .unknown;
-
-    const formatted = (if (document_kind == .testing) formatDocumentWithTestFormatter(
+    const formatted = (if (editor.is_test) formatDocumentWithTestFormatter(
         editor.document.items,
         editor.scratch_buffer,
-    ) else try runFormatter(editor.io, switch (document_kind) {
-        .testing => unreachable,
-        .zig => &.{ "zig", "fmt", "--stdin" },
-        .markdown => &.{ "prettier", "--parser", "markdown" },
-        .sh => &.{ "shfmt", "--indent", "4" },
-        .c => &.{ "clang-format", "--style=Google" },
-        .unknown => return null, // no formatter, save as is
-    }, editor.document.items, editor.scratch_buffer)) orelse return false;
+    ) else blk: {
+        const extension = std.meta.stringToEnum(
+            enum { @".zig", @".zon", @".md", @".sh", @".c", @".h", @".cpp", @".hpp" },
+            std.fs.path.extension(editor.file_path),
+        ) orelse return null; // no formatter, save as is
+        break :blk try runFormatter(editor.io, switch (extension) {
+            .@".zig", .@".zon" => &.{ "zig", "fmt", "--stdin" },
+            .@".md" => &.{ "prettier", "--parser", "markdown" },
+            .@".sh" => &.{ "shfmt", "--indent", "4" },
+            .@".c", .@".h", .@".cpp", .@".hpp" => &.{ "clang-format", "--style=Google" }, // C, C++
+        }, editor.document.items, editor.scratch_buffer);
+    }) orelse return false;
 
     // Treat output we can't accept as a formatting failure, leaving the document untouched.
     // Check it's valid before replacing, replace asserts on invalid characters.
