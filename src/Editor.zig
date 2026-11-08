@@ -136,27 +136,30 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                     tokenHeadNext(editor.document.items, editor.cursor.offset),
                     .snap_update,
                 ),
-                'i' => editor.mode = .insert,
-                'I' => {
+                // Don't go into insert mode if a selection is active.
+                'i' => if (editor.cursor.anchor == null) {
+                    editor.mode = .insert;
+                },
+                'I' => if (editor.cursor.anchor == null) {
                     const offset = lineHead(editor.document.items, editor.cursor.offset) +
                         lineIndentation(editor.document.items, editor.cursor.offset);
                     editor.cursor.update(editor.document.items, offset, .snap_update);
                     editor.mode = .insert;
                 },
-                'a' => {
+                'a' => if (editor.cursor.anchor == null) {
                     if (editor.document.items[editor.cursor.offset] != '\n')
                         editor.cursor.move(.right, 1, editor.document.items);
                     editor.mode = .insert;
                 },
-                'A' => {
+                'A' => if (editor.cursor.anchor == null) {
                     editor.cursor.moveMax(.right, editor.document.items);
                     editor.mode = .insert;
                 },
-                'o' => {
                     editor.cursor.moveMax(.right, editor.document.items);
                     const indentation = lineIndentation(
                         editor.document.items,
                         editor.cursor.offset,
+                'o' => if (editor.cursor.anchor == null) {
                     );
                     try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
                     for (0..indentation) |_| try insert(
@@ -167,7 +170,7 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                     );
                     editor.mode = .insert;
                 },
-                'O' => {
+                'O' => if (editor.cursor.anchor == null) {
                     editor.cursor.moveMax(.left, editor.document.items);
                     const indentation = lineIndentation(
                         editor.document.items,
