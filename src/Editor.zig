@@ -317,33 +317,37 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                     command.cursor_offset -= 1;
                     assert(command.cursor_offset == command.text.items.len);
                 },
-                .enter => {
-                    if (std.mem.eql(u8, "w", command.text.items)) {
-                        if (try editor.formatAndSave()) editor.mode = .normal;
-                    } else if (std.mem.eql(u8, "q", command.text.items)) {
+                .enter => if (std.meta.stringToEnum(
+                    enum { w, q, @"w!", @"q!", wq, @"wq!" },
+                    command.text.items,
+                )) |name| switch (name) {
+                    .w => if (try editor.formatAndSave()) {
+                        editor.mode = .normal;
+                    },
+                    .q => {
                         if (!editor.dirty) return false; // exit!
                         // Trying to exit without saving. Prompt user to save.
                         editor.mode = .{ .prompt = .unsaved };
-                    } else if (std.mem.eql(u8, "w!", command.text.items)) { // skip formatting
+                    },
+                    .@"w!" => { // skip formatting
                         try editor.save();
                         editor.mode = .normal;
-                    } else if (std.mem.eql(u8, "q!", command.text.items)) {
-                        return false; // exit, for real!
-                    } else if (std.mem.eql(u8, "wq", command.text.items)) {
-                        if (try editor.formatAndSave()) return false; // exit if saved
-                    } else if (std.mem.eql(u8, "wq!", command.text.items)) { // skip formatting
+                    },
+                    .@"q!" => return false, // exit, for real!
+                    .wq => if (try editor.formatAndSave()) return false, // exit if saved
+                    .@"wq!" => { // skip formatting
                         try editor.save();
                         return false;
-                    } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
-                        // Line number given is indexed from 1.
-                        const line_number = @max(number, 1) - 1;
-                        if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
-                            editor.cursor.update(editor.document.items, head, .snap_remain);
-                            editor.centreCursorVertically();
-                        }
-                        editor.mode = .normal;
-                    } else editor.showMessage("invalid command", .{});
-                },
+                    },
+                } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
+                    // Line number given is indexed from 1.
+                    const line_number = @max(number, 1) - 1;
+                    if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
+                        editor.cursor.update(editor.document.items, head, .snap_remain);
+                        editor.centreCursorVertically();
+                    }
+                    editor.mode = .normal;
+                } else editor.showMessage("invalid command", .{}),
                 .tab, .chord => {}, // do nothing
                 .resize => unreachable,
             },
