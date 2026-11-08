@@ -24,7 +24,15 @@ pub fn build(b: *std.Build) void {
     });
 
     run_step.dependOn(blk: {
-        const main = b.addExecutable(.{ .name = "edit", .root_module = mod });
+        const main = b.addExecutable(.{
+            .name = "edit",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "Editor", .module = mod }},
+            }),
+        });
         b.installArtifact(main);
         const run = b.addRunArtifact(main);
         run.step.dependOn(install_step); // run from prefix
@@ -40,6 +48,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("src/repro.zig"),
                 .target = target,
                 .optimize = optimize,
+                .imports = &.{.{ .name = "Editor", .module = mod }},
             }),
         }),
     ).step);

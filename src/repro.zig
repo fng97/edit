@@ -1,7 +1,7 @@
 const std = @import("std");
-const editor = @import("editor.zig");
-const EditorFuzzContext = editor.EditorFuzzContext;
-const fuzzEditor = editor.fuzzEditor;
+const Editor = @import("Editor");
+const EditorFuzzContext = Editor.EditorFuzzContext;
+const fuzzEditor = Editor.fuzzEditor;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();

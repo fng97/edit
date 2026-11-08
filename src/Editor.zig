@@ -12,39 +12,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const root = @This();
+const Editor = @This();
 const assert = std.debug.assert;
 
-const terminal_init =
-    // Use alternate screen. Stores original screen and cursor state and has no scrollback. See
-    // https://terminfo.dev/modes/decset-1049-alt-screen-enter.
-    "\x1b[?1049h" ++
-    // Initialise Kitty Keyboard Protocol (KKP) in mode 1: disambiguate escape codes: See
-    // https://sw.kovidgoyal.net/kitty/keyboard-protocol/#disambiguate-escape-codes.
-    "\x1b[>1u" ++
-    // Enable in-band resize notifications. See
-    // https://gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83.
-    "\x1b[?2048h";
-const terminal_deinit =
-    "\x1b[?2026l" ++ // end synchronised update, in case we crashed mid-render
-    "\x1b[0m" ++ // reset colours, in case we crashed mid-render
-    "\x1b[?25h" ++ // show cursor
-    "\x1b[?2048l" ++ // disable in-band resize notifications
-    "\x1b[<u" ++ // pop KKP flags
-    "\x1b[?1049l"; // exit alt screen
 const esc_highlight_foreground = "\x1b[30m"; // black
 const esc_highlight_background = "\x1b[47m"; // white (light gray on most palettes)
 const esc_line_number_foreground = "\x1b[33m"; // yellow
 const esc_colour_reset = "\x1b[0m";
 
 /// All allocated memory used by the editor lives in this struct.
-const Buffers = struct {
+pub const Buffers = struct {
     document: []u8,
     clipboard: []u8,
     scratch: []u8,
     prompt: []u8, // prompt command text or message
 
-    fn alloc(
+    pub fn alloc(
         allocator: std.mem.Allocator,
         options: struct { file_size_max: u32, col_count_max: u32 },
     ) error{OutOfMemory}!Buffers {
@@ -66,7 +49,7 @@ const Buffers = struct {
         };
     }
 
-    fn free(buffers: Buffers, allocator: std.mem.Allocator) void {
+    pub fn free(buffers: Buffers, allocator: std.mem.Allocator) void {
         allocator.free(buffers.document);
         allocator.free(buffers.clipboard);
         allocator.free(buffers.scratch);
@@ -74,856 +57,677 @@ const Buffers = struct {
     }
 };
 
-const Editor = struct {
-    io: std.Io,
-    writer: *std.Io.Writer,
+io: std.Io,
+writer: *std.Io.Writer,
 
-    is_test: bool,
-    col_count_max: u32,
-    row_count_max: u32,
-    file_path: []const u8,
-    viewport: Viewport,
-    cursor: Cursor,
-    mode: union(enum) {
-        normal,
-        insert,
-        prompt: union(enum) {
-            command: struct { text: std.ArrayList(u8), cursor_offset: u32 },
-            message: std.ArrayList(u8),
-            unsaved,
-        },
+is_test: bool,
+col_count_max: u32,
+row_count_max: u32,
+file_path: []const u8,
+viewport: Viewport,
+cursor: Cursor,
+mode: union(enum) {
+    normal,
+    insert,
+    prompt: union(enum) {
+        command: struct { text: std.ArrayList(u8), cursor_offset: u32 },
+        message: std.ArrayList(u8),
+        unsaved,
     },
-    document: std.ArrayList(u8),
-    dirty: bool,
-    prompt_buffer: []u8, // shared by prompt command text and messages
-    scratch_buffer: []u8, // used for formatting, selection paste
-    clipboard: std.ArrayList(u8),
+},
+document: std.ArrayList(u8),
+dirty: bool,
+prompt_buffer: []u8, // shared by prompt command text and messages
+scratch_buffer: []u8, // used for formatting, selection paste
+clipboard: std.ArrayList(u8),
 
-    fn tick(editor: *Editor, event: Event) !bool {
-        if (event == .resize) {
-            editor.viewport.row_count = event.resize.row_count;
-            editor.viewport.col_count = event.resize.col_count;
-            // Crop the command text so it still fits on the row with the ':' prompt prefix and the
-            // cursor after it.
-            if (editor.mode == .prompt and editor.mode.prompt == .command) {
-                const command = &editor.mode.prompt.command;
-                assert(command.cursor_offset == command.text.items.len);
-                command.text.shrinkRetainingCapacity(
-                    @min(command.text.items.len, editor.viewport.col_count -| 2),
-                );
-                command.cursor_offset = @intCast(command.text.items.len);
-            }
-        } else switch (editor.mode) {
-            .normal => switch (event) {
-                .ascii => |c| switch (c) {
-                    'h' => editor.cursor.move(.left, 1, editor.document.items),
-                    'l' => editor.cursor.move(.right, 1, editor.document.items),
-                    'j' => editor.cursor.move(.down, 1, editor.document.items),
-                    'k' => editor.cursor.move(.up, 1, editor.document.items),
-                    '0' => editor.cursor.moveMax(.left, editor.document.items),
-                    '$' => editor.cursor.moveMax(.right, editor.document.items),
-                    'G' => editor.cursor.moveMax(.down, editor.document.items),
-                    'g' => editor.cursor.moveMax(.up, editor.document.items),
-                    'e' => editor.cursor.update(
+pub fn tick(editor: *Editor, event: Event) !bool {
+    if (event == .resize) {
+        editor.viewport.row_count = event.resize.row_count;
+        editor.viewport.col_count = event.resize.col_count;
+        // Crop the command text so it still fits on the row with the ':' prompt prefix and the
+        // cursor after it.
+        if (editor.mode == .prompt and editor.mode.prompt == .command) {
+            const command = &editor.mode.prompt.command;
+            assert(command.cursor_offset == command.text.items.len);
+            command.text.shrinkRetainingCapacity(
+                @min(command.text.items.len, editor.viewport.col_count -| 2),
+            );
+            command.cursor_offset = @intCast(command.text.items.len);
+        }
+    } else switch (editor.mode) {
+        .normal => switch (event) {
+            .ascii => |c| switch (c) {
+                'h' => editor.cursor.move(.left, 1, editor.document.items),
+                'l' => editor.cursor.move(.right, 1, editor.document.items),
+                'j' => editor.cursor.move(.down, 1, editor.document.items),
+                'k' => editor.cursor.move(.up, 1, editor.document.items),
+                '0' => editor.cursor.moveMax(.left, editor.document.items),
+                '$' => editor.cursor.moveMax(.right, editor.document.items),
+                'G' => editor.cursor.moveMax(.down, editor.document.items),
+                'g' => editor.cursor.moveMax(.up, editor.document.items),
+                'e' => editor.cursor.update(
+                    editor.document.items,
+                    wordTailNext(editor.document.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'E' => editor.cursor.update(
+                    editor.document.items,
+                    tokenTailNext(editor.document.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'b' => editor.cursor.update(
+                    editor.document.items,
+                    wordHeadPrev(editor.document.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'B' => editor.cursor.update(
+                    editor.document.items,
+                    tokenHeadPrev(editor.document.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'w' => editor.cursor.update(
+                    editor.document.items,
+                    wordHeadNext(editor.document.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'W' => editor.cursor.update(
+                    editor.document.items,
+                    tokenHeadNext(editor.document.items, editor.cursor.offset),
+                    .snap_update,
+                ),
+                'i' => editor.mode = .insert,
+                'I' => {
+                    const offset = lineHead(editor.document.items, editor.cursor.offset) +
+                        lineIndentation(editor.document.items, editor.cursor.offset);
+                    editor.cursor.update(editor.document.items, offset, .snap_update);
+                    editor.mode = .insert;
+                },
+                'a' => {
+                    if (editor.document.items[editor.cursor.offset] != '\n')
+                        editor.cursor.move(.right, 1, editor.document.items);
+                    editor.mode = .insert;
+                },
+                'A' => {
+                    editor.cursor.moveMax(.right, editor.document.items);
+                    editor.mode = .insert;
+                },
+                'o' => {
+                    editor.cursor.moveMax(.right, editor.document.items);
+                    const indentation = lineIndentation(
                         editor.document.items,
-                        wordTailNext(editor.document.items, editor.cursor.offset),
-                        .snap_update,
-                    ),
-                    'E' => editor.cursor.update(
-                        editor.document.items,
-                        tokenTailNext(editor.document.items, editor.cursor.offset),
-                        .snap_update,
-                    ),
-                    'b' => editor.cursor.update(
-                        editor.document.items,
-                        wordHeadPrev(editor.document.items, editor.cursor.offset),
-                        .snap_update,
-                    ),
-                    'B' => editor.cursor.update(
-                        editor.document.items,
-                        tokenHeadPrev(editor.document.items, editor.cursor.offset),
-                        .snap_update,
-                    ),
-                    'w' => editor.cursor.update(
-                        editor.document.items,
-                        wordHeadNext(editor.document.items, editor.cursor.offset),
-                        .snap_update,
-                    ),
-                    'W' => editor.cursor.update(
-                        editor.document.items,
-                        tokenHeadNext(editor.document.items, editor.cursor.offset),
-                        .snap_update,
-                    ),
-                    'i' => editor.mode = .insert,
-                    'I' => {
-                        const offset = lineHead(editor.document.items, editor.cursor.offset) +
-                            lineIndentation(editor.document.items, editor.cursor.offset);
-                        editor.cursor.update(editor.document.items, offset, .snap_update);
-                        editor.mode = .insert;
-                    },
-                    'a' => {
-                        if (editor.document.items[editor.cursor.offset] != '\n')
-                            editor.cursor.move(.right, 1, editor.document.items);
-                        editor.mode = .insert;
-                    },
-                    'A' => {
-                        editor.cursor.moveMax(.right, editor.document.items);
-                        editor.mode = .insert;
-                    },
-                    'o' => {
-                        editor.cursor.moveMax(.right, editor.document.items);
-                        const indentation = lineIndentation(
-                            editor.document.items,
-                            editor.cursor.offset,
-                        );
-                        try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                        for (0..indentation) |_| try insert(
-                            &editor.document,
-                            &editor.cursor,
-                            &editor.dirty,
-                            " ",
-                        );
-                        editor.mode = .insert;
-                    },
-                    'O' => {
-                        editor.cursor.moveMax(.left, editor.document.items);
-                        const indentation = lineIndentation(
-                            editor.document.items,
-                            editor.cursor.offset,
-                        );
-                        try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                        editor.cursor.move(.up, 1, editor.document.items);
-                        for (0..indentation) |_| try insert(
-                            &editor.document,
-                            &editor.cursor,
-                            &editor.dirty,
-                            " ",
-                        );
-                        editor.mode = .insert;
-                    },
-                    // Enable/disable selection. If we have a selection in the same mode, deselect,
-                    // otherwise, do selection. Going from a linewise selection to a normal one,
-                    // and vice versa, is valid.
-                    'v' => editor.cursor.anchor = if (editor.cursor.anchor) |anchor|
-                        if (!anchor.lines) null else .{ .offset = anchor.offset, .lines = false }
-                    else
-                        .{ .offset = editor.cursor.offset, .lines = false },
-                    // Enable/disable linewise selection. Same as above.
-                    'V' => editor.cursor.anchor = if (editor.cursor.anchor) |anchor|
-                        if (anchor.lines) null else .{ .offset = anchor.offset, .lines = true }
-                    else
-                        .{ .offset = editor.cursor.offset, .lines = true },
-                    'd' => delete(
+                        editor.cursor.offset,
+                    );
+                    try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
+                    for (0..indentation) |_| try insert(
                         &editor.document,
-                        &editor.clipboard,
                         &editor.cursor,
                         &editor.dirty,
-                    ),
-                    ':' => editor.mode = .{
-                        .prompt = .{
-                            .command = .{
-                                .text = .initBuffer(editor.prompt_buffer),
-                                .cursor_offset = 0,
-                            },
-                        },
-                    },
-                    'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
-                    // Yank the lines covered by the selection or, without one, the cursor's line.
-                    // The cursor stays where it is.
-                    'Y' => {
-                        const anchor_offset = if (editor.cursor.anchor) |anchor|
-                            anchor.offset
-                        else
-                            editor.cursor.offset;
-                        var lines = editor.cursor;
-                        lines.anchor = .{ .offset = anchor_offset, .lines = true };
-                        yankInner(editor.document.items, &editor.clipboard, lines);
-                        editor.cursor.anchor = null;
-                    },
-                    // Delete the lines covered by the selection or, without one, the cursor's line.
-                    'D' => {
-                        const anchor_offset = if (editor.cursor.anchor) |anchor|
-                            anchor.offset
-                        else
-                            editor.cursor.offset;
-                        editor.cursor.anchor = .{ .offset = anchor_offset, .lines = true };
-                        delete(&editor.document, &editor.clipboard, &editor.cursor, &editor.dirty);
-                    },
-                    // 'P' => {}, // TODO: paste before
-                    'p' => try paste(
+                        " ",
+                    );
+                    editor.mode = .insert;
+                },
+                'O' => {
+                    editor.cursor.moveMax(.left, editor.document.items);
+                    const indentation = lineIndentation(
+                        editor.document.items,
+                        editor.cursor.offset,
+                    );
+                    try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
+                    editor.cursor.move(.up, 1, editor.document.items);
+                    for (0..indentation) |_| try insert(
                         &editor.document,
-                        &editor.clipboard,
-                        editor.scratch_buffer,
                         &editor.cursor,
                         &editor.dirty,
-                    ),
-                    'z' => editor.centreCursorVertically(),
-                    else => {},
+                        " ",
+                    );
+                    editor.mode = .insert;
                 },
-                .chord => |chord| {
-                    const ctrl: Modifiers = .{ .ctrl = true };
-                    switch (chord.ascii) {
-                        'u', 'd' => |c| if (chord.modifiers == ctrl) {
-                            editor.cursor.move(
-                                if (c == 'u') .up else .down,
-                                editor.viewport.row_count / 3,
-                                editor.document.items,
-                            );
-                            editor.centreCursorVertically();
+                // Enable/disable selection. If we have a selection in the same mode, deselect,
+                // otherwise, do selection. Going from a linewise selection to a normal one,
+                // and vice versa, is valid.
+                'v' => editor.cursor.anchor = if (editor.cursor.anchor) |anchor|
+                    if (!anchor.lines) null else .{ .offset = anchor.offset, .lines = false }
+                else
+                    .{ .offset = editor.cursor.offset, .lines = false },
+                // Enable/disable linewise selection. Same as above.
+                'V' => editor.cursor.anchor = if (editor.cursor.anchor) |anchor|
+                    if (anchor.lines) null else .{ .offset = anchor.offset, .lines = true }
+                else
+                    .{ .offset = editor.cursor.offset, .lines = true },
+                'd' => delete(
+                    &editor.document,
+                    &editor.clipboard,
+                    &editor.cursor,
+                    &editor.dirty,
+                ),
+                ':' => editor.mode = .{
+                    .prompt = .{
+                        .command = .{
+                            .text = .initBuffer(editor.prompt_buffer),
+                            .cursor_offset = 0,
                         },
-                        else => {},
-                    }
+                    },
                 },
-                .escape => editor.cursor.anchor = null,
-                .backspace,
-                .enter,
-                .tab,
-                => {}, // do nothing
-                .resize => unreachable,
+                'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
+                // Yank the lines covered by the selection or, without one, the cursor's line.
+                // The cursor stays where it is.
+                'Y' => {
+                    const anchor_offset = if (editor.cursor.anchor) |anchor|
+                        anchor.offset
+                    else
+                        editor.cursor.offset;
+                    var lines = editor.cursor;
+                    lines.anchor = .{ .offset = anchor_offset, .lines = true };
+                    yankInner(editor.document.items, &editor.clipboard, lines);
+                    editor.cursor.anchor = null;
+                },
+                // Delete the lines covered by the selection or, without one, the cursor's line.
+                'D' => {
+                    const anchor_offset = if (editor.cursor.anchor) |anchor|
+                        anchor.offset
+                    else
+                        editor.cursor.offset;
+                    editor.cursor.anchor = .{ .offset = anchor_offset, .lines = true };
+                    delete(&editor.document, &editor.clipboard, &editor.cursor, &editor.dirty);
+                },
+                // 'P' => {}, // TODO: paste before
+                'p' => try paste(
+                    &editor.document,
+                    &editor.clipboard,
+                    editor.scratch_buffer,
+                    &editor.cursor,
+                    &editor.dirty,
+                ),
+                'z' => editor.centreCursorVertically(),
+                else => {},
             },
-            .insert => {
-                editor.cursor.anchor = null;
-                switch (event) {
-                    .escape => editor.mode = .normal,
-                    .ascii => |c| try insert(
-                        &editor.document,
-                        &editor.cursor,
-                        &editor.dirty,
-                        &.{c},
-                    ),
-                    .backspace => if (editor.cursor.offset != 0) {
-                        editor.cursor.move(.left, 1, editor.document.items);
-                        // Using replace here instead of delete because delete updates clipboard.
-                        replace(
-                            &editor.document,
-                            &editor.dirty,
-                            editor.cursor.offset,
-                            1,
-                            "",
-                        ) catch unreachable;
-                    },
-                    .tab => try insert(&editor.document, &editor.cursor, &editor.dirty, "    "),
-                    .enter => {
-                        const indent_count = lineIndentation(
+            .chord => |chord| {
+                const ctrl: Modifiers = .{ .ctrl = true };
+                switch (chord.ascii) {
+                    'u', 'd' => |c| if (chord.modifiers == ctrl) {
+                        editor.cursor.move(
+                            if (c == 'u') .up else .down,
+                            editor.viewport.row_count / 3,
                             editor.document.items,
-                            editor.cursor.offset,
                         );
-                        try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                        for (0..indent_count) |_|
-                            try insert(&editor.document, &editor.cursor, &editor.dirty, " ");
+                        editor.centreCursorVertically();
                     },
-                    .chord => {}, // do nothing
-                    .resize => unreachable,
+                    else => {},
                 }
             },
-            .prompt => |*prompt| switch (prompt.*) {
-                .command => |*command| switch (event) {
-                    .escape => editor.mode = .normal,
-                    // Keep entering text as long as we've got room in the document and on the row. The
-                    // -2 below (aside from count->index) is to account for the prompt prefix, ':'.
-                    .ascii => |c| if (command.cursor_offset < command.text.capacity and
-                        command.cursor_offset < editor.viewport.col_count - 2)
-                    {
-                        assert(command.cursor_offset == command.text.items.len);
-                        try command.text.insertBounded(command.cursor_offset, c);
-                        command.cursor_offset += 1;
-                        assert(command.cursor_offset == command.text.items.len);
-                    },
-                    .backspace => if (command.cursor_offset != 0) {
-                        assert(command.cursor_offset == command.text.items.len);
-                        _ = command.text.orderedRemove(command.cursor_offset - 1);
-                        command.cursor_offset -= 1;
-                        assert(command.cursor_offset == command.text.items.len);
-                    },
-                    .enter => {
-                        if (std.mem.eql(u8, "w", command.text.items)) {
-                            if (try editor.formatAndSave()) editor.mode = .normal;
-                        } else if (std.mem.eql(u8, "q", command.text.items)) {
-                            if (!editor.dirty) return false; // exit!
-                            // Trying to exit without saving. Prompt user to save.
-                            editor.mode = .{ .prompt = .unsaved };
-                        } else if (std.mem.eql(u8, "w!", command.text.items)) { // skip formatting
-                            try editor.save();
-                            editor.mode = .normal;
-                        } else if (std.mem.eql(u8, "q!", command.text.items)) {
-                            return false; // exit, for real!
-                        } else if (std.mem.eql(u8, "wq", command.text.items)) {
-                            if (try editor.formatAndSave()) return false; // exit if saved
-                        } else if (std.mem.eql(u8, "wq!", command.text.items)) { // skip formatting
-                            try editor.save();
-                            return false;
-                        } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
-                            // Line number given is indexed from 1.
-                            const line_number = @max(number, 1) - 1;
-                            if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
-                                editor.cursor.update(editor.document.items, head, .snap_remain);
-                                editor.centreCursorVertically();
-                            }
-                            editor.mode = .normal;
-                        } else editor.showMessage("invalid command", .{});
-                    },
-                    .tab, .chord => {}, // do nothing
-                    .resize => unreachable,
+            .escape => editor.cursor.anchor = null,
+            .backspace,
+            .enter,
+            .tab,
+            => {}, // do nothing
+            .resize => unreachable,
+        },
+        .insert => {
+            editor.cursor.anchor = null;
+            switch (event) {
+                .escape => editor.mode = .normal,
+                .ascii => |c| try insert(
+                    &editor.document,
+                    &editor.cursor,
+                    &editor.dirty,
+                    &.{c},
+                ),
+                .backspace => if (editor.cursor.offset != 0) {
+                    editor.cursor.move(.left, 1, editor.document.items);
+                    // Using replace here instead of delete because delete updates clipboard.
+                    replace(
+                        &editor.document,
+                        &editor.dirty,
+                        editor.cursor.offset,
+                        1,
+                        "",
+                    ) catch unreachable;
                 },
-                .message => switch (event) {
-                    .enter, .escape => editor.mode = .normal,
-                    .ascii, .tab, .chord, .backspace => {}, // do nothing
-                    .resize => unreachable,
+                .tab => try insert(&editor.document, &editor.cursor, &editor.dirty, "    "),
+                .enter => {
+                    const indent_count = lineIndentation(
+                        editor.document.items,
+                        editor.cursor.offset,
+                    );
+                    try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
+                    for (0..indent_count) |_|
+                        try insert(&editor.document, &editor.cursor, &editor.dirty, " ");
                 },
-                .unsaved => switch (event) {
-                    .escape => editor.mode = .normal,
-                    .ascii => |c| switch (c) {
-                        'y' => if (try editor.formatAndSave()) return false, // exit if saved
-                        'n' => return false, // quit without saving
-                        else => {}, // do nothing
-                    },
-                    .enter, .tab, .chord, .backspace => {}, // do nothing
-                    .resize => unreachable,
+                .chord => {}, // do nothing
+                .resize => unreachable,
+            }
+        },
+        .prompt => |*prompt| switch (prompt.*) {
+            .command => |*command| switch (event) {
+                .escape => editor.mode = .normal,
+                // Keep entering text as long as we've got room in the document and on the row. The
+                // -2 below (aside from count->index) is to account for the prompt prefix, ':'.
+                .ascii => |c| if (command.cursor_offset < command.text.capacity and
+                    command.cursor_offset < editor.viewport.col_count - 2)
+                {
+                    assert(command.cursor_offset == command.text.items.len);
+                    try command.text.insertBounded(command.cursor_offset, c);
+                    command.cursor_offset += 1;
+                    assert(command.cursor_offset == command.text.items.len);
                 },
+                .backspace => if (command.cursor_offset != 0) {
+                    assert(command.cursor_offset == command.text.items.len);
+                    _ = command.text.orderedRemove(command.cursor_offset - 1);
+                    command.cursor_offset -= 1;
+                    assert(command.cursor_offset == command.text.items.len);
+                },
+                .enter => {
+                    if (std.mem.eql(u8, "w", command.text.items)) {
+                        if (try editor.formatAndSave()) editor.mode = .normal;
+                    } else if (std.mem.eql(u8, "q", command.text.items)) {
+                        if (!editor.dirty) return false; // exit!
+                        // Trying to exit without saving. Prompt user to save.
+                        editor.mode = .{ .prompt = .unsaved };
+                    } else if (std.mem.eql(u8, "w!", command.text.items)) { // skip formatting
+                        try editor.save();
+                        editor.mode = .normal;
+                    } else if (std.mem.eql(u8, "q!", command.text.items)) {
+                        return false; // exit, for real!
+                    } else if (std.mem.eql(u8, "wq", command.text.items)) {
+                        if (try editor.formatAndSave()) return false; // exit if saved
+                    } else if (std.mem.eql(u8, "wq!", command.text.items)) { // skip formatting
+                        try editor.save();
+                        return false;
+                    } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
+                        // Line number given is indexed from 1.
+                        const line_number = @max(number, 1) - 1;
+                        if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
+                            editor.cursor.update(editor.document.items, head, .snap_remain);
+                            editor.centreCursorVertically();
+                        }
+                        editor.mode = .normal;
+                    } else editor.showMessage("invalid command", .{});
+                },
+                .tab, .chord => {}, // do nothing
+                .resize => unreachable,
             },
-        }
-
-        const cursor_position = position(editor.document.items, editor.cursor.offset);
-
-        // Cursor is always at snap line offset or line end.
-        assert(cursor_position.line_offset == @min(
-            editor.cursor.line_offset_snap,
-            lineSize(editor.document.items, editor.cursor.offset) - 1,
-        ));
-        assert(cursor_position.line_offset <= editor.cursor.line_offset_snap);
-        // Selection must point into the document.
-        if (editor.cursor.anchor) |anchor| assert(anchor.offset < editor.document.items.len);
-        if (editor.cursor.selection(editor.document.items)) |selection| {
-            assert(selection.head < editor.document.items.len);
-            assert(selection.tail < editor.document.items.len);
-        }
-
-        try editor.focus(cursor_position);
-        try editor.render(cursor_position);
-
-        return true;
+            .message => switch (event) {
+                .enter, .escape => editor.mode = .normal,
+                .ascii, .tab, .chord, .backspace => {}, // do nothing
+                .resize => unreachable,
+            },
+            .unsaved => switch (event) {
+                .escape => editor.mode = .normal,
+                .ascii => |c| switch (c) {
+                    'y' => if (try editor.formatAndSave()) return false, // exit if saved
+                    'n' => return false, // quit without saving
+                    else => {}, // do nothing
+                },
+                .enter, .tab, .chord, .backspace => {}, // do nothing
+                .resize => unreachable,
+            },
+        },
     }
 
-    /// Focus the viewport: Ensure it contains the cursor.
-    fn focus(editor: *Editor, cursor: Position) error{ ViewportTooSmall, ViewportTooLarge }!void {
-        const row_count = editor.viewport.row_count;
-        const row_count_max = editor.row_count_max;
-        const col_count = editor.viewport.col_count;
-        const col_count_max = editor.col_count_max;
-        const line_number = cursor.line_number;
-        const line_offset = cursor.line_offset;
+    const cursor_position = position(editor.document.items, editor.cursor.offset);
 
-        // Check viewport dimensions.
-        if (row_count < 2) return error.ViewportTooSmall; // at least one line plus the status line
-        if (row_count > row_count_max) return error.ViewportTooLarge;
-        if (col_count < editor.viewport.gutterWidth() + 1)
-            return error.ViewportTooSmall; // at least one char
-        if (col_count > col_count_max) return error.ViewportTooLarge;
-
-        const last_line = editor.viewport.lastLine();
-        if (line_number < editor.viewport.line_number_start) {
-            editor.viewport.line_number_start = line_number;
-        } else if (line_number > last_line) {
-            editor.viewport.line_number_start += line_number - last_line;
-        }
-        const last_offset = editor.viewport.lastOffset();
-        if (line_offset < editor.viewport.line_offset_start) {
-            editor.viewport.line_offset_start = line_offset;
-        } else if (line_offset > last_offset) {
-            editor.viewport.line_offset_start += line_offset - last_offset;
-        }
-
-        // Make sure cursor is within the viewport's bounds.
-        assert(cursor.line_number >= editor.viewport.line_number_start);
-        assert(cursor.line_number <= editor.viewport.lastLine());
-        assert(cursor.line_offset >= editor.viewport.line_offset_start);
-        assert(cursor.line_offset <= editor.viewport.lastOffset());
+    // Cursor is always at snap line offset or line end.
+    assert(cursor_position.line_offset == @min(
+        editor.cursor.line_offset_snap,
+        lineSize(editor.document.items, editor.cursor.offset) - 1,
+    ));
+    assert(cursor_position.line_offset <= editor.cursor.line_offset_snap);
+    // Selection must point into the document.
+    if (editor.cursor.anchor) |anchor| assert(anchor.offset < editor.document.items.len);
+    if (editor.cursor.selection(editor.document.items)) |selection| {
+        assert(selection.head < editor.document.items.len);
+        assert(selection.tail < editor.document.items.len);
     }
 
-    fn render(editor: *const Editor, cursor: Position) !void {
-        const writer = editor.writer;
-        const row_count = editor.viewport.row_count;
-        const col_count = editor.viewport.col_count;
-        const gutter_width = editor.viewport.gutterWidth();
-        const line_number_start = editor.viewport.line_number_start;
-        const line_offset_start = editor.viewport.line_offset_start;
-        const document = editor.document.items;
-        const file_path = editor.file_path;
+    try editor.focus(cursor_position);
+    try editor.render(cursor_position);
 
-        // Begin synchronised update. See
-        // https://contour-terminal.org/vt-extensions/synchronized-output.
-        try writer.writeAll("\x1b[?2026h");
-        // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
-        try writer.writeAll("\x1b[2J");
-        // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
-        try writer.writeAll("\x1b[H");
+    return true;
+}
 
-        // Render the document.
-        assert(document.len > 0);
-        var line_head = blk: {
-            var i: u32 = lineHead(document, editor.cursor.offset);
-            for (0..cursor.line_number - line_number_start) |_| i = lineHead(document, i - 1);
-            break :blk i;
-        };
-        var highlight = false;
-        for (line_number_start..line_number_start + row_count - 1) |line_number| {
-            if (line_head < document.len) {
-                // Draw gutter: coloured line number and space delimiter.
-                try writer.print(esc_line_number_foreground ++ "{[line_number]d: >[gutter_width]}" ++
-                    esc_colour_reset ++ " ", .{
-                    .line_number = line_number + 1, // displayed line number indexed from 1
-                    .gutter_width = gutter_width - 1, // space suffix already in format string
-                });
+/// Focus the viewport: Ensure it contains the cursor.
+fn focus(editor: *Editor, cursor: Position) error{ ViewportTooSmall, ViewportTooLarge }!void {
+    const row_count = editor.viewport.row_count;
+    const row_count_max = editor.row_count_max;
+    const col_count = editor.viewport.col_count;
+    const col_count_max = editor.col_count_max;
+    const line_number = cursor.line_number;
+    const line_offset = cursor.line_offset;
 
-                const line_tail = lineTail(document, line_head);
+    // Check viewport dimensions.
+    if (row_count < 2) return error.ViewportTooSmall; // at least one line plus the status line
+    if (row_count > row_count_max) return error.ViewportTooLarge;
+    if (col_count < editor.viewport.gutterWidth() + 1)
+        return error.ViewportTooSmall; // at least one char
+    if (col_count > col_count_max) return error.ViewportTooLarge;
 
-                // Handle horizontal scroll.
-                const text_width = col_count - gutter_width;
-                const cropped_head = @min(line_head + line_offset_start, line_tail);
-                const cropped_tail = @min(line_tail, cropped_head + text_width);
+    const last_line = editor.viewport.lastLine();
+    if (line_number < editor.viewport.line_number_start) {
+        editor.viewport.line_number_start = line_number;
+    } else if (line_number > last_line) {
+        editor.viewport.line_number_start += line_number - last_line;
+    }
+    const last_offset = editor.viewport.lastOffset();
+    if (line_offset < editor.viewport.line_offset_start) {
+        editor.viewport.line_offset_start = line_offset;
+    } else if (line_offset > last_offset) {
+        editor.viewport.line_offset_start += line_offset - last_offset;
+    }
 
-                if (line_head == line_tail) {} // empty line
-                // Handle selection highlighting.
-                else if (editor.cursor.selection(document)) |selection| {
-                    const esc_highlight = esc_highlight_foreground ++ esc_highlight_background;
+    // Make sure cursor is within the viewport's bounds.
+    assert(cursor.line_number >= editor.viewport.line_number_start);
+    assert(cursor.line_number <= editor.viewport.lastLine());
+    assert(cursor.line_offset >= editor.viewport.line_offset_start);
+    assert(cursor.line_offset <= editor.viewport.lastOffset());
+}
 
-                    // Should we have already started/stopped highlighting? E.g. anchor not within
-                    // cropped line.
-                    if (selection.head < cropped_head) highlight = true;
-                    if (selection.tail < cropped_head) highlight = false;
+fn render(editor: *const Editor, cursor: Position) !void {
+    const writer = editor.writer;
+    const row_count = editor.viewport.row_count;
+    const col_count = editor.viewport.col_count;
+    const gutter_width = editor.viewport.gutterWidth();
+    const line_number_start = editor.viewport.line_number_start;
+    const line_offset_start = editor.viewport.line_offset_start;
+    const document = editor.document.items;
+    const file_path = editor.file_path;
 
-                    if (highlight) try writer.writeAll(esc_highlight);
+    // Begin synchronised update. See
+    // https://contour-terminal.org/vt-extensions/synchronized-output.
+    try writer.writeAll("\x1b[?2026h");
+    // Clear screen. See https://ghostty.org/docs/vt/csi/ed.
+    try writer.writeAll("\x1b[2J");
+    // Place cursor at top left. See https://ghostty.org/docs/vt/csi/cup.
+    try writer.writeAll("\x1b[H");
 
-                    for (cropped_head..cropped_tail) |offset| {
-                        if (offset == selection.head) {
-                            highlight = true;
-                            try writer.writeAll(esc_highlight);
-                        }
+    // Render the document.
+    assert(document.len > 0);
+    var line_head = blk: {
+        var i: u32 = lineHead(document, editor.cursor.offset);
+        for (0..cursor.line_number - line_number_start) |_| i = lineHead(document, i - 1);
+        break :blk i;
+    };
+    var highlight = false;
+    for (line_number_start..line_number_start + row_count - 1) |line_number| {
+        if (line_head < document.len) {
+            // Draw gutter: coloured line number and space delimiter.
+            try writer.print(esc_line_number_foreground ++ "{[line_number]d: >[gutter_width]}" ++
+                esc_colour_reset ++ " ", .{
+                .line_number = line_number + 1, // displayed line number indexed from 1
+                .gutter_width = gutter_width - 1, // space suffix already in format string
+            });
 
-                        try writer.writeByte(document[offset]);
+            const line_tail = lineTail(document, line_head);
 
-                        if (offset == selection.tail) {
-                            highlight = false;
-                            try writer.writeAll(esc_colour_reset);
-                        }
+            // Handle horizontal scroll.
+            const text_width = col_count - gutter_width;
+            const cropped_head = @min(line_head + line_offset_start, line_tail);
+            const cropped_tail = @min(line_tail, cropped_head + text_width);
+
+            if (line_head == line_tail) {} // empty line
+            // Handle selection highlighting.
+            else if (editor.cursor.selection(document)) |selection| {
+                const esc_highlight = esc_highlight_foreground ++ esc_highlight_background;
+
+                // Should we have already started/stopped highlighting? E.g. anchor not within
+                // cropped line.
+                if (selection.head < cropped_head) highlight = true;
+                if (selection.tail < cropped_head) highlight = false;
+
+                if (highlight) try writer.writeAll(esc_highlight);
+
+                for (cropped_head..cropped_tail) |offset| {
+                    if (offset == selection.head) {
+                        highlight = true;
+                        try writer.writeAll(esc_highlight);
                     }
 
-                    // Reset before printing the next line so that line numbers aren't highlighted.
-                    if (highlight) try writer.writeAll(esc_colour_reset);
-                } else try writer.writeAll(document[cropped_head..cropped_tail]); // normal line
+                    try writer.writeByte(document[offset]);
 
-                line_head = line_tail + 1;
-            } else try writer.writeByte('~'); // past end of document: '~' in gutter
-            try writer.writeAll("\r\n");
-        }
+                    if (offset == selection.tail) {
+                        highlight = false;
+                        try writer.writeAll(esc_colour_reset);
+                    }
+                }
 
-        // Draw final row: status line or prompt.
-        switch (editor.mode) {
-            // Draw status line. Displayed line number and offset should be indexed from 1.
-            .insert, .normal => {
-                const cursor_coordinates_col_count =
-                    digitCount(cursor.line_number + 1) +
-                    digitCount(cursor.line_offset + 1) +
-                    1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-                var min_size = file_path.len;
-                const dirty_indicator = " [+]";
-                if (editor.dirty) min_size += dirty_indicator.len;
-                min_size += cursor_coordinates_col_count + 1; // 1 for padding
-                if (min_size > col_count) return error.ViewportTooSmall;
+                // Reset before printing the next line so that line numbers aren't highlighted.
+                if (highlight) try writer.writeAll(esc_colour_reset);
+            } else try writer.writeAll(document[cropped_head..cropped_tail]); // normal line
 
-                try writer.writeAll(file_path);
-                if (editor.dirty) try writer.writeAll(dirty_indicator);
-                try writer.splatByteAll(' ', col_count - min_size);
-                try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
+            line_head = line_tail + 1;
+        } else try writer.writeByte('~'); // past end of document: '~' in gutter
+        try writer.writeAll("\r\n");
+    }
+
+    // Draw final row: status line or prompt.
+    switch (editor.mode) {
+        // Draw status line. Displayed line number and offset should be indexed from 1.
+        .insert, .normal => {
+            const cursor_coordinates_col_count =
+                digitCount(cursor.line_number + 1) +
+                digitCount(cursor.line_offset + 1) +
+                1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
+            var min_size = file_path.len;
+            const dirty_indicator = " [+]";
+            if (editor.dirty) min_size += dirty_indicator.len;
+            min_size += cursor_coordinates_col_count + 1; // 1 for padding
+            if (min_size > col_count) return error.ViewportTooSmall;
+
+            try writer.writeAll(file_path);
+            if (editor.dirty) try writer.writeAll(dirty_indicator);
+            try writer.splatByteAll(' ', col_count - min_size);
+            try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
+        },
+        // Draw prompt. Takes place of status line.
+        .prompt => |prompt| switch (prompt) {
+            .command => |command| {
+                try writer.writeByte(':');
+                try writer.writeAll(command.text.items);
             },
-            // Draw prompt. Takes place of status line.
-            .prompt => |prompt| switch (prompt) {
-                .command => |command| {
-                    try writer.writeByte(':');
-                    try writer.writeAll(command.text.items);
-                },
-                .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
-                // Crop messages that don't fit on the row.
-                .message => |message| try writer.writeAll(
-                    message.items[0..@min(message.items.len, col_count)],
-                ),
-            },
-        }
-
-        // Restore cursor.
-        const cursor_style: Cursor.Style = switch (editor.mode) {
-            .normal => .steady_block,
-            .prompt => |prompt| switch (prompt) {
-                .command => .steady_bar,
-                .message, .unsaved => .steady_block,
-            },
-            .insert => .steady_bar,
-        };
-        // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
-        try writer.print("\x1b[{d}\x20q", .{@backingInt(cursor_style)});
-        const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and
-            editor.mode.prompt == .command) .{
-            .row = editor.viewport.row_count - 1, // final row
-            .col = editor.mode.prompt.command.cursor_offset + 1, // +1 for the ':' prompt prefix
-        } else blk: {
-            const cursor_cell: Viewport.Cell = .{
-                .row = cursor.line_number - line_number_start,
-                .col = cursor.line_offset - line_offset_start + gutter_width,
-            };
-            assert(cursor_cell.col >= gutter_width); // right of line numbers
-            break :blk cursor_cell;
-        };
-        assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
-        assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
-        try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
-        try writer.writeAll("\x1b[?2026l"); // end synchronised update
-
-        try writer.flush();
+            .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
+            // Crop messages that don't fit on the row.
+            .message => |message| try writer.writeAll(
+                message.items[0..@min(message.items.len, col_count)],
+            ),
+        },
     }
 
-    fn init(args: struct {
-        io: std.Io,
-        buffers: Buffers,
-        file_path: []const u8,
-        file_reader: *std.Io.Reader,
-        writer: *std.Io.Writer,
-        col_count: u32,
-        row_count: u32,
-        col_count_max: u32,
-        row_count_max: u32,
-        cursor_line_number: u32,
-        cursor_line_offset: u32,
-        is_test: bool,
-    }) error{ FileTooLong, FileContainsInvalidCharacter, ReadFailed }!Editor {
-        // The max file size is the size of the document buffer (same size as clipboard and scratch
-        // buffers).
-        assert(args.buffers.document.len == args.buffers.clipboard.len);
-        assert(args.buffers.document.len == args.buffers.scratch.len);
-        assert(args.buffers.prompt.len == args.col_count_max - 1); // -1 for the ':' in prompt
-
-        // Read file into scratch buffer before loading into `document`.
-        var scratch_writer: std.Io.Writer = .fixed(args.buffers.scratch);
-        const file_size =
-            args.file_reader.streamRemaining(&scratch_writer) catch |err| switch (err) {
-                error.WriteFailed => return error.FileTooLong,
-                error.ReadFailed => |e| return e,
-            };
-        var document: std.ArrayList(u8) = .initBuffer(args.buffers.document);
-        var dirty = false;
-        try load(&document, &dirty, args.buffers.scratch, @intCast(file_size));
-
-        const cursor_offset_start =
-            offsetFromPosition(document.items, args.cursor_line_number, args.cursor_line_offset);
-
-        return .{
-            .is_test = args.is_test,
-            .io = args.io,
-            .writer = args.writer,
-            .mode = .normal,
-            .viewport = .{
-                .row_count = args.row_count,
-                .col_count = args.col_count,
-                .line_number_start = 0,
-                .line_offset_start = 0,
-            },
-            .file_path = args.file_path,
-            .document = document,
-            .dirty = dirty,
-            .cursor = .{
-                .offset = cursor_offset_start orelse 0,
-                .anchor = null,
-                .line_offset_snap = if (cursor_offset_start) |_| args.cursor_line_offset else 0,
-            },
-            .clipboard = .initBuffer(args.buffers.clipboard),
-            .prompt_buffer = args.buffers.prompt,
-            .scratch_buffer = args.buffers.scratch,
-            .col_count_max = args.col_count_max,
-            .row_count_max = args.row_count_max,
-        };
-    }
-
-    /// Do initial render. After this, `tick` renders on every event.
-    fn start(editor: *Editor) !void {
-        const cursor_position = position(editor.document.items, editor.cursor.offset);
-        try editor.focus(cursor_position);
-        editor.centreCursorVertically();
-        try editor.render(cursor_position);
-    }
-
-    /// Show a message in place of the status line. Written to the prompt buffer, cropped if it
-    /// doesn't fit. Don't pass the command text in `args`, it's in the same buffer.
-    fn showMessage(editor: *Editor, comptime format: []const u8, args: anytype) void {
-        var message_writer: std.Io.Writer = .fixed(editor.prompt_buffer);
-        message_writer.print(format, args) catch {}; // fixed writer keeps what fits
-        editor.mode = .{ .prompt = .{ .message = message_writer.toArrayList() } };
-    }
-
-    /// Format document if formatter available then save. If formatting fails, show the error and
-    /// don't save. Returns whether the document was saved so the caller can decide what to do next
-    /// (e.g. exit).
-    fn formatAndSave(editor: *Editor) !bool {
-        if (try editor.formatDocument() == false) {
-            editor.showMessage("formatting failed", .{});
-            return false;
-        }
-        try editor.save();
-        return true;
-    }
-
-    fn centreCursorVertically(editor: *Editor) void {
-        const line_number = lineNumber(editor.document.items, editor.cursor.offset);
-        const rows_to_middle = editor.viewport.row_count / 2 - 1;
-        if (rows_to_middle < line_number)
-            editor.viewport.line_number_start = line_number - rows_to_middle;
-    }
-
-    fn formatDocument(editor: *Editor) !?bool {
-        const document_kind: enum {
-            zig,
-            markdown,
-            sh,
-            testing,
-            c, // C and C++
-            unknown,
-        } = if (editor.is_test)
-            .testing
-        else if (std.mem.endsWith(u8, editor.file_path, ".zig") or
-            std.mem.endsWith(u8, editor.file_path, ".zon"))
-            .zig
-        else if (std.mem.endsWith(u8, editor.file_path, ".md"))
-            .markdown
-        else if (std.mem.endsWith(u8, editor.file_path, ".c") or
-            std.mem.endsWith(u8, editor.file_path, ".h") or
-            std.mem.endsWith(u8, editor.file_path, ".cpp") or
-            std.mem.endsWith(u8, editor.file_path, ".hpp"))
-            .c
-        else if (std.mem.endsWith(u8, editor.file_path, ".sh"))
-            .sh
-        else
-            .unknown;
-
-        const formatted = (if (document_kind == .testing) formatDocumentWithTestFormatter(
-            editor.document.items,
-            editor.scratch_buffer,
-        ) else try runFormatter(editor.io, switch (document_kind) {
-            .testing => unreachable,
-            .zig => &.{ "zig", "fmt", "--stdin" },
-            .markdown => &.{ "prettier", "--parser", "markdown" },
-            .sh => &.{ "shfmt", "--indent", "4" },
-            .c => &.{ "clang-format", "--style=Google" },
-            .unknown => return null, // no formatter, save as is
-        }, editor.document.items, editor.scratch_buffer)) orelse return false;
-
-        // Treat output we can't accept as a formatting failure, leaving the document untouched.
-        // Check it's valid before replacing, replace asserts on invalid characters.
-        validateDocument(formatted) catch return false;
-        replace(
-            &editor.document,
-            &editor.dirty,
-            0,
-            @intCast(editor.document.items.len),
-            formatted,
-        ) catch return false; // too long once the trailing newline is added
-
-        editor.cursor.anchor = null;
-
-        // Move cursor to start of line.
-        const offset = @min(editor.cursor.offset, editor.document.items.len - 1);
-        const offset_new = lineHead(editor.document.items, offset) +
-            lineIndentation(editor.document.items, offset);
-        editor.cursor.update(editor.document.items, offset_new, .snap_update);
-
-        return true;
-    }
-
-    fn save(editor: *Editor) !void {
-        if (!editor.is_test) {
-            try std.Io.Dir.cwd().writeFile(editor.io, .{
-                .data = editor.document.items,
-                .sub_path = editor.file_path,
-            });
-        }
-
-        editor.dirty = false;
-    }
-};
-
-pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-    const allocator = init.arena.allocator();
-
-    const log_buffer = try allocator.alloc(u8, 256 * 1024);
-    defer allocator.free(log_buffer);
-    var log_writer_fixed: std.Io.Writer = .fixed(log_buffer);
-    log_writer = &log_writer_fixed;
-    // Defer order matters here. The logs should only be printed once the original terminal state
-    // is restored.
-    defer std.debug.print("{s}", .{log_writer_fixed.buffered()});
-
-    var cursor_line_number: ?u32 = null;
-    var cursor_line_offset: ?u32 = null;
-    var args_iterator = init.minimal.args.iterate();
-    assert(args_iterator.skip()); // first arg is executable path
-    const file_path = args_iterator.next() orelse @panic("missing file path arg");
-    while (args_iterator.next()) |arg| {
-        // Option to open editor with cursor at the given Position (indexed from one).
-        if (std.mem.startsWith(u8, arg, "--goto=")) {
-            const colon_index = std.mem.indexOfScalar(u8, arg, ':').?;
-            cursor_line_number = try std.fmt.parseInt(u32, arg["--goto=".len..colon_index], 10);
-            cursor_line_offset = try std.fmt.parseInt(u32, arg[colon_index + 1 ..], 10);
-        } else std.debug.panic("argument not recognised: {s}", .{arg});
-    }
-
-    const stdin = std.Io.File.stdin();
-    var stdin_buffer: [1024]u8 = undefined;
-    var stdin_reader = stdin.reader(io, &stdin_buffer);
-    const reader: *std.Io.Reader = &stdin_reader.interface;
-
-    const stdout_buffer = try allocator.alloc(u8, 16 * 1024);
-    defer allocator.free(stdout_buffer);
-    const stdout = std.Io.File.stdout();
-    var stdout_writer = stdout.writer(io, stdout_buffer);
-    const writer: *std.Io.Writer = &stdout_writer.interface;
-
-    // Put terminal in raw mode. Restore original termios on exit.
-    termios_original = try std.posix.tcgetattr(stdin.handle);
-    defer std.posix.tcsetattr(stdin.handle, .FLUSH, termios_original.?) catch {}; // restore on exit
-    var termios_raw = termios_original.?;
-    termios_raw.iflag.BRKINT = false;
-    termios_raw.iflag.ICRNL = false;
-    termios_raw.iflag.INPCK = false;
-    termios_raw.iflag.ISTRIP = false;
-    termios_raw.iflag.IXON = false;
-    termios_raw.oflag.OPOST = false;
-    termios_raw.cflag.CSIZE = .CS8;
-    termios_raw.lflag.ECHO = false;
-    termios_raw.lflag.ICANON = false;
-    termios_raw.lflag.IEXTEN = false;
-    termios_raw.lflag.ISIG = false;
-    termios_raw.cc[@backingInt(std.posix.V.MIN)] = 1;
-    termios_raw.cc[@backingInt(std.posix.V.TIME)] = 0;
-    try std.posix.tcsetattr(stdin.handle, .FLUSH, termios_raw);
-
-    // Restore terminal if we're killed. ISIG is off so CTRL+C etc. arrive as input, but these can
-    // still be sent with kill(1).
-    const termination_action: std.posix.Sigaction = .{
-        .handler = .{ .handler = handleTerminationSignal },
-        .mask = std.posix.sigemptyset(),
-        .flags = std.posix.SA.RESETHAND, // so the re-raise in the handler takes the default action
+    // Restore cursor.
+    const cursor_style: Cursor.Style = switch (editor.mode) {
+        .normal => .steady_block,
+        .prompt => |prompt| switch (prompt) {
+            .command => .steady_bar,
+            .message, .unsaved => .steady_block,
+        },
+        .insert => .steady_bar,
     };
-    for ([_]std.posix.SIG{ .TERM, .INT, .HUP, .QUIT }) |sig| {
-        std.posix.sigaction(sig, &termination_action, null);
-    }
-
-    // Always restore, even if init fails.
-    defer stdout.writeStreamingAll(io, terminal_deinit) catch {};
-    try stdout.writeStreamingAll(io, terminal_init);
-
-    var parser: Parser = .{};
-    const dimensions = switch (try Event.next(&parser, reader)) {
-        .resize => |dimensions| dimensions,
-        else => return error.FirstEventMustBeResize,
+    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
+    try writer.print("\x1b[{d}\x20q", .{@backingInt(cursor_style)});
+    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and
+        editor.mode.prompt == .command) .{
+        .row = editor.viewport.row_count - 1, // final row
+        .col = editor.mode.prompt.command.cursor_offset + 1, // +1 for the ':' prompt prefix
+    } else blk: {
+        const cursor_cell: Viewport.Cell = .{
+            .row = cursor.line_number - line_number_start,
+            .col = cursor.line_offset - line_offset_start + gutter_width,
+        };
+        assert(cursor_cell.col >= gutter_width); // right of line numbers
+        break :blk cursor_cell;
     };
+    assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
+    assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
+    try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
+    try writer.writeAll("\x1b[?2026l"); // end synchronised update
 
-    const col_count_max = 400;
-    const row_count_max = 300;
-    const buffers: Buffers = try .alloc(allocator, .{
-        .file_size_max = 1 * 1024 * 1024, // 1 MiB
-        .col_count_max = col_count_max,
-    });
-    defer buffers.free(allocator);
+    try writer.flush();
+}
 
-    const file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
-    var file_reader = file.reader(io, &.{});
-    var editor: Editor = try .init(.{
-        .io = io,
-        .buffers = buffers,
-        .file_path = file_path,
-        .file_reader = &file_reader.interface,
-        .writer = writer,
-        .cursor_line_number = if (cursor_line_number) |cln| cln - 1 else 0,
-        .cursor_line_offset = if (cursor_line_offset) |clo| clo - 1 else 0,
-        .row_count = dimensions.row_count,
-        .col_count = dimensions.col_count,
-        .col_count_max = col_count_max,
-        .row_count_max = row_count_max,
-        .is_test = false,
-    });
-    file.close(io);
+pub fn init(args: struct {
+    io: std.Io,
+    buffers: Buffers,
+    file_path: []const u8,
+    file_reader: *std.Io.Reader,
+    writer: *std.Io.Writer,
+    col_count: u32,
+    row_count: u32,
+    col_count_max: u32,
+    row_count_max: u32,
+    cursor_line_number: u32,
+    cursor_line_offset: u32,
+    is_test: bool,
+}) error{ FileTooLong, FileContainsInvalidCharacter, ReadFailed }!Editor {
+    // The max file size is the size of the document buffer (same size as clipboard and scratch
+    // buffers).
+    assert(args.buffers.document.len == args.buffers.clipboard.len);
+    assert(args.buffers.document.len == args.buffers.scratch.len);
+    assert(args.buffers.prompt.len == args.col_count_max - 1); // -1 for the ':' in prompt
 
-    // Do the initial render. In event loop we render on every tick.
-    try editor.start();
-    while (true) {
-        const event = try Event.next(&parser, reader);
-        if (!try editor.tick(event)) return;
+    // Read file into scratch buffer before loading into `document`.
+    var scratch_writer: std.Io.Writer = .fixed(args.buffers.scratch);
+    const file_size =
+        args.file_reader.streamRemaining(&scratch_writer) catch |err| switch (err) {
+            error.WriteFailed => return error.FileTooLong,
+            error.ReadFailed => |e| return e,
+        };
+    var document: std.ArrayList(u8) = .initBuffer(args.buffers.document);
+    var dirty = false;
+    try load(&document, &dirty, args.buffers.scratch, @intCast(file_size));
+
+    const cursor_offset_start =
+        offsetFromPosition(document.items, args.cursor_line_number, args.cursor_line_offset);
+
+    return .{
+        .is_test = args.is_test,
+        .io = args.io,
+        .writer = args.writer,
+        .mode = .normal,
+        .viewport = .{
+            .row_count = args.row_count,
+            .col_count = args.col_count,
+            .line_number_start = 0,
+            .line_offset_start = 0,
+        },
+        .file_path = args.file_path,
+        .document = document,
+        .dirty = dirty,
+        .cursor = .{
+            .offset = cursor_offset_start orelse 0,
+            .anchor = null,
+            .line_offset_snap = if (cursor_offset_start) |_| args.cursor_line_offset else 0,
+        },
+        .clipboard = .initBuffer(args.buffers.clipboard),
+        .prompt_buffer = args.buffers.prompt,
+        .scratch_buffer = args.buffers.scratch,
+        .col_count_max = args.col_count_max,
+        .row_count_max = args.row_count_max,
+    };
+}
+
+/// Do initial render. After this, `tick` renders on every event.
+pub fn start(editor: *Editor) !void {
+    const cursor_position = position(editor.document.items, editor.cursor.offset);
+    try editor.focus(cursor_position);
+    editor.centreCursorVertically();
+    try editor.render(cursor_position);
+}
+
+/// Show a message in place of the status line. Written to the prompt buffer, cropped if it
+/// doesn't fit. Don't pass the command text in `args`, it's in the same buffer.
+fn showMessage(editor: *Editor, comptime format: []const u8, args: anytype) void {
+    var message_writer: std.Io.Writer = .fixed(editor.prompt_buffer);
+    message_writer.print(format, args) catch {}; // fixed writer keeps what fits
+    editor.mode = .{ .prompt = .{ .message = message_writer.toArrayList() } };
+}
+
+/// Format document if formatter available then save. If formatting fails, show the error and
+/// don't save. Returns whether the document was saved so the caller can decide what to do next
+/// (e.g. exit).
+fn formatAndSave(editor: *Editor) !bool {
+    if (try editor.formatDocument() == false) {
+        editor.showMessage("formatting failed", .{});
+        return false;
     }
+    try editor.save();
+    return true;
 }
 
-var termios_original: ?std.posix.termios = null;
-// Restore terminal state when crashing. Runs only once. Writes straight to stdout rather than via
-// the buffered writer so we don't flush a partial frame. Restoring termios with FLUSH discards any
-// input the terminal has sent that we haven't read yet, so it doesn't end up in the shell.
-fn restoreTerminalOnCrash() void {
-    if (termios_original) |t| {
-        termios_original = null; // so we only do this once
-        var threaded: std.Io.Threaded = .init_single_threaded;
-        std.Io.File.stdout().writeStreamingAll(threaded.io(), terminal_deinit) catch {};
-        std.posix.tcsetattr(std.Io.File.stdin().handle, .FLUSH, t) catch {}; // restore termios
+fn centreCursorVertically(editor: *Editor) void {
+    const line_number = lineNumber(editor.document.items, editor.cursor.offset);
+    const rows_to_middle = editor.viewport.row_count / 2 - 1;
+    if (rows_to_middle < line_number)
+        editor.viewport.line_number_start = line_number - rows_to_middle;
+}
+
+fn formatDocument(editor: *Editor) !?bool {
+    const document_kind: enum {
+        zig,
+        markdown,
+        sh,
+        testing,
+        c, // C and C++
+        unknown,
+    } = if (editor.is_test)
+        .testing
+    else if (std.mem.endsWith(u8, editor.file_path, ".zig") or
+        std.mem.endsWith(u8, editor.file_path, ".zon"))
+        .zig
+    else if (std.mem.endsWith(u8, editor.file_path, ".md"))
+        .markdown
+    else if (std.mem.endsWith(u8, editor.file_path, ".c") or
+        std.mem.endsWith(u8, editor.file_path, ".h") or
+        std.mem.endsWith(u8, editor.file_path, ".cpp") or
+        std.mem.endsWith(u8, editor.file_path, ".hpp"))
+        .c
+    else if (std.mem.endsWith(u8, editor.file_path, ".sh"))
+        .sh
+    else
+        .unknown;
+
+    const formatted = (if (document_kind == .testing) formatDocumentWithTestFormatter(
+        editor.document.items,
+        editor.scratch_buffer,
+    ) else try runFormatter(editor.io, switch (document_kind) {
+        .testing => unreachable,
+        .zig => &.{ "zig", "fmt", "--stdin" },
+        .markdown => &.{ "prettier", "--parser", "markdown" },
+        .sh => &.{ "shfmt", "--indent", "4" },
+        .c => &.{ "clang-format", "--style=Google" },
+        .unknown => return null, // no formatter, save as is
+    }, editor.document.items, editor.scratch_buffer)) orelse return false;
+
+    // Treat output we can't accept as a formatting failure, leaving the document untouched.
+    // Check it's valid before replacing, replace asserts on invalid characters.
+    validateDocument(formatted) catch return false;
+    replace(
+        &editor.document,
+        &editor.dirty,
+        0,
+        @intCast(editor.document.items.len),
+        formatted,
+    ) catch return false; // too long once the trailing newline is added
+
+    editor.cursor.anchor = null;
+
+    // Move cursor to start of line.
+    const offset = @min(editor.cursor.offset, editor.document.items.len - 1);
+    const offset_new = lineHead(editor.document.items, offset) +
+        lineIndentation(editor.document.items, offset);
+    editor.cursor.update(editor.document.items, offset_new, .snap_update);
+
+    return true;
+}
+
+fn save(editor: *Editor) !void {
+    if (!editor.is_test) {
+        try std.Io.Dir.cwd().writeFile(editor.io, .{
+            .data = editor.document.items,
+            .sub_path = editor.file_path,
+        });
     }
-}
 
-// Wrap panic handler so that we can restore terminal state first. Calls default panic after
-// cleanup. This prevents jank backtraces when we crash.
-pub const panic = std.debug.FullPanic(struct {
-    pub fn panic(msg: []const u8, first_trace_addr: ?usize) noreturn {
-        @branchHint(.cold);
-        restoreTerminalOnCrash();
-        std.debug.defaultPanic(msg, first_trace_addr);
-    }
-}.panic);
-
-// Same for segfaults (SIGSEGV, SIGILL, SIGBUS, SIGFPE), which don't go through the panic handler.
-pub const debug = struct {
-    pub fn handleSegfault(addr: ?usize, name: []const u8, ctx: ?std.debug.CpuContextPtr) noreturn {
-        restoreTerminalOnCrash();
-        std.debug.defaultHandleSegfault(addr, name, ctx);
-    }
-};
-
-// Restore terminal state then re-raise so we exit with the usual status for the signal. The signal
-// is blocked until the handler returns, by which point the default action has been reinstated.
-fn handleTerminationSignal(sig: std.posix.SIG) callconv(.c) void {
-    restoreTerminalOnCrash();
-    std.posix.raise(sig) catch {};
+    editor.dirty = false;
 }
-
-var log_writer: ?*std.Io.Writer = null;
-fn logFnErr(
-    comptime message_level: std.log.Level,
-    comptime scope: @EnumLiteral(),
-    comptime format: []const u8,
-    args: anytype,
-) !void {
-    if (log_writer) |writer| {
-        try writer.writeAll(message_level.asText());
-        if (scope != .default) try writer.print("({t})", .{scope});
-        try writer.writeAll(": ");
-        try writer.print(format ++ "\n", args);
-    } else @panic("tried to log without initialising log writer");
-}
-fn logFn(
-    comptime message_level: std.log.Level,
-    comptime scope: @EnumLiteral(),
-    comptime format: []const u8,
-    args: anytype,
-) void {
-    logFnErr(message_level, scope, format, args) catch |e| std.debug.panic("log failed: {}", .{e});
-}
-pub const std_options: std.Options = .{
-    .logFn = logFn,
-    // Only enabled by default in safe builds. Enable always so we can restore the terminal.
-    .enable_segfault_handler = true,
-};
 
 const Position = struct { line_number: u32, line_offset: u32 };
 
@@ -1681,7 +1485,7 @@ const Modifiers = packed struct(u8) {
 
 const ViewportDimensions = struct { row_count: u32, col_count: u32 };
 
-const Event = union(enum) {
+pub const Event = union(enum) {
     resize: ViewportDimensions,
     ascii: u8,
     chord: struct { ascii: u8, modifiers: Modifiers },
@@ -1743,7 +1547,7 @@ const Event = union(enum) {
     }
 
     /// Pull actions from the parser until one decodes to an event.
-    fn next(parser: *Parser, reader: *std.Io.Reader) error{ EndOfStream, ReadFailed }!Event {
+    pub fn next(parser: *Parser, reader: *std.Io.Reader) error{ EndOfStream, ReadFailed }!Event {
         while (true) {
             const action = try parser.next(reader);
             if (Event.decode(action)) |event| return event;
@@ -1793,7 +1597,7 @@ fn runFormatter(
 /// - BEL terminates any string, not just OSC. Due to how this is handled, ESC \ (ST) never produces
 ///   an ESC dispatch.
 /// - High bytes mid-sequence are ignored rather than aborted.
-const Parser = struct {
+pub const Parser = struct {
     param_buffer: [16]u32 = undefined,
     intermediate_buffer: [2]u8 = undefined,
 
@@ -3078,12 +2882,12 @@ const TestEditor = struct {
 
     fn expectQuit(
         test_editor: *TestEditor,
-        comptime save: enum { save, no_save },
+        comptime saving: enum { save, no_save },
         comptime force: enum { force, no_force },
     ) !void {
         // Process exit inputs: ":[w]q[!]".
         const input = ":" ++
-            (if (save == .save) "w" else "") ++
+            (if (saving == .save) "w" else "") ++
             "q" ++
             (if (force == .force) "!" else "");
         for (input) |c| {
