@@ -41,3 +41,10 @@
 - Add custom in-process fuzzer.
 - Add AFL++ fuzzer.
 - Add timing instrumentation. Is 2ms max reasonable per-tick?
+- Regression replay tests: Add capture mode that records the following so that
+  we can replay through the editor and assert we get the same file at the end.
+  - raw stdin bytes
+  - starting file bytes
+  - file path
+  - `--goto` position if used
+  - saved file bytes (end state)
