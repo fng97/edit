@@ -20,6 +20,41 @@ const esc_highlight_background = "\x1b[47m"; // white (light gray on most palett
 const esc_line_number_foreground = "\x1b[33m"; // yellow
 const esc_colour_reset = "\x1b[0m";
 
+const col_count_min = 32;
+
+io: std.Io,
+writer: *std.Io.Writer,
+
+is_test: bool,
+col_count_max: u32,
+row_count_max: u32,
+file_path: []const u8,
+viewport: Viewport,
+cursor: Cursor,
+mode: union(enum) {
+    normal,
+    insert,
+    prompt: union(enum) {
+        command: std.ArrayList(u8),
+        message: enum {
+            command_not_recognised,
+            insert_would_oom,
+            formatter_failed,
+            formatter_not_in_path,
+            formatting_invalid_document,
+            formatting_would_oom,
+            formatting_would_invalidate,
+            save_failed,
+        },
+        unsaved,
+    },
+},
+document: std.ArrayList(u8),
+dirty: bool,
+prompt_buffer: []u8, // shared by prompt command text and messages
+scratch_buffer: []u8, // used for formatting, selection paste
+clipboard: std.ArrayList(u8),
+
 /// All allocated memory used by the editor lives in this struct.
 pub const Buffers = struct {
     document: []u8,
@@ -57,43 +92,22 @@ pub const Buffers = struct {
     }
 };
 
-io: std.Io,
-writer: *std.Io.Writer,
-
-is_test: bool,
-col_count_max: u32,
-row_count_max: u32,
-file_path: []const u8,
-viewport: Viewport,
-cursor: Cursor,
-mode: union(enum) {
-    normal,
-    insert,
-    prompt: union(enum) {
-        command: struct { text: std.ArrayList(u8), cursor_offset: u32 },
-        message: std.ArrayList(u8),
-        unsaved,
-    },
-},
-document: std.ArrayList(u8),
-dirty: bool,
-prompt_buffer: []u8, // shared by prompt command text and messages
-scratch_buffer: []u8, // used for formatting, selection paste
-clipboard: std.ArrayList(u8),
-
-pub fn tick(editor: *Editor, event: Event) !bool {
+pub fn tick(editor: *Editor, event: Event) error{
+    ViewportTooLarge,
+    ViewportTooSmall,
+    WriteFailed,
+}!bool {
     if (event == .resize) {
         editor.viewport.row_count = event.resize.row_count;
         editor.viewport.col_count = event.resize.col_count;
+        const cursor_position = position(editor.document.items, editor.cursor.offset);
+        try editor.focus(cursor_position);
         // Crop the command text so it still fits on the row with the ':' prompt prefix and the
         // cursor after it.
         if (editor.mode == .prompt and editor.mode.prompt == .command) {
-            const command = &editor.mode.prompt.command;
-            assert(command.cursor_offset == command.text.items.len);
-            command.text.shrinkRetainingCapacity(
-                @min(command.text.items.len, editor.viewport.col_count -| 2),
+            editor.mode.prompt.command.shrinkRetainingCapacity(
+                @min(editor.mode.prompt.command.items.len, editor.viewport.col_count -| 2),
             );
-            command.cursor_offset = @intCast(command.text.items.len);
         }
     } else switch (editor.mode) {
         .normal => switch (event) {
@@ -155,36 +169,33 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                     editor.cursor.moveMax(.right, editor.document.items);
                     editor.mode = .insert;
                 },
-                    editor.cursor.moveMax(.right, editor.document.items);
-                    const indentation = lineIndentation(
-                        editor.document.items,
-                        editor.cursor.offset,
                 'o' => if (editor.cursor.anchor == null) {
-                    );
-                    try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                    for (0..indentation) |_| try insert(
-                        &editor.document,
-                        &editor.cursor,
-                        &editor.dirty,
-                        " ",
-                    );
-                    editor.mode = .insert;
+                    const indentation =
+                        lineIndentation(editor.document.items, editor.cursor.offset);
+                    // Doing multiple inserts. Make sure they won't fail. +1 for the newline.
+                    if (editor.document.items.len + 1 + indentation <= editor.document.capacity) {
+                        editor.cursor.moveMax(.right, editor.document.items); // go to end of line
+                        insert(&editor.document, &editor.cursor, &editor.dirty, "\n") catch
+                            unreachable;
+                        for (0..indentation) |_|
+                            insert(&editor.document, &editor.cursor, &editor.dirty, " ") catch
+                                unreachable;
+                        editor.mode = .insert;
+                    } else editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
                 },
                 'O' => if (editor.cursor.anchor == null) {
-                    editor.cursor.moveMax(.left, editor.document.items);
-                    const indentation = lineIndentation(
-                        editor.document.items,
-                        editor.cursor.offset,
-                    );
-                    try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                    editor.cursor.move(.up, 1, editor.document.items);
-                    for (0..indentation) |_| try insert(
-                        &editor.document,
-                        &editor.cursor,
-                        &editor.dirty,
-                        " ",
-                    );
-                    editor.mode = .insert;
+                    const indentation =
+                        lineIndentation(editor.document.items, editor.cursor.offset);
+                    if (editor.document.items.len + 1 + indentation <= editor.document.capacity) {
+                        editor.cursor.moveMax(.left, editor.document.items);
+                        insert(&editor.document, &editor.cursor, &editor.dirty, "\n") catch
+                            unreachable;
+                        editor.cursor.move(.up, 1, editor.document.items);
+                        for (0..indentation) |_|
+                            insert(&editor.document, &editor.cursor, &editor.dirty, " ") catch
+                                unreachable;
+                        editor.mode = .insert;
+                    } else editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
                 },
                 // Enable/disable selection. If we have a selection in the same mode, deselect,
                 // otherwise, do selection. Going from a linewise selection to a normal one,
@@ -205,12 +216,7 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                     &editor.dirty,
                 ),
                 ':' => editor.mode = .{
-                    .prompt = .{
-                        .command = .{
-                            .text = .initBuffer(editor.prompt_buffer),
-                            .cursor_offset = 0,
-                        },
-                    },
+                    .prompt = .{ .command = .initBuffer(editor.prompt_buffer) },
                 },
                 'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
                 // Yank the lines covered by the selection or, without one, the cursor's line.
@@ -235,13 +241,15 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                     delete(&editor.document, &editor.clipboard, &editor.cursor, &editor.dirty);
                 },
                 // 'P' => {}, // TODO: paste before
-                'p' => try paste(
+                'p' => paste(
                     &editor.document,
                     &editor.clipboard,
                     editor.scratch_buffer,
                     &editor.cursor,
                     &editor.dirty,
-                ),
+                ) catch {
+                    editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                },
                 'z' => editor.centreCursorVertically(),
                 else => {},
             },
@@ -264,18 +272,15 @@ pub fn tick(editor: *Editor, event: Event) !bool {
             .enter,
             .tab,
             => {}, // do nothing
-            .resize => unreachable,
+            .resize => unreachable, // handled above
         },
         .insert => {
             editor.cursor.anchor = null;
             switch (event) {
                 .escape => editor.mode = .normal,
-                .ascii => |c| try insert(
-                    &editor.document,
-                    &editor.cursor,
-                    &editor.dirty,
-                    &.{c},
-                ),
+                .ascii => |c| insert(&editor.document, &editor.cursor, &editor.dirty, &.{c}) catch {
+                    editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                },
                 .backspace => if (editor.cursor.offset != 0) {
                     editor.cursor.move(.left, 1, editor.document.items);
                     // Using replace here instead of delete because delete updates clipboard.
@@ -287,62 +292,94 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                         "",
                     ) catch unreachable;
                 },
-                .tab => try insert(&editor.document, &editor.cursor, &editor.dirty, "    "),
+                .tab => insert(&editor.document, &editor.cursor, &editor.dirty, "    ") catch {
+                    editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                },
                 .enter => {
-                    const indent_count = lineIndentation(
-                        editor.document.items,
-                        editor.cursor.offset,
-                    );
-                    try insert(&editor.document, &editor.cursor, &editor.dirty, "\n");
-                    for (0..indent_count) |_|
-                        try insert(&editor.document, &editor.cursor, &editor.dirty, " ");
+                    const indent_count =
+                        lineIndentation(editor.document.items, editor.cursor.offset);
+                    if (editor.document.items.len + 1 + indent_count <= editor.document.capacity) {
+                        insert(&editor.document, &editor.cursor, &editor.dirty, "\n") catch
+                            unreachable;
+                        for (0..indent_count) |_|
+                            insert(&editor.document, &editor.cursor, &editor.dirty, " ") catch
+                                unreachable;
+                    } else editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
                 },
                 .chord => {}, // do nothing
-                .resize => unreachable,
+                .resize => unreachable, // handled above
             }
         },
         .prompt => |*prompt| switch (prompt.*) {
+            // The cursor is always at the end of the command, so instead of storing it we use
+            // `command.items.len`.
             .command => |*command| switch (event) {
                 .escape => editor.mode = .normal,
-                // Keep entering text as long as we've got room in the document and on the row. The
-                // -2 below (aside from count->index) is to account for the prompt prefix, ':'.
-                .ascii => |c| if (command.cursor_offset < command.text.capacity and
-                    command.cursor_offset < editor.viewport.col_count - 2)
-                {
-                    assert(command.cursor_offset == command.text.items.len);
-                    try command.text.insertBounded(command.cursor_offset, c);
-                    command.cursor_offset += 1;
-                    assert(command.cursor_offset == command.text.items.len);
-                },
-                .backspace => if (command.cursor_offset != 0) {
-                    assert(command.cursor_offset == command.text.items.len);
-                    _ = command.text.orderedRemove(command.cursor_offset - 1);
-                    command.cursor_offset -= 1;
-                    assert(command.cursor_offset == command.text.items.len);
-                },
+                // Keep entering text as long as we've got room in the prompt and on the row.
+                .ascii => |c| if (command.items.len < command.capacity and
+                    // The -2 below includes -1 for the cursor and -1 for the ':'.
+                    command.items.len < editor.viewport.col_count - 2)
+                    command.appendAssumeCapacity(c),
+                .backspace => _ = command.pop(),
                 .enter => if (std.meta.stringToEnum(
-                    enum { w, q, @"w!", @"q!", wq, @"wq!" },
-                    command.text.items,
-                )) |name| switch (name) {
-                    .w => if (try editor.formatAndSave()) {
-                        editor.mode = .normal;
-                    },
-                    .q => {
-                        if (!editor.dirty) return false; // exit!
-                        // Trying to exit without saving. Prompt user to save.
-                        editor.mode = .{ .prompt = .unsaved };
-                    },
-                    .@"w!" => { // skip formatting
-                        try editor.save();
-                        editor.mode = .normal;
-                    },
-                    .@"q!" => return false, // exit, for real!
-                    .wq => if (try editor.formatAndSave()) return false, // exit if saved
-                    .@"wq!" => { // skip formatting
-                        try editor.save();
-                        return false;
-                    },
-                } else if (std.fmt.parseInt(u32, command.text.items, 10) catch null) |number| {
+                    enum { w, q, @"w!", @"q!", wq },
+                    command.items,
+                )) |cmd| {
+                    const ops: struct { format: bool, save: bool, quit: bool } = switch (cmd) {
+                        .w => .{ .format = true, .save = true, .quit = false },
+                        .q => .{ .format = false, .save = false, .quit = true },
+                        .wq => .{ .format = true, .save = true, .quit = true },
+                        .@"w!" => .{ .format = false, .save = true, .quit = false },
+                        .@"q!" => return false, // quit without saving
+                    };
+
+                    apply: { // if any ops fail, give up and report error
+                        if (ops.format) formatDocument(
+                            editor.io,
+                            editor.file_path,
+                            &editor.document,
+                            editor.scratch_buffer,
+                            &editor.dirty,
+                            &editor.cursor,
+                            editor.is_test,
+                        ) catch |err| switch (err) {
+                            error.FormatterNotConfigured => {}, // fine, fall through to save
+                            else => {
+                                editor.mode = .{ .prompt = .{ .message = switch (err) {
+                                    error.FormatterNotConfigured => unreachable,
+                                    error.OutOfMemory => .formatting_would_oom,
+                                    error.DocumentInvalid => .formatting_invalid_document,
+                                    error.FormatterNotFound => .formatter_not_in_path,
+                                    error.FormatterFailed => .formatter_failed,
+                                    error.FormattingWouldInvalidateDocument,
+                                    => .formatting_would_invalidate,
+                                } } };
+                                break :apply;
+                            },
+                        };
+
+                        if (ops.save) {
+                            if (!writeFile(
+                                editor.io,
+                                editor.file_path,
+                                editor.document.items,
+                                &editor.dirty,
+                                editor.is_test,
+                            )) {
+                                editor.mode = .{ .prompt = .{ .message = .save_failed } };
+                                break :apply;
+                            }
+                            editor.mode = .normal;
+                        }
+
+                        if (ops.quit) {
+                            if (editor.dirty) {
+                                // Trying to exit without saving. Prompt user to save.
+                                editor.mode = .{ .prompt = .unsaved };
+                            } else return false;
+                        }
+                    }
+                } else if (std.fmt.parseInt(u32, command.items, 10) catch null) |number| {
                     // Line number given is indexed from 1.
                     const line_number = @max(number, 1) - 1;
                     if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
@@ -350,24 +387,34 @@ pub fn tick(editor: *Editor, event: Event) !bool {
                         editor.centreCursorVertically();
                     }
                     editor.mode = .normal;
-                } else editor.showMessage("invalid command", .{}),
+                } else {
+                    editor.mode = .{ .prompt = .{ .message = .command_not_recognised } };
+                },
                 .tab, .chord => {}, // do nothing
-                .resize => unreachable,
+                .resize => unreachable, // handled above
             },
             .message => switch (event) {
                 .enter, .escape => editor.mode = .normal,
                 .ascii, .tab, .chord, .backspace => {}, // do nothing
-                .resize => unreachable,
+                .resize => unreachable, // handled above
             },
             .unsaved => switch (event) {
                 .escape => editor.mode = .normal,
                 .ascii => |c| switch (c) {
-                    'y' => if (try editor.formatAndSave()) return false, // exit if saved
+                    'y' => if (writeFile(
+                        editor.io,
+                        editor.file_path,
+                        editor.document.items,
+                        &editor.dirty,
+                        editor.is_test,
+                    )) return false else {
+                        editor.mode = .{ .prompt = .{ .message = .save_failed } };
+                    },
                     'n' => return false, // quit without saving
                     else => {}, // do nothing
                 },
                 .enter, .tab, .chord, .backspace => {}, // do nothing
-                .resize => unreachable,
+                .resize => unreachable, // handled above
             },
         },
     }
@@ -403,10 +450,9 @@ fn focus(editor: *Editor, cursor: Position) error{ ViewportTooSmall, ViewportToo
     const line_offset = cursor.line_offset;
 
     // Check viewport dimensions.
-    if (row_count < 2) return error.ViewportTooSmall; // at least one line plus the status line
+    if (row_count < 2) return error.ViewportTooSmall;
     if (row_count > row_count_max) return error.ViewportTooLarge;
-    if (col_count < editor.viewport.gutterWidth() + 1)
-        return error.ViewportTooSmall; // at least one char
+    if (col_count < col_count_min) return error.ViewportTooSmall;
     if (col_count > col_count_max) return error.ViewportTooLarge;
 
     const last_line = editor.viewport.lastLine();
@@ -429,7 +475,7 @@ fn focus(editor: *Editor, cursor: Position) error{ ViewportTooSmall, ViewportToo
     assert(cursor.line_offset <= editor.viewport.lastOffset());
 }
 
-fn render(editor: *const Editor, cursor: Position) !void {
+fn render(editor: *const Editor, cursor: Position) error{WriteFailed}!void {
     const writer = editor.writer;
     const row_count = editor.viewport.row_count;
     const col_count = editor.viewport.col_count;
@@ -514,28 +560,38 @@ fn render(editor: *const Editor, cursor: Position) !void {
                 digitCount(cursor.line_number + 1) +
                 digitCount(cursor.line_offset + 1) +
                 1; // the ',' in "{displayed_line_number},{displayed_line_offset}"
-            var min_size = file_path.len;
-            const dirty_indicator = " [+]";
-            if (editor.dirty) min_size += dirty_indicator.len;
-            min_size += cursor_coordinates_col_count + 1; // 1 for padding
-            if (min_size > col_count) return error.ViewportTooSmall;
-
-            try writer.writeAll(file_path);
-            if (editor.dirty) try writer.writeAll(dirty_indicator);
-            try writer.splatByteAll(' ', col_count - min_size);
+            const status_col_count_min = file_path.len +
+                (if (editor.dirty) " [+]".len else 0) +
+                1 + cursor_coordinates_col_count; // padding before coordinates
+            if (status_col_count_min <= col_count) {
+                try writer.writeAll(file_path);
+                if (editor.dirty) try writer.writeAll(" [+]");
+                try writer.splatByteAll(' ', col_count - status_col_count_min);
+            } else {
+                const dirty = if (editor.dirty) "[+]" else "";
+                try writer.writeAll(dirty);
+                const splat_count = col_count - dirty.len - 1 - cursor_coordinates_col_count;
+                try writer.splatByteAll(' ', splat_count);
+            }
             try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
         },
         // Draw prompt. Takes place of status line.
         .prompt => |prompt| switch (prompt) {
             .command => |command| {
                 try writer.writeByte(':');
-                try writer.writeAll(command.text.items);
+                try writer.writeAll(command.items);
             },
-            .unsaved => try writer.print("Save changes to {s} (y/n)?", .{editor.file_path}),
-            // Crop messages that don't fit on the row.
-            .message => |message| try writer.writeAll(
-                message.items[0..@min(message.items.len, col_count)],
-            ),
+            .unsaved => {
+                const msg = "Save changes (y/n)?";
+                comptime assert(msg.len < col_count_min);
+                try writer.writeAll(msg);
+            },
+            .message => |message| {
+                // Error messages always fit in the status line.
+                inline for (std.enums.values(@TypeOf(message))) |field|
+                    comptime assert(@tagName(field).len <= col_count_min);
+                try writer.writeAll(@tagName(message));
+            },
         },
     }
 
@@ -553,7 +609,7 @@ fn render(editor: *const Editor, cursor: Position) !void {
     const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and
         editor.mode.prompt == .command) .{
         .row = editor.viewport.row_count - 1, // final row
-        .col = editor.mode.prompt.command.cursor_offset + 1, // +1 for the ':' prompt prefix
+        .col = @intCast(editor.mode.prompt.command.items.len + 1), // +1 for the ':' prompt prefix
     } else blk: {
         const cursor_cell: Viewport.Cell = .{
             .row = cursor.line_number - line_number_start,
@@ -639,26 +695,6 @@ pub fn start(editor: *Editor) !void {
     try editor.render(cursor_position);
 }
 
-/// Show a message in place of the status line. Written to the prompt buffer, cropped if it
-/// doesn't fit. Don't pass the command text in `args`, it's in the same buffer.
-fn showMessage(editor: *Editor, comptime format: []const u8, args: anytype) void {
-    var message_writer: std.Io.Writer = .fixed(editor.prompt_buffer);
-    message_writer.print(format, args) catch {}; // fixed writer keeps what fits
-    editor.mode = .{ .prompt = .{ .message = message_writer.toArrayList() } };
-}
-
-/// Format document if formatter available then save. If formatting fails, show the error and
-/// don't save. Returns whether the document was saved so the caller can decide what to do next
-/// (e.g. exit).
-fn formatAndSave(editor: *Editor) !bool {
-    if (try editor.formatDocument() == false) {
-        editor.showMessage("formatting failed", .{});
-        return false;
-    }
-    try editor.save();
-    return true;
-}
-
 fn centreCursorVertically(editor: *Editor) void {
     const line_number = lineNumber(editor.document.items, editor.cursor.offset);
     const rows_to_middle = editor.viewport.row_count / 2 - 1;
@@ -666,54 +702,200 @@ fn centreCursorVertically(editor: *Editor) void {
         editor.viewport.line_number_start = line_number - rows_to_middle;
 }
 
-fn formatDocument(editor: *Editor) !?bool {
-    const formatted = (if (editor.is_test) formatDocumentWithTestFormatter(
-        editor.document.items,
-        editor.scratch_buffer,
-    ) else blk: {
+/// Fake formatter for testing. Double all blank lines. Remove all indentation. Fails on a syntax
+/// error (if braces are unbalanced).
+fn formatDocumentWithTestFormatter(
+    document: []const u8,
+    scratch_buffer: []u8,
+) error{ DocumentInvalid, OutOfMemory }![]const u8 {
+    if (std.mem.countScalar(u8, document, '{') != std.mem.countScalar(u8, document, '}'))
+        return error.DocumentInvalid;
+
+    // Double all blank lines ("\n\n" -> "\n\n\n").
+    if (std.mem.replacementSize(u8, document, "\n\n", "\n\n\n") > scratch_buffer.len)
+        return error.OutOfMemory;
+    const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", scratch_buffer);
+    const with_newlines_doubled = scratch_buffer[0 .. document.len + replacement_count];
+
+    var formatted: std.ArrayList(u8) = .fromOwnedSlice(with_newlines_doubled);
+
+    // Remove all indentation. Start with first line.
+    while (formatted.items.len != 0 and formatted.items[0] == ' ') _ = formatted.orderedRemove(0);
+    // Remove remaining indentation (e.g. following newlines). Replace "\n " with "\n" until "\n "
+    // no longer found.
+    while (std.mem.find(u8, formatted.items, "\n ")) |index|
+        // Safe to assume capacity because we are shrinking the slice.
+        formatted.replaceRangeAssumeCapacity(index, "\n ".len, "\n");
+
+    return formatted.items;
+}
+
+test formatDocumentWithTestFormatter {
+    var buffer: [128]u8 = undefined;
+
+    try std.testing.expectEqualStrings(
+        \\#include <stdio.h>
+        \\
+        \\
+        \\int main() {
+        \\printf("Hello, world!\n");
+        \\return 0;
+        \\}
+        \\
+    , try formatDocumentWithTestFormatter(
+        \\#include <stdio.h>
+        \\
+        \\int main() {
+        \\  printf("Hello, world!\n");
+        \\  return 0;
+        \\}
+        \\
+    , &buffer));
+
+    try std.testing.expectEqualStrings(
+        "hello\n\n\n\n\n\nworld!\n",
+        try formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer),
+    );
+
+    try std.testing.expectEqualStrings("", try formatDocumentWithTestFormatter("", &buffer));
+    try std.testing.expectEqualStrings("", try formatDocumentWithTestFormatter(" ", &buffer));
+    try std.testing.expectEqualStrings(
+        "\n\n\n",
+        try formatDocumentWithTestFormatter(" \n\n", &buffer),
+    );
+
+    // Output doesn't fit.
+    try std.testing.expectError(
+        error.OutOfMemory,
+        formatDocumentWithTestFormatter("\n\n\n\n", buffer[0..5]),
+    );
+
+    // Unbalanced braces fail.
+    try std.testing.expectError(
+        error.DocumentInvalid,
+        formatDocumentWithTestFormatter("int main() {\n", &buffer),
+    );
+    try std.testing.expectError(
+        error.DocumentInvalid,
+        formatDocumentWithTestFormatter("}\n", &buffer),
+    );
+}
+
+fn runFormatter(
+    io: std.Io,
+    argv: []const []const u8,
+    document: []const u8,
+    scratch_buffer: []u8,
+) error{
+    DocumentInvalid,
+    FormatterFailed,
+    FormatterNotFound,
+    OutOfMemory,
+}![]const u8 {
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return error.FormatterNotFound,
+        else => {
+            std.log.warn("unexpected error spawning formatter: {}", .{err});
+            return error.FormatterFailed;
+        },
+    };
+    defer child.kill(io);
+
+    // Write the document to stdin.
+    child.stdin.?.writeStreamingAll(io, document) catch |err| {
+        std.log.warn("unexpected error writing to formatter stdin: {}", .{err});
+        return error.FormatterFailed;
+    };
+
+    child.stdin.?.close(io);
+    child.stdin = null;
+
+    // Resulting stdout is new document.
+    var stdout_reader = child.stdout.?.reader(io, &.{});
+    var buffer_writer: std.Io.Writer = .fixed(scratch_buffer);
+    const stdout_size = stdout_reader.interface.streamRemaining(&buffer_writer) catch |err|
+        switch (err) {
+            error.WriteFailed => return error.OutOfMemory,
+            error.ReadFailed => return error.FormatterFailed, // not sure why this would happen
+        };
+
+    const term = child.wait(io) catch |err| {
+        std.log.warn("unexpected error waiting on formatter to terminate: {}", .{err});
+        return error.FormatterFailed;
+    };
+
+    if (!term.success()) return error.DocumentInvalid; // assume bad input
+
+    return scratch_buffer[0..stdout_size];
+}
+
+fn formatDocument(
+    io: std.Io,
+    file_path: []const u8,
+    document: *std.ArrayList(u8),
+    scratch_buffer: []u8,
+    dirty: *bool,
+    cursor: *Cursor,
+    is_test: bool,
+) error{
+    DocumentInvalid,
+    FormatterNotConfigured,
+    FormatterNotFound,
+    FormatterFailed,
+    FormattingWouldInvalidateDocument,
+    OutOfMemory,
+}!void {
+    const formatted = blk: {
+        if (is_test) break :blk try formatDocumentWithTestFormatter(document.items, scratch_buffer);
+
         const extension = std.meta.stringToEnum(
             enum { @".zig", @".zon", @".md", @".sh", @".c", @".h", @".cpp", @".hpp" },
-            std.fs.path.extension(editor.file_path),
-        ) orelse return null; // no formatter, save as is
-        break :blk try runFormatter(editor.io, switch (extension) {
+            std.fs.path.extension(file_path),
+        ) orelse return error.FormatterNotConfigured;
+
+        break :blk try runFormatter(io, switch (extension) {
             .@".zig", .@".zon" => &.{ "zig", "fmt", "--stdin" },
             .@".md" => &.{ "prettier", "--parser", "markdown" },
             .@".sh" => &.{ "shfmt", "--indent", "4" },
-            .@".c", .@".h", .@".cpp", .@".hpp" => &.{ "clang-format", "--style=Google" }, // C, C++
-        }, editor.document.items, editor.scratch_buffer);
-    }) orelse return false;
+            .@".c", .@".h", .@".cpp", .@".hpp" => &.{ "clang-format", "--style=Google" },
+        }, document.items, scratch_buffer);
+    };
 
     // Treat output we can't accept as a formatting failure, leaving the document untouched.
     // Check it's valid before replacing, replace asserts on invalid characters.
-    validateDocument(formatted) catch return false;
-    replace(
-        &editor.document,
-        &editor.dirty,
-        0,
-        @intCast(editor.document.items.len),
-        formatted,
-    ) catch return false; // too long once the trailing newline is added
+    if (!documentValid(formatted)) return error.FormattingWouldInvalidateDocument;
 
-    editor.cursor.anchor = null;
+    replace(document, dirty, 0, @intCast(document.items.len), formatted) catch
+        return error.OutOfMemory;
+
+    cursor.anchor = null;
 
     // Move cursor to start of line.
-    const offset = @min(editor.cursor.offset, editor.document.items.len - 1);
-    const offset_new = lineHead(editor.document.items, offset) +
-        lineIndentation(editor.document.items, offset);
-    editor.cursor.update(editor.document.items, offset_new, .snap_update);
-
-    return true;
+    const offset = @min(cursor.offset, document.items.len - 1);
+    const offset_new = lineHead(document.items, offset) +
+        lineIndentation(document.items, offset);
+    cursor.update(document.items, offset_new, .snap_update);
 }
 
-fn save(editor: *Editor) !void {
-    if (!editor.is_test) {
-        try std.Io.Dir.cwd().writeFile(editor.io, .{
-            .data = editor.document.items,
-            .sub_path = editor.file_path,
-        });
-    }
-
-    editor.dirty = false;
+fn writeFile(
+    io: std.Io,
+    file_path: []const u8,
+    document: []const u8,
+    dirty: *bool,
+    is_test: bool,
+) bool {
+    if (!is_test)
+        std.Io.Dir.cwd().writeFile(io, .{ .data = document, .sub_path = file_path }) catch |err| {
+            std.log.warn("unexpected error saving file: {}", .{err});
+            return false;
+        };
+    dirty.* = false;
+    return true;
 }
 
 const Position = struct { line_number: u32, line_offset: u32 };
@@ -1542,39 +1724,6 @@ pub const Event = union(enum) {
     }
 };
 
-fn runFormatter(
-    io: std.Io,
-    argv: []const []const u8,
-    document: []const u8,
-    scratch_buffer: []u8,
-) !?[]const u8 {
-    var child = try std.process.spawn(io, .{
-        .argv = argv,
-        .stdin = .pipe,
-        .stdout = .pipe,
-        .stderr = .ignore,
-    });
-    defer child.kill(io);
-
-    // Write the document to stdin.
-    try child.stdin.?.writeStreamingAll(io, document);
-    child.stdin.?.close(io);
-    child.stdin = null;
-
-    // Resulting stdout is new document.
-    var stdout_reader = child.stdout.?.reader(io, &.{});
-    var buffer_writer: std.Io.Writer = .fixed(scratch_buffer);
-    const stdout_size = stdout_reader.interface.streamRemaining(&buffer_writer) catch |err|
-        switch (err) {
-            error.WriteFailed => return null, // output doesn't fit, treat as formatting failure
-            error.ReadFailed => return err,
-        };
-
-    const term = try child.wait(io);
-    if (!term.success()) return null;
-    return scratch_buffer[0..stdout_size];
-}
-
 /// Paul Williams' DEC ANSI parser state machine. See https://vt100.net/emu/dec_ansi_parser.
 ///
 /// Deviations from the spec:
@@ -2093,71 +2242,7 @@ test fuzzParser {
     try std.testing.fuzz(&ctx, fuzzParser, .{});
 }
 
-/// Fake formatter for testing. Double all blank lines. Remove all indentation. Like a real
-/// formatter on a syntax error, fail (return null) if braces are unbalanced. Also fail if the
-/// output doesn't fit in the scratch buffer, like `runFormatter`.
-fn formatDocumentWithTestFormatter(document: []const u8, scratch_buffer: []u8) ?[]const u8 {
-    if (std.mem.countScalar(u8, document, '{') != std.mem.countScalar(u8, document, '}'))
-        return null;
-
-    // Double all blank lines ("\n\n" -> "\n\n\n").
-    if (std.mem.replacementSize(u8, document, "\n\n", "\n\n\n") > scratch_buffer.len) return null;
-    const replacement_count = std.mem.replace(u8, document, "\n\n", "\n\n\n", scratch_buffer);
-    const with_newlines_doubled = scratch_buffer[0 .. document.len + replacement_count];
-
-    var formatted: std.ArrayList(u8) = .fromOwnedSlice(with_newlines_doubled);
-
-    // Remove all indentation. Start with first line.
-    while (formatted.items.len != 0 and formatted.items[0] == ' ') _ = formatted.orderedRemove(0);
-    // Remove remaining indentation (e.g. following newlines). Replace "\n " with "\n" until "\n "
-    // no longer found.
-    while (std.mem.find(u8, formatted.items, "\n ")) |index|
-        // Safe to assume capacity because we are shrinking the slice.
-        formatted.replaceRangeAssumeCapacity(index, "\n ".len, "\n");
-
-    return formatted.items;
-}
-
-test formatDocumentWithTestFormatter {
-    var buffer: [128]u8 = undefined;
-
-    try std.testing.expectEqualStrings(
-        \\#include <stdio.h>
-        \\
-        \\
-        \\int main() {
-        \\printf("Hello, world!\n");
-        \\return 0;
-        \\}
-        \\
-    , formatDocumentWithTestFormatter(
-        \\#include <stdio.h>
-        \\
-        \\int main() {
-        \\  printf("Hello, world!\n");
-        \\  return 0;
-        \\}
-        \\
-    , &buffer).?);
-
-    try std.testing.expectEqualStrings(
-        "hello\n\n\n\n\n\nworld!\n",
-        formatDocumentWithTestFormatter(" hello\n\n\n\n  world!\n", &buffer).?,
-    );
-
-    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter("", &buffer).?);
-    try std.testing.expectEqualStrings("", formatDocumentWithTestFormatter(" ", &buffer).?);
-    try std.testing.expectEqualStrings("\n\n\n", formatDocumentWithTestFormatter(" \n\n", &buffer).?);
-
-    // Output doesn't fit.
-    try std.testing.expectEqual(null, formatDocumentWithTestFormatter("\n\n\n\n", buffer[0..5]));
-
-    // Unbalanced braces fail.
-    try std.testing.expectEqual(null, formatDocumentWithTestFormatter("int main() {\n", &buffer));
-    try std.testing.expectEqual(null, formatDocumentWithTestFormatter("}\n", &buffer));
-}
-
-fn validateDocument(document: []const u8) error{FileContainsInvalidCharacter}!void {
+fn documentValid(document: []const u8) bool {
     var line_number: u32 = 0;
     var line_offset: u32 = 0;
     for (document) |c| {
@@ -2166,7 +2251,7 @@ fn validateDocument(document: []const u8) error{FileContainsInvalidCharacter}!vo
                 "file contains invalid character (0x{x}) at {d}:{d}",
                 .{ c, line_number + 1, line_offset + 1 },
             );
-            return error.FileContainsInvalidCharacter;
+            return false;
         }
 
         line_offset += 1;
@@ -2175,6 +2260,7 @@ fn validateDocument(document: []const u8) error{FileContainsInvalidCharacter}!vo
             line_offset = 0;
         }
     }
+    return true;
 }
 
 /// Build a valid document from the raw file bytes in `scratch_buffer[0..file_size]`. A valid
@@ -2201,7 +2287,7 @@ fn load(
         expanded.replaceRangeBounded(index, 1, &tab_whitespace) catch return error.FileTooLong;
     }
 
-    try validateDocument(expanded.items);
+    if (!documentValid(expanded.items)) return error.FileContainsInvalidCharacter;
 
     // Start from the smallest valid document then replace it with the file. `replace` takes care
     // of empty files and the trailing newline.
@@ -2684,7 +2770,6 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
         const event: Event = smith.value(Event); // generate input
         if (event == .ascii and !characterValid(event.ascii)) continue; // valid ascii only
         if (editor.tick(event) catch |err| switch (err) {
-            error.FileTooLong,
             error.ViewportTooLarge,
             error.ViewportTooSmall,
             => return,
