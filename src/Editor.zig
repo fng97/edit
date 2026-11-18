@@ -34,7 +34,7 @@ cursor: Cursor,
 mode: union(enum) {
     normal,
     insert,
-    // search: std.ArrayList(u8),
+    search: std.ArrayList(u8),
     notify: enum {
         command_not_recognised,
         insert_would_oom,
@@ -52,6 +52,7 @@ document: std.ArrayList(u8),
 dirty: bool,
 prompt_buffer: []u8, // shared by prompt command text and messages
 scratch_buffer: []u8, // used for formatting, selection paste
+search: std.ArrayList(u8),
 clipboard: std.ArrayList(u8),
 
 /// All allocated memory used by the editor lives in this struct.
@@ -59,7 +60,8 @@ pub const Buffers = struct {
     document: []u8,
     clipboard: []u8,
     scratch: []u8,
-    prompt: []u8, // prompt command text or message
+    prompt: []u8,
+    search: []u8,
 
     pub fn alloc(
         allocator: std.mem.Allocator,
@@ -74,12 +76,16 @@ pub const Buffers = struct {
         // -1 accounts for the ':' shown when the prompt is active.
         const prompt = try allocator.alloc(u8, options.col_count_max - 1);
         errdefer allocator.free(prompt);
+        // -1 accounts for the '/' shown when search is active.
+        const search = try allocator.alloc(u8, options.col_count_max - 1);
+        errdefer allocator.free(search);
 
         return .{
             .document = document,
             .clipboard = clipboard,
             .scratch = scratch,
             .prompt = prompt,
+            .search = search,
         };
     }
 
@@ -88,6 +94,7 @@ pub const Buffers = struct {
         allocator.free(buffers.clipboard);
         allocator.free(buffers.scratch);
         allocator.free(buffers.prompt);
+        allocator.free(buffers.search);
     }
 };
 
@@ -246,6 +253,17 @@ pub fn tick(editor: *Editor, event: Event) error{
                     editor.mode = .{ .notify = .insert_would_oom };
                 },
                 'z' => editor.centreCursorVertically(),
+                '/' => editor.mode = .{ .search = .initBuffer(editor.prompt_buffer) },
+                'n', 'N' => if (editor.cursor.anchor == null) {
+                    const cursor_next = if (c == 'n')
+                        findNext(editor.document.items, editor.cursor.offset, editor.search.items)
+                    else
+                        findPrev(editor.document.items, editor.cursor.offset, editor.search.items);
+                    if (cursor_next) |offset| {
+                        editor.cursor.update(editor.document.items, @intCast(offset), .snap_update);
+                        editor.centreCursorVertically();
+                    }
+                },
                 else => {},
             },
             .chord => |chord| {
@@ -267,7 +285,7 @@ pub fn tick(editor: *Editor, event: Event) error{
             .enter,
             .tab,
             => {}, // do nothing
-            .resize => unreachable, // handled above
+            .resize => unreachable,
         },
         .insert => {
             editor.cursor.anchor = null;
@@ -302,7 +320,7 @@ pub fn tick(editor: *Editor, event: Event) error{
                     } else editor.mode = .{ .notify = .insert_would_oom };
                 },
                 .chord => {}, // do nothing
-                .resize => unreachable, // handled above
+                .resize => unreachable,
             }
         },
         // The cursor is always at the end of the command, so instead of storing it we use
@@ -387,12 +405,12 @@ pub fn tick(editor: *Editor, event: Event) error{
                 editor.mode = .{ .notify = .command_not_recognised };
             },
             .tab, .chord => {}, // do nothing
-            .resize => unreachable, // handled above
+            .resize => unreachable,
         },
         .notify => switch (event) {
             .enter, .escape => editor.mode = .normal,
             .ascii, .tab, .chord, .backspace => {}, // do nothing
-            .resize => unreachable, // handled above
+            .resize => unreachable,
         },
         .nosave => switch (event) {
             .escape => editor.mode = .normal,
@@ -410,7 +428,30 @@ pub fn tick(editor: *Editor, event: Event) error{
                 else => {}, // do nothing
             },
             .enter, .tab, .chord, .backspace => {}, // do nothing
-            .resize => unreachable, // handled above
+            .resize => unreachable,
+        },
+        // FIXME: This duplicates a lot of the prompt logic. Probably time for some prompt
+        // abstraction.
+        .search => |*text| switch (event) {
+            .escape => editor.mode = .normal,
+            // Keep entering text as long as we've got room in the prompt and on the row. The -2
+            // below includes -1 for the cursor and -1 for the '/'.
+            .ascii => |c| if (text.items.len < text.capacity and
+                text.items.len < editor.viewport.col_count - 2)
+                text.appendAssumeCapacity(c),
+            .backspace => _ = text.pop(),
+            .enter => if (text.items.len != 0) {
+                assert(text.capacity == editor.search.capacity);
+                editor.search.clearRetainingCapacity();
+                editor.search.appendSliceAssumeCapacity(text.items);
+                if (findNext(editor.document.items, editor.cursor.offset, text.items)) |offset| {
+                    editor.cursor.update(editor.document.items, offset, .snap_update);
+                    editor.centreCursorVertically();
+                }
+                editor.mode = .normal;
+            },
+            .chord, .tab => {}, // do nothing
+            .resize => unreachable,
         },
     }
 
@@ -572,6 +613,7 @@ fn render(editor: *const Editor, cursor: Position) error{WriteFailed}!void {
         },
         // Prompt, nosave, and notify all take place of status line.
         .prompt => |text| {
+            assert(text.items.len + 1 <= col_count);
             try writer.writeByte(':');
             try writer.writeAll(text.items);
         },
@@ -586,26 +628,38 @@ fn render(editor: *const Editor, cursor: Position) error{WriteFailed}!void {
                 comptime assert(@tagName(field).len <= col_count_min);
             try writer.writeAll(@tagName(message));
         },
+        .search => |text| {
+            assert(editor.search.items.len + 1 <= col_count);
+            try writer.writeByte('/');
+            try writer.writeAll(text.items);
+        },
     }
 
-    // Restore cursor.
+    // Set cursor style. See https://ghostty.org/docs/vt/csi/decscusr.
     const cursor_style: Cursor.Style = switch (editor.mode) {
         .normal, .notify, .nosave => .steady_block,
-        .insert, .prompt => .steady_bar,
+        .insert, .prompt, .search => .steady_bar,
     };
-    // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     try writer.print("\x1b[{d}\x20q", .{@backingInt(cursor_style)});
-    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt) .{
-        .row = editor.viewport.row_count - 1, // final row
-        .col = @intCast(editor.mode.prompt.items.len + 1), // +1 for the ':' prompt prefix
-    } else blk: {
-        const cursor_cell: Viewport.Cell = .{
+
+    // Set cursor position depending on mode: lands in status bar or in document.
+    const cursor_cell: Viewport.Cell = switch (editor.mode) {
+        .prompt, .search => |text| .{
+            .row = editor.viewport.row_count - 1, // final row
+            // The cursor is always at the end of the text. That is, its offset in the text is the
+            // text size.
+            .col = @intCast(text.items.len + 1), // +1 for the ':' or '/' prefix
+        },
+        .normal, .notify, .nosave, .insert => .{
             .row = cursor.line_number - line_number_start,
-            .col = cursor.line_offset - line_offset_start + gutter_width,
-        };
-        assert(cursor_cell.col >= gutter_width); // right of line numbers
-        break :blk cursor_cell;
+            .col = blk: {
+                const col = cursor.line_offset - line_offset_start + gutter_width;
+                assert(col >= gutter_width); // right of line numbers
+                break :blk col;
+            },
+        },
     };
+
     assert(cursor_cell.col < col_count); // does not exceed screen bounds horizontally
     assert(cursor_cell.row < row_count); // does not exceed screen bounds vertically
     try writer.print("\x1b[{d};{d}H", .{ cursor_cell.row + 1, cursor_cell.col + 1 });
@@ -668,6 +722,7 @@ pub fn init(args: struct {
             .line_offset_snap = if (cursor_offset_start) |_| args.cursor_line_offset else 0,
         },
         .clipboard = .initBuffer(args.buffers.clipboard),
+        .search = .initBuffer(args.buffers.search),
         .prompt_buffer = args.buffers.prompt,
         .scratch_buffer = args.buffers.scratch,
         .col_count_max = args.col_count_max,
@@ -2353,6 +2408,50 @@ fn characterValid(c: u8) bool {
     };
 }
 
+/// Find the next occurrence of the needle in the buffer with wrapping. Search from one after the
+/// offset in case it is the start of a needle. If not found, search from the start.
+fn findNext(buffer: []const u8, offset: u32, needle: []const u8) ?u32 {
+    assert(offset < buffer.len);
+    assert(buffer.len > 0);
+    assert(needle.len > 0);
+    const result = std.mem.findPos(u8, buffer, offset + 1, needle) orelse
+        std.mem.find(u8, buffer[0..@min(offset + needle.len, buffer.len)], needle); // look behind
+    return if (result) |r| @intCast(r) else null;
+}
+
+test findNext {
+    try std.testing.expectEqual(0, findNext("ha", 0, "h"));
+    try std.testing.expectEqual(0, findNext("ha", 1, "h"));
+    try std.testing.expectEqual(2, findNext("haha", 0, "ha"));
+    try std.testing.expectEqual(2, findNext("haha", 1, "ha"));
+    try std.testing.expectEqual(0, findNext("haha", 2, "ha"));
+    try std.testing.expectEqual(0, findNext("haha", 3, "ha"));
+    try std.testing.expectEqual(1, findNext("haha", 2, "aha"));
+    try std.testing.expectEqual(null, findNext("haha", 0, "*"));
+}
+
+/// Find the previous occurrence of the needle in the buffer with wrapping. Search backwards from
+/// one behind the offset in case it is the start of a needle. If not found, search from the end
+/// until the offset.
+fn findPrev(buffer: []const u8, offset: u32, needle: []const u8) ?u32 {
+    assert(offset < buffer.len);
+    assert(buffer.len > 0);
+    assert(needle.len > 0);
+    const result =
+        std.mem.findLast(u8, buffer[0..@min(offset + needle.len - 1, buffer.len)], needle) orelse
+        std.mem.findLast(u8, buffer, needle);
+    return if (result) |r| @intCast(r) else null;
+}
+
+test findPrev {
+    try std.testing.expectEqual(0, findPrev("ha", 0, "h"));
+    try std.testing.expectEqual(0, findPrev("ha", 1, "h"));
+    try std.testing.expectEqual(2, findPrev("haha", 0, "ha"));
+    try std.testing.expectEqual(0, findPrev("haha", 1, "ha"));
+    try std.testing.expectEqual(0, findPrev("haha", 2, "ha"));
+    try std.testing.expectEqual(2, findPrev("haha", 3, "ha"));
+}
+
 fn offsetFromPosition(buffer: []const u8, line_number: u32, line_offset: u32) ?u32 {
     var offset: u32 = 0;
     // Go to the start of line line_number.
@@ -2705,6 +2804,7 @@ pub const EditorFuzzContext = struct {
     clipboard_buffer: [file_size_max]u8 = undefined,
     scratch_buffer: [file_size_max]u8 = undefined,
     prompt_buffer: [col_count_max - 1]u8 = undefined,
+    search_buffer: [col_count_max - 1]u8 = undefined,
 };
 
 pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
@@ -2730,6 +2830,7 @@ pub fn fuzzEditor(ctx: *EditorFuzzContext, smith: *std.testing.Smith) !void {
             .clipboard = &ctx.clipboard_buffer,
             .scratch = &ctx.scratch_buffer,
             .prompt = &ctx.prompt_buffer,
+            .search = &ctx.search_buffer,
         },
         .file_path = file_path,
         .file_reader = &file_reader,
