@@ -7,13 +7,12 @@
 
 ## TODO
 
+- Add smart case search (`std.ascii.findIgnoreCasePos`).
 - Detect external changes to file.
-- Basic search (check out `std.ascii`).
 - Yank, cut, and paste using system clipboard: `CSI ? 2004 h`, `CSI ? 2004 l`,
   `CSI 200 ~`, and `CSI 201 ~`.
 - Basic find and replace.
 - Can command prompt use scratch buffer and just limit on viewport width?
-- Clean up `runFormatter`. Figure out failure modes.
 - Display symbol for newlines.
 - Newlines should be included when highlighting. I think it's related to the
   above. Can't highlight a blank cell.

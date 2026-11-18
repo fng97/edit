@@ -108,9 +108,9 @@ pub fn tick(editor: *Editor, event: Event) error{
         editor.viewport.col_count = event.resize.col_count;
         const cursor_position = position(editor.document.items, editor.cursor.offset);
         try editor.focus(cursor_position);
-        // Crop the command text so it still fits on the row with the ':' prompt prefix and the
-        // cursor after it.
         switch (editor.mode) {
+            // Crop the command text so it still fits on the row with the ':' or '/'  prefix and the
+            // cursor after it.
             .search, .prompt => |*text| text.shrinkRetainingCapacity(
                 @min(text.items.len, editor.viewport.col_count -| 2),
             ),
