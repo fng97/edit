@@ -34,20 +34,19 @@ cursor: Cursor,
 mode: union(enum) {
     normal,
     insert,
-    prompt: union(enum) {
-        command: std.ArrayList(u8),
-        message: enum {
-            command_not_recognised,
-            insert_would_oom,
-            formatter_failed,
-            formatter_not_in_path,
-            formatting_invalid_document,
-            formatting_would_oom,
-            formatting_would_invalidate,
-            save_failed,
-        },
-        unsaved,
+    // search: std.ArrayList(u8),
+    notify: enum {
+        command_not_recognised,
+        insert_would_oom,
+        formatter_failed,
+        formatter_not_in_path,
+        formatting_invalid_document,
+        formatting_would_oom,
+        formatting_would_invalidate,
+        save_failed,
     },
+    prompt: std.ArrayList(u8),
+    nosave, // tried to exit with unsaved changes
 },
 document: std.ArrayList(u8),
 dirty: bool,
@@ -104,11 +103,9 @@ pub fn tick(editor: *Editor, event: Event) error{
         try editor.focus(cursor_position);
         // Crop the command text so it still fits on the row with the ':' prompt prefix and the
         // cursor after it.
-        if (editor.mode == .prompt and editor.mode.prompt == .command) {
-            editor.mode.prompt.command.shrinkRetainingCapacity(
-                @min(editor.mode.prompt.command.items.len, editor.viewport.col_count -| 2),
-            );
-        }
+        if (editor.mode == .prompt) editor.mode.prompt.shrinkRetainingCapacity(
+            @min(editor.mode.prompt.items.len, editor.viewport.col_count -| 2),
+        );
     } else switch (editor.mode) {
         .normal => switch (event) {
             .ascii => |c| switch (c) {
@@ -181,7 +178,7 @@ pub fn tick(editor: *Editor, event: Event) error{
                             insert(&editor.document, &editor.cursor, &editor.dirty, " ") catch
                                 unreachable;
                         editor.mode = .insert;
-                    } else editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                    } else editor.mode = .{ .notify = .insert_would_oom };
                 },
                 'O' => if (editor.cursor.anchor == null) {
                     const indentation =
@@ -195,7 +192,7 @@ pub fn tick(editor: *Editor, event: Event) error{
                             insert(&editor.document, &editor.cursor, &editor.dirty, " ") catch
                                 unreachable;
                         editor.mode = .insert;
-                    } else editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                    } else editor.mode = .{ .notify = .insert_would_oom };
                 },
                 // Enable/disable selection. If we have a selection in the same mode, deselect,
                 // otherwise, do selection. Going from a linewise selection to a normal one,
@@ -215,9 +212,7 @@ pub fn tick(editor: *Editor, event: Event) error{
                     &editor.cursor,
                     &editor.dirty,
                 ),
-                ':' => editor.mode = .{
-                    .prompt = .{ .command = .initBuffer(editor.prompt_buffer) },
-                },
+                ':' => editor.mode = .{ .prompt = .initBuffer(editor.prompt_buffer) },
                 'y' => yank(editor.document.items, &editor.clipboard, &editor.cursor),
                 // Yank the lines covered by the selection or, without one, the cursor's line.
                 // The cursor stays where it is.
@@ -248,7 +243,7 @@ pub fn tick(editor: *Editor, event: Event) error{
                     &editor.cursor,
                     &editor.dirty,
                 ) catch {
-                    editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                    editor.mode = .{ .notify = .insert_would_oom };
                 },
                 'z' => editor.centreCursorVertically(),
                 else => {},
@@ -279,7 +274,7 @@ pub fn tick(editor: *Editor, event: Event) error{
             switch (event) {
                 .escape => editor.mode = .normal,
                 .ascii => |c| insert(&editor.document, &editor.cursor, &editor.dirty, &.{c}) catch {
-                    editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                    editor.mode = .{ .notify = .insert_would_oom };
                 },
                 .backspace => if (editor.cursor.offset != 0) {
                     editor.cursor.move(.left, 1, editor.document.items);
@@ -293,7 +288,7 @@ pub fn tick(editor: *Editor, event: Event) error{
                     ) catch unreachable;
                 },
                 .tab => insert(&editor.document, &editor.cursor, &editor.dirty, "    ") catch {
-                    editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                    editor.mode = .{ .notify = .insert_would_oom };
                 },
                 .enter => {
                     const indent_count =
@@ -304,48 +299,48 @@ pub fn tick(editor: *Editor, event: Event) error{
                         for (0..indent_count) |_|
                             insert(&editor.document, &editor.cursor, &editor.dirty, " ") catch
                                 unreachable;
-                    } else editor.mode = .{ .prompt = .{ .message = .insert_would_oom } };
+                    } else editor.mode = .{ .notify = .insert_would_oom };
                 },
                 .chord => {}, // do nothing
                 .resize => unreachable, // handled above
             }
         },
-        .prompt => |*prompt| switch (prompt.*) {
-            // The cursor is always at the end of the command, so instead of storing it we use
-            // `command.items.len`.
-            .command => |*command| switch (event) {
-                .escape => editor.mode = .normal,
-                // Keep entering text as long as we've got room in the prompt and on the row.
-                .ascii => |c| if (command.items.len < command.capacity and
-                    // The -2 below includes -1 for the cursor and -1 for the ':'.
-                    command.items.len < editor.viewport.col_count - 2)
-                    command.appendAssumeCapacity(c),
-                .backspace => _ = command.pop(),
-                .enter => if (std.meta.stringToEnum(
-                    enum { w, q, @"w!", @"q!", wq },
-                    command.items,
-                )) |cmd| {
-                    const ops: struct { format: bool, save: bool, quit: bool } = switch (cmd) {
-                        .w => .{ .format = true, .save = true, .quit = false },
-                        .q => .{ .format = false, .save = false, .quit = true },
-                        .wq => .{ .format = true, .save = true, .quit = true },
-                        .@"w!" => .{ .format = false, .save = true, .quit = false },
-                        .@"q!" => return false, // quit without saving
-                    };
+        // The cursor is always at the end of the command, so instead of storing it we use
+        // `prompt.items.len`.
+        .prompt => |*prompt| switch (event) {
+            .escape => editor.mode = .normal,
+            // Keep entering text as long as we've got room in the prompt and on the row.
+            .ascii => |c| if (prompt.items.len < prompt.capacity and
+                // The -2 below includes -1 for the cursor and -1 for the ':'.
+                prompt.items.len < editor.viewport.col_count - 2)
+                prompt.appendAssumeCapacity(c),
+            .backspace => _ = prompt.pop(),
+            .enter => if (std.meta.stringToEnum(
+                enum { w, q, @"w!", @"q!", wq },
+                prompt.items,
+            )) |cmd| {
+                const ops: struct { format: bool, save: bool, quit: bool } = switch (cmd) {
+                    .w => .{ .format = true, .save = true, .quit = false },
+                    .q => .{ .format = false, .save = false, .quit = true },
+                    .wq => .{ .format = true, .save = true, .quit = true },
+                    .@"w!" => .{ .format = false, .save = true, .quit = false },
+                    .@"q!" => return false, // quit without saving
+                };
 
-                    apply: { // if any ops fail, give up and report error
-                        if (ops.format) formatDocument(
-                            editor.io,
-                            editor.file_path,
-                            &editor.document,
-                            editor.scratch_buffer,
-                            &editor.dirty,
-                            &editor.cursor,
-                            editor.is_test,
-                        ) catch |err| switch (err) {
-                            error.FormatterNotConfigured => {}, // fine, fall through to save
-                            else => {
-                                editor.mode = .{ .prompt = .{ .message = switch (err) {
+                apply: { // if any ops fail, give up and report error
+                    if (ops.format) formatDocument(
+                        editor.io,
+                        editor.file_path,
+                        &editor.document,
+                        editor.scratch_buffer,
+                        &editor.dirty,
+                        &editor.cursor,
+                        editor.is_test,
+                    ) catch |err| switch (err) {
+                        error.FormatterNotConfigured => {}, // fine, fall through to save
+                        else => {
+                            editor.mode = .{
+                                .notify = switch (err) {
                                     error.FormatterNotConfigured => unreachable,
                                     error.OutOfMemory => .formatting_would_oom,
                                     error.DocumentInvalid => .formatting_invalid_document,
@@ -353,69 +348,69 @@ pub fn tick(editor: *Editor, event: Event) error{
                                     error.FormatterFailed => .formatter_failed,
                                     error.FormattingWouldInvalidateDocument,
                                     => .formatting_would_invalidate,
-                                } } };
-                                break :apply;
-                            },
-                        };
+                                },
+                            };
+                            break :apply;
+                        },
+                    };
 
-                        if (ops.save) {
-                            if (!writeFile(
-                                editor.io,
-                                editor.file_path,
-                                editor.document.items,
-                                &editor.dirty,
-                                editor.is_test,
-                            )) {
-                                editor.mode = .{ .prompt = .{ .message = .save_failed } };
-                                break :apply;
-                            }
-                            editor.mode = .normal;
+                    if (ops.save) {
+                        if (!writeFile(
+                            editor.io,
+                            editor.file_path,
+                            editor.document.items,
+                            &editor.dirty,
+                            editor.is_test,
+                        )) {
+                            editor.mode = .{ .notify = .save_failed };
+                            break :apply;
                         }
+                        editor.mode = .normal;
+                    }
 
-                        if (ops.quit) {
-                            if (editor.dirty) {
-                                // Trying to exit without saving. Prompt user to save.
-                                editor.mode = .{ .prompt = .unsaved };
-                            } else return false;
-                        }
+                    if (ops.quit) {
+                        if (editor.dirty) {
+                            // Trying to exit without saving. Prompt user to save.
+                            editor.mode = .nosave;
+                        } else return false;
                     }
-                } else if (std.fmt.parseInt(u32, command.items, 10) catch null) |number| {
-                    // Line number given is indexed from 1.
-                    const line_number = @max(number, 1) - 1;
-                    if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
-                        editor.cursor.update(editor.document.items, head, .snap_remain);
-                        editor.centreCursorVertically();
-                    }
-                    editor.mode = .normal;
-                } else {
-                    editor.mode = .{ .prompt = .{ .message = .command_not_recognised } };
+                }
+            } else if (std.fmt.parseInt(u32, prompt.items, 10) catch null) |number| {
+                // Line number given is indexed from 1.
+                const line_number = @max(number, 1) - 1;
+                if (lineHeadFromNumber(editor.document.items, line_number)) |head| {
+                    editor.cursor.update(editor.document.items, head, .snap_remain);
+                    editor.centreCursorVertically();
+                }
+                editor.mode = .normal;
+            } else {
+                editor.mode = .{ .notify = .command_not_recognised };
+            },
+            .tab, .chord => {}, // do nothing
+            .resize => unreachable, // handled above
+        },
+        .notify => switch (event) {
+            .enter, .escape => editor.mode = .normal,
+            .ascii, .tab, .chord, .backspace => {}, // do nothing
+            .resize => unreachable, // handled above
+        },
+        .nosave => switch (event) {
+            .escape => editor.mode = .normal,
+            .ascii => |c| switch (c) {
+                'y' => if (writeFile(
+                    editor.io,
+                    editor.file_path,
+                    editor.document.items,
+                    &editor.dirty,
+                    editor.is_test,
+                )) return false else {
+                    editor.mode = .{ .notify = .save_failed };
                 },
-                .tab, .chord => {}, // do nothing
-                .resize => unreachable, // handled above
+                'n' => return false, // quit without saving
+                else => {}, // do nothing
             },
-            .message => switch (event) {
-                .enter, .escape => editor.mode = .normal,
-                .ascii, .tab, .chord, .backspace => {}, // do nothing
-                .resize => unreachable, // handled above
-            },
-            .unsaved => switch (event) {
-                .escape => editor.mode = .normal,
-                .ascii => |c| switch (c) {
-                    'y' => if (writeFile(
-                        editor.io,
-                        editor.file_path,
-                        editor.document.items,
-                        &editor.dirty,
-                        editor.is_test,
-                    )) return false else {
-                        editor.mode = .{ .prompt = .{ .message = .save_failed } };
-                    },
-                    'n' => return false, // quit without saving
-                    else => {}, // do nothing
-                },
-                .enter, .tab, .chord, .backspace => {}, // do nothing
-                .resize => unreachable, // handled above
-            },
+            .enter, .tab, .chord, .backspace => {}, // do nothing
+            .resize => unreachable, // handled above
         },
     }
 
@@ -575,41 +570,34 @@ fn render(editor: *const Editor, cursor: Position) error{WriteFailed}!void {
             }
             try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
         },
-        // Draw prompt. Takes place of status line.
-        .prompt => |prompt| switch (prompt) {
-            .command => |command| {
-                try writer.writeByte(':');
-                try writer.writeAll(command.items);
-            },
-            .unsaved => {
-                const msg = "Save changes (y/n)?";
-                comptime assert(msg.len < col_count_min);
-                try writer.writeAll(msg);
-            },
-            .message => |message| {
-                // Error messages always fit in the status line.
-                inline for (std.enums.values(@TypeOf(message))) |field|
-                    comptime assert(@tagName(field).len <= col_count_min);
-                try writer.writeAll(@tagName(message));
-            },
+        // Prompt, nosave, and notify all take place of status line.
+        .prompt => |text| {
+            try writer.writeByte(':');
+            try writer.writeAll(text.items);
+        },
+        .nosave => {
+            const msg = "Save changes (y/n)?";
+            comptime assert(msg.len < col_count_min);
+            try writer.writeAll(msg);
+        },
+        .notify => |message| {
+            // Error messages always fit in the status line.
+            inline for (std.enums.values(@TypeOf(message))) |field|
+                comptime assert(@tagName(field).len <= col_count_min);
+            try writer.writeAll(@tagName(message));
         },
     }
 
     // Restore cursor.
     const cursor_style: Cursor.Style = switch (editor.mode) {
-        .normal => .steady_block,
-        .prompt => |prompt| switch (prompt) {
-            .command => .steady_bar,
-            .message, .unsaved => .steady_block,
-        },
-        .insert => .steady_bar,
+        .normal, .notify, .nosave => .steady_block,
+        .insert, .prompt => .steady_bar,
     };
     // Restore and style cursor. See https://ghostty.org/docs/vt/csi/decscusr.
     try writer.print("\x1b[{d}\x20q", .{@backingInt(cursor_style)});
-    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt and
-        editor.mode.prompt == .command) .{
+    const cursor_cell: Viewport.Cell = if (editor.mode == .prompt) .{
         .row = editor.viewport.row_count - 1, // final row
-        .col = @intCast(editor.mode.prompt.command.items.len + 1), // +1 for the ':' prompt prefix
+        .col = @intCast(editor.mode.prompt.items.len + 1), // +1 for the ':' prompt prefix
     } else blk: {
         const cursor_cell: Viewport.Cell = .{
             .row = cursor.line_number - line_number_start,
