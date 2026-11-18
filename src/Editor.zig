@@ -76,8 +76,8 @@ pub const Buffers = struct {
         // -1 accounts for the ':' shown when the prompt is active.
         const prompt = try allocator.alloc(u8, options.col_count_max - 1);
         errdefer allocator.free(prompt);
-        // -1 accounts for the '/' shown when search is active.
-        const search = try allocator.alloc(u8, options.col_count_max - 1);
+        // This is where we store the last search, so it has to be at least as big as the prompt.
+        const search = try allocator.alloc(u8, prompt.len);
         errdefer allocator.free(search);
 
         return .{
@@ -110,9 +110,12 @@ pub fn tick(editor: *Editor, event: Event) error{
         try editor.focus(cursor_position);
         // Crop the command text so it still fits on the row with the ':' prompt prefix and the
         // cursor after it.
-        if (editor.mode == .prompt) editor.mode.prompt.shrinkRetainingCapacity(
-            @min(editor.mode.prompt.items.len, editor.viewport.col_count -| 2),
-        );
+        switch (editor.mode) {
+            .search, .prompt => |*text| text.shrinkRetainingCapacity(
+                @min(text.items.len, editor.viewport.col_count -| 2),
+            ),
+            .normal, .insert, .notify, .nosave => {},
+        }
     } else switch (editor.mode) {
         .normal => switch (event) {
             .ascii => |c| switch (c) {
@@ -254,13 +257,13 @@ pub fn tick(editor: *Editor, event: Event) error{
                 },
                 'z' => editor.centreCursorVertically(),
                 '/' => editor.mode = .{ .search = .initBuffer(editor.prompt_buffer) },
-                'n', 'N' => if (editor.cursor.anchor == null) {
+                'n', 'N' => if (editor.cursor.anchor == null and editor.search.items.len > 0) {
                     const cursor_next = if (c == 'n')
                         findNext(editor.document.items, editor.cursor.offset, editor.search.items)
                     else
                         findPrev(editor.document.items, editor.cursor.offset, editor.search.items);
                     if (cursor_next) |offset| {
-                        editor.cursor.update(editor.document.items, @intCast(offset), .snap_update);
+                        editor.cursor.update(editor.document.items, offset, .snap_update);
                         editor.centreCursorVertically();
                     }
                 },
@@ -611,10 +614,9 @@ fn render(editor: *const Editor, cursor: Position) error{WriteFailed}!void {
             }
             try writer.print(" {d},{d}", .{ cursor.line_number + 1, cursor.line_offset + 1 });
         },
-        // Prompt, nosave, and notify all take place of status line.
-        .prompt => |text| {
+        .search, .prompt => |text| {
             assert(text.items.len + 1 <= col_count);
-            try writer.writeByte(':');
+            try writer.writeByte(if (editor.mode == .prompt) ':' else '/');
             try writer.writeAll(text.items);
         },
         .nosave => {
@@ -627,11 +629,6 @@ fn render(editor: *const Editor, cursor: Position) error{WriteFailed}!void {
             inline for (std.enums.values(@TypeOf(message))) |field|
                 comptime assert(@tagName(field).len <= col_count_min);
             try writer.writeAll(@tagName(message));
-        },
-        .search => |text| {
-            assert(editor.search.items.len + 1 <= col_count);
-            try writer.writeByte('/');
-            try writer.writeAll(text.items);
         },
     }
 
@@ -2450,6 +2447,7 @@ test findPrev {
     try std.testing.expectEqual(0, findPrev("haha", 1, "ha"));
     try std.testing.expectEqual(0, findPrev("haha", 2, "ha"));
     try std.testing.expectEqual(2, findPrev("haha", 3, "ha"));
+    try std.testing.expectEqual(1, findPrev("haha", 2, "aha"));
 }
 
 fn offsetFromPosition(buffer: []const u8, line_number: u32, line_offset: u32) ?u32 {
